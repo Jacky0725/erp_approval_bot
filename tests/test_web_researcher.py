@@ -43,6 +43,21 @@ class WebResearcherTest(unittest.TestCase):
 
         self.assertEqual(urls, ["https://pubchem.ncbi.nlm.nih.gov/compound/14798"])
 
+    def test_pubchem_does_not_inject_queried_cas_into_raw_text(self) -> None:
+        class FakePubChem(WebResearcher):
+            def _fetch(self, url: str) -> str:
+                if "/cids/TXT" in url:
+                    return "12345"
+                if "/property/" in url:
+                    return '{"PropertyTable":{"Properties":[{"IUPACName":"Example"}]}}'
+                return '{"Record":{"Section":[]}}'
+
+        pages = FakePubChem()._pubchem_pages(query="example", cas="999-99-9")
+
+        self.assertEqual(len(pages), 1)
+        self.assertEqual(pages[0].queried_cas, "999-99-9")
+        self.assertNotIn("999-99-9", pages[0].raw_text)
+
 
 if __name__ == "__main__":
     unittest.main()

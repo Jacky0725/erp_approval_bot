@@ -8,7 +8,7 @@ from pathlib import Path
 ROOT_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT_DIR / "src"))
 
-from rule_engine import RuleEngine  # noqa: E402
+from rule_engine import Rule, RuleEngine  # noqa: E402
 
 
 class RuleEngineTest(unittest.TestCase):
@@ -61,6 +61,30 @@ class RuleEngineTest(unittest.TestCase):
 
         self.assertEqual(result["final_category"], "普通类")
         self.assertFalse(result["need_manual_review"])
+
+    def test_example_column_alone_does_not_classify(self) -> None:
+        engine = RuleEngine(
+            rules=[
+                Rule(
+                    category="易燃液体",
+                    explanation="source must explicitly say flammable liquid",
+                    examples="甲酸甲酯",
+                    explanation_keywords=("source must explicitly say flammable liquid",),
+                    example_keywords=("甲酸甲酯",),
+                )
+            ],
+            priority=["易燃液体"],
+        )
+
+        result = engine.classify(
+            {
+                "reagent_name": "4-溴-2-羟基-6-甲基苯甲酸甲酯",
+                "text": "Flash point 132.8 C. No source text says flammable liquid.",
+            }
+        )
+
+        self.assertTrue(result["need_manual_review"])
+        self.assertNotEqual(result["final_category"], "易燃液体")
 
 
 if __name__ == "__main__":

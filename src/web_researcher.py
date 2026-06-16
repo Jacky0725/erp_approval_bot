@@ -32,6 +32,7 @@ class ResearchPage:
     source_confidence: float
     evidence_quality: str
     search_query: str
+    queried_cas: str = ""
 
 
 @dataclass
@@ -87,8 +88,6 @@ class WebResearcher:
 
         chunks = [f"PubChem CID: {cid}", property_text[:4000], self._pubchem_view_to_text(view_text)[:8000]]
         raw_text = " ".join(chunk for chunk in chunks if chunk).strip()
-        if cas and cas not in raw_text:
-            raw_text = f"Queried CAS: {cas}. {raw_text}"
         if not raw_text:
             return []
 
@@ -100,6 +99,7 @@ class WebResearcher:
                 source_confidence=0.9,
                 evidence_quality=self._evidence_quality(raw_text, 0.9),
                 search_query=query,
+                queried_cas=cas,
             )
         ]
 
@@ -133,6 +133,7 @@ class WebResearcher:
                     source_confidence=confidence,
                     evidence_quality=self._evidence_quality(raw_text, confidence),
                     search_query=query,
+                    queried_cas=cas,
                 )
             )
         return pages

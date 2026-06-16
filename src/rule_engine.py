@@ -94,6 +94,9 @@ class RuleEngine:
                 if not toxic_hits:
                     example_hits = self._specific_example_hits(rule.example_keywords, reagent_info)
 
+            if not explanation_hits:
+                example_hits = self._exact_example_hits(rule.example_keywords, reagent_info)
+
             score = len(explanation_hits) * 2.0 + len(example_hits) * 0.8
             if score > 0:
                 matches[rule.category] = RuleMatch(
@@ -274,6 +277,21 @@ class RuleEngine:
             exact_name_hit = normalized == name_text
             long_name_hit = len(normalized) >= 3 and normalized in name_text
             if (exact_name_hit or long_name_hit) and keyword not in hits:
+                hits.append(keyword)
+        return hits
+
+    @staticmethod
+    def _exact_example_hits(keywords: tuple[str, ...], reagent_info: dict[str, Any]) -> list[str]:
+        name_values = []
+        for key in ("name", "reagent_name", "chemical_name"):
+            value = reagent_info.get(key)
+            if value:
+                name_values.append(str(value))
+        normalized_names = {RuleEngine._normalize_text(value) for value in name_values}
+        hits = []
+        for keyword in keywords:
+            normalized = RuleEngine._normalize_text(keyword)
+            if normalized and normalized in normalized_names and keyword not in hits:
                 hits.append(keyword)
         return hits
 
