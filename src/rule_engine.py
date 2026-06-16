@@ -86,7 +86,8 @@ class RuleEngine:
             explanation_hits = self._hits(rule.explanation_keywords, text)
             example_hits = self._specific_example_hits(rule.example_keywords, reagent_info)
             category_hits = self._category_suggestion_hits(rule.category, reagent_info)
-            explanation_hits = list(dict.fromkeys([*explanation_hits, *category_hits]))
+            halogen_hits = self._bromine_iodine_hits(rule.category, reagent_info)
+            explanation_hits = list(dict.fromkeys([*explanation_hits, *category_hits, *halogen_hits]))
 
             toxic_hits = self._toxic_threshold_hits(rule.category, text)
             if toxic_hits is not None:
@@ -155,8 +156,8 @@ class RuleEngine:
         return sorted(
             matches,
             key=lambda category: (
-                -matches[category].score,
                 rank.get(category, len(rank) + 100),
+                -matches[category].score,
             ),
         )
 
@@ -279,6 +280,37 @@ class RuleEngine:
             if (exact_name_hit or long_name_hit) and keyword not in hits:
                 hits.append(keyword)
         return hits
+
+    @staticmethod
+    def _bromine_iodine_hits(category: str, reagent_info: dict[str, Any]) -> list[str]:
+        if category != "\u6eb4\u7898\u7c7b":
+            return []
+
+        parts = []
+        for key in ("name", "reagent_name", "chemical_name", "text"):
+            value = reagent_info.get(key)
+            if value:
+                parts.append(str(value))
+        for value in reagent_info.get("evidence", []) or []:
+            parts.append(str(value))
+        text = " ".join(parts).lower()
+
+        hits = []
+        if "\u6eb4" in text:
+            hits.append("\u542b\u6eb4")
+        if "\u7898" in text:
+            hits.append("\u542b\u7898")
+        for token, label in (
+            ("bromo", "bromo"),
+            ("bromide", "bromide"),
+            ("bromine", "bromine"),
+            ("iodo", "iodo"),
+            ("iodide", "iodide"),
+            ("iodine", "iodine"),
+        ):
+            if token in text:
+                hits.append(label)
+        return list(dict.fromkeys(hits))
 
     @staticmethod
     def _exact_example_hits(keywords: tuple[str, ...], reagent_info: dict[str, Any]) -> list[str]:

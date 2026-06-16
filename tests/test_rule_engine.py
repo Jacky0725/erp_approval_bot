@@ -86,6 +86,19 @@ class RuleEngineTest(unittest.TestCase):
         self.assertTrue(result["need_manual_review"])
         self.assertNotEqual(result["final_category"], "易燃液体")
 
+    def test_bromine_iodine_priority_beats_flammable_liquid(self) -> None:
+        result = self.engine.classify(
+            {
+                "reagent_name": "4-\u6eb4-2-\u7f9f\u57fa-6-\u7532\u57fa\u82ef\u7532\u9178\u7532\u916f",
+                "text": "Flash point 50 C. Source says flammable liquid. bromo substituted compound.",
+                "suggested_categories": ["\u6eb4\u7898\u7c7b", "\u6613\u71c3\u6db2\u4f53"],
+                "allow_default_normal": True,
+            }
+        )
+
+        self.assertEqual(result["final_category"], "\u6eb4\u7898\u7c7b")
+        self.assertIn("\u6613\u71c3\u6db2\u4f53", result["matched_categories"])
+
 
 if __name__ == "__main__":
     unittest.main()
