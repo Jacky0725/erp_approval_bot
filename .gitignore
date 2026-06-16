@@ -5,3 +5,6 @@ __pycache__/
 data/logs/*.html
 data/logs/*.png
 data/logs/*.xlsx
+
+/data/
+/rules.xlsx
