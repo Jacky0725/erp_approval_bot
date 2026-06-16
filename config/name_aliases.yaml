@@ -1,0 +1,195 @@
+cas:
+  64-17-5:
+    standard_name: 乙醇
+    english_name: ethanol
+    aliases:
+    - 乙醇
+    - 酒精
+    - 无水乙醇
+    - ethanol
+    - ethyl alcohol
+    - EtOH
+  1310-73-2:
+    standard_name: 氢氧化钠
+    english_name: sodium hydroxide
+    aliases:
+    - 氢氧化钠
+    - 烧碱
+    - sodium hydroxide
+    - caustic soda
+    - NaOH
+  7647-01-0:
+    standard_name: 盐酸
+    english_name: hydrochloric acid
+    aliases:
+    - 盐酸
+    - hydrochloric acid
+    - HCl
+  7722-84-1:
+    standard_name: 过氧化氢
+    english_name: hydrogen peroxide
+    aliases:
+    - 过氧化氢
+    - 双氧水
+    - hydrogen peroxide
+    - H2O2
+  7732-18-5:
+    standard_name: 水
+    english_name: water
+    aliases:
+    - 水
+    - water
+    - H2O
+  10025-77-1:
+    standard_name: 六水合三氯化铁
+    english_name: Iron(III) chloride hexahydrate
+    source_url: https://www.chemsrc.com/cas/10025-77-1_825977.html
+    aliases:
+    - 六水合三氯亚铁
+    - 六水合三氯化铁
+    - 三氯化铁六水合物
+    - Iron(III) chloride hexahydrate
+  18868-43-4:
+    standard_name: 二氧化钼
+    english_name: Molybdenum dioxide
+    source_url: https://www.chemsrc.com/cas/18868-43-4_88297.html
+    aliases:
+    - 二氧化钼
+    - Molybdenum dioxide
+    - MoO2
+  10025-70-4:
+    standard_name: 六水合氯化锶
+    english_name: Strontium chloride hexahydrate
+    source_url: https://www.chemsrc.com/cas/10025-70-4_24787.html
+    aliases:
+    - 六水合氯化锶
+    - 氯化锶六水合物
+    - Strontium chloride hexahydrate
+aliases:
+  乙醇: 乙醇
+  无水乙醇: 乙醇
+  酒精: 乙醇
+  EtOH: 乙醇
+  ethanol: 乙醇
+  ethyl alcohol: 乙醇
+  氢氧化钠: 氢氧化钠
+  烧碱: 氢氧化钠
+  NaOH: 氢氧化钠
+  sodium hydroxide: 氢氧化钠
+  caustic soda: 氢氧化钠
+  盐酸: 盐酸
+  HCl: 盐酸
+  hydrochloric acid: 盐酸
+  过氧化氢: 过氧化氢
+  双氧水: 过氧化氢
+  H2O2: 过氧化氢
+  hydrogen peroxide: 过氧化氢
+  水: 水
+  H2O: 水
+  water: 水
+  ???????:
+    standard_name: ??????
+    cas: 10025-70-4
+    english_name: Strontium chloride hexahydrate
+    source_url: https://www.chemsrc.com/cas/10025-70-4_24787.html
+    source: manual_verified
+    confidence: 1.0
+  ????????:
+    standard_name: ???????
+    cas: 10025-77-1
+    english_name: Iron(III) chloride hexahydrate
+    source_url: https://www.chemsrc.com/cas/10025-77-1_825977.html
+    source: manual_verified
+    confidence: 1.0
+  Iron(III) chloride hexahydrate:
+    standard_name: 六水合三氯化铁
+    cas: 10025-77-1
+    english_name: Iron(III) chloride hexahydrate
+    source_url: https://www.chemsrc.com/cas/10025-77-1_825977.html
+    source: manual_verified
+    confidence: 1.0
+  ????:
+    standard_name: ????
+    cas: 18868-43-4
+    english_name: Molybdenum dioxide
+    source_url: https://www.chemsrc.com/cas/18868-43-4_88297.html
+    source: manual_verified
+    confidence: 1.0
+  Molybdenum dioxide:
+    standard_name: 二氧化钼
+    cas: 18868-43-4
+    english_name: Molybdenum dioxide
+    source_url: https://www.chemsrc.com/cas/18868-43-4_88297.html
+    source: manual_verified
+    confidence: 1.0
+  MoO2:
+    standard_name: 二氧化钼
+    cas: 18868-43-4
+    english_name: Molybdenum dioxide
+    source_url: https://www.chemsrc.com/cas/18868-43-4_88297.html
+    source: manual_verified
+    confidence: 1.0
+  ??????:
+    standard_name: ??????
+    cas: 10025-70-4
+    english_name: Strontium chloride hexahydrate
+    source_url: https://www.chemsrc.com/cas/10025-70-4_24787.html
+    source: manual_verified
+    confidence: 1.0
+  Strontium chloride hexahydrate:
+    standard_name: 六水合氯化锶
+    cas: 10025-70-4
+    english_name: Strontium chloride hexahydrate
+    source_url: https://www.chemsrc.com/cas/10025-70-4_24787.html
+    source: manual_verified
+    confidence: 1.0
+  六水合三氯亚铁:
+    standard_name: 六水合三氯化铁
+    cas: 10025-77-1
+    english_name: Iron(III) chloride hexahydrate
+    source_url: https://www.chemsrc.com/cas/10025-77-1_825977.html
+    source: manual_verified
+    confidence: 1.0
+  六水合三氯化铁:
+    standard_name: 六水合三氯化铁
+    cas: 10025-77-1
+    english_name: Iron(III) chloride hexahydrate
+    source_url: https://www.chemsrc.com/cas/10025-77-1_825977.html
+    source: manual_verified
+    confidence: 1.0
+  三氯化铁六水合物:
+    standard_name: 六水合三氯化铁
+    cas: 10025-77-1
+    english_name: Iron(III) chloride hexahydrate
+    source_url: https://www.chemsrc.com/cas/10025-77-1_825977.html
+    source: manual_verified
+    confidence: 1.0
+  二氧化钼:
+    standard_name: 二氧化钼
+    cas: 18868-43-4
+    english_name: Molybdenum dioxide
+    source_url: https://www.chemsrc.com/cas/18868-43-4_88297.html
+    source: manual_verified
+    confidence: 1.0
+  六水合氯化锶:
+    standard_name: 六水合氯化锶
+    cas: 10025-70-4
+    english_name: Strontium chloride hexahydrate
+    source_url: https://www.chemsrc.com/cas/10025-70-4_24787.html
+    source: manual_verified
+    confidence: 1.0
+  氯化锶六水合物:
+    standard_name: 六水合氯化锶
+    cas: 10025-70-4
+    english_name: Strontium chloride hexahydrate
+    source_url: https://www.chemsrc.com/cas/10025-70-4_24787.html
+    source: manual_verified
+    confidence: 1.0
+abbreviations:
+  NaOH: 氢氧化钠
+  HCl: 盐酸
+  H2O2: 过氧化氢
+  H2O: 水
+  EtOH: 乙醇
+  MeOH: 甲醇
+  AcOH: 乙酸
