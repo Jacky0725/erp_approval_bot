@@ -87,7 +87,10 @@ class RuleEngine:
             example_hits = self._specific_example_hits(rule.example_keywords, reagent_info)
             category_hits = self._category_suggestion_hits(rule.category, reagent_info)
             halogen_hits = self._bromine_iodine_hits(rule.category, reagent_info)
-            explanation_hits = list(dict.fromkeys([*explanation_hits, *category_hits, *halogen_hits]))
+            conditional_hits = self._conditional_rule_hits(rule.category, reagent_info)
+            explanation_hits = list(
+                dict.fromkeys([*explanation_hits, *category_hits, *halogen_hits, *conditional_hits])
+            )
 
             toxic_hits = self._toxic_threshold_hits(rule.category, text)
             if toxic_hits is not None:
@@ -156,6 +159,7 @@ class RuleEngine:
         return sorted(
             matches,
             key=lambda category: (
+                0 if RuleEngine._is_azide_explosive_match(category, matches[category]) else 1,
                 rank.get(category, len(rank) + 100),
                 -matches[category].score,
             ),
@@ -311,6 +315,62 @@ class RuleEngine:
             if token in text:
                 hits.append(label)
         return list(dict.fromkeys(hits))
+
+    @staticmethod
+    def _is_azide_explosive_match(category: str, match: RuleMatch) -> bool:
+        if category != "\u6613\u7206\u7c7b":
+            return False
+        return any(
+            token in str(hit).lower()
+            for hit in match.explanation_hits
+            for token in ("\u53e0\u6c2e", "\u53e0\u5316", "azide")
+        )
+
+    @staticmethod
+    def _conditional_rule_hits(category: str, reagent_info: dict[str, Any]) -> list[str]:
+        text = RuleEngine._raw_reagent_text(reagent_info).lower()
+        hits: list[str] = []
+
+        if category == "\u6613\u7206\u7c7b" and RuleEngine._contains_azide(text):
+            hits.append("\u53e0\u6c2e/\u53e0\u5316/azide")
+
+        if RuleEngine._contains_perchloric_acid(text):
+            concentration = RuleEngine._first_percent_concentration(text)
+            if category == "\u6613\u7206\u7c7b" and (concentration is None or concentration > 72.0):
+                hits.append("\u9ad8\u6c2f\u9178>72%\u6216\u672a\u6807\u6ce8\u6d53\u5ea6")
+            if category == "\u7279\u6b8a\u9178" and concentration is not None and concentration < 72.0:
+                hits.append("\u9ad8\u6c2f\u9178<72%")
+
+        return hits
+
+    @staticmethod
+    def _raw_reagent_text(reagent_info: dict[str, Any]) -> str:
+        values: list[str] = []
+        for key in ("name", "reagent_name", "chemical_name", "text", "suggested_categories", "evidence"):
+            value = reagent_info.get(key)
+            if isinstance(value, list):
+                values.extend(str(item) for item in value)
+            elif value is not None:
+                values.append(str(value))
+        return " ".join(values)
+
+    @staticmethod
+    def _contains_azide(text: str) -> bool:
+        return any(token in text for token in ("\u53e0\u6c2e", "\u53e0\u5316", "azide"))
+
+    @staticmethod
+    def _contains_perchloric_acid(text: str) -> bool:
+        return "\u9ad8\u6c2f\u9178" in text or "perchloric acid" in text
+
+    @staticmethod
+    def _first_percent_concentration(text: str) -> float | None:
+        match = re.search(r"(\d+(?:\.\d+)?)\s*%", text)
+        if not match:
+            return None
+        try:
+            return float(match.group(1))
+        except ValueError:
+            return None
 
     @staticmethod
     def _exact_example_hits(keywords: tuple[str, ...], reagent_info: dict[str, Any]) -> list[str]:

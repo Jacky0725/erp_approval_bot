@@ -99,6 +99,22 @@ class RuleEngineTest(unittest.TestCase):
         self.assertEqual(result["final_category"], "\u6eb4\u7898\u7c7b")
         self.assertIn("\u6613\u71c3\u6db2\u4f53", result["matched_categories"])
 
+    def test_azide_is_classified_as_explosive(self) -> None:
+        for name in ("\u53e0\u6c2e\u5316\u94a0", "\u53e0\u5316\u94a0", "sodium azide"):
+            with self.subTest(name=name):
+                result = self.engine.classify({"reagent_name": name, "text": name, "allow_default_normal": True})
+
+                self.assertEqual(result["final_category"], "\u6613\u7206\u7c7b")
+
+    def test_perchloric_acid_uses_concentration_threshold(self) -> None:
+        low = self.engine.classify({"reagent_name": "70%\u9ad8\u6c2f\u9178", "allow_default_normal": True})
+        high = self.engine.classify({"reagent_name": "75%\u9ad8\u6c2f\u9178", "allow_default_normal": True})
+        unknown = self.engine.classify({"reagent_name": "\u9ad8\u6c2f\u9178", "allow_default_normal": True})
+
+        self.assertEqual(low["final_category"], "\u7279\u6b8a\u9178")
+        self.assertEqual(high["final_category"], "\u6613\u7206\u7c7b")
+        self.assertEqual(unknown["final_category"], "\u6613\u7206\u7c7b")
+
 
 if __name__ == "__main__":
     unittest.main()
