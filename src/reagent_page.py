@@ -246,8 +246,21 @@ class ReagentPageMixin:
 
         sort_succeeded = self.sort_property_column_until_unmatched_visible(page)
         if not sort_succeeded:
-            print("Could not confirm global sorting with '-' first; sorted-page check failed.")
-            return []
+            current_unmatched = self.current_page_unmatched_reagents(page)
+            if not current_unmatched:
+                print(
+                    "Sorting did not show '-' in the first rows, and the current sorted page has no '-' rows; "
+                    "remaining pages are considered complete."
+                )
+                self.pagination_check_succeeded = True
+                return []
+            print(
+                "Sorting did not show '-' in the first rows, but current page still contains '-' rows; "
+                "auto-pass will be blocked by unmatched records."
+            )
+            self.pagination_check_succeeded = True
+            self.save_auto_pass_blocking_unmatched(current_unmatched)
+            return current_unmatched
 
         if not self.goto_first_reagent_page(page):
             return []
@@ -260,11 +273,7 @@ class ReagentPageMixin:
             visited_pages += 1
             current_page = self.current_reagent_page_number(page)
             reagents = self.read_current_page_reagents(page)
-            page_unmatched = [
-                record
-                for record in reagents
-                if record.get(property_key, "").strip() == "-"
-            ]
+            page_unmatched = self.unmatched_reagents_from_records(reagents)
             unmatched.extend(page_unmatched)
             print(
                 f"Checked reagent page {current_page or visited_pages}: "
@@ -289,14 +298,27 @@ class ReagentPageMixin:
                 raise RuntimeError("Stopped pagination check after 200 pages; page navigation may be stuck.")
 
         if unmatched:
-            output_path = self._log_dir() / "auto_pass_blocked_unmatched_reagents.xlsx"
-            output_path = self.write_excel_with_fallback(
-                pd.DataFrame(unmatched, columns=self.reagent_columns()),
-                output_path,
-            )
-            print(f"Saved unmatched reagent rows that blocked auto-pass: {output_path}")
+            self.save_auto_pass_blocking_unmatched(unmatched)
 
         return unmatched
+
+    def current_page_unmatched_reagents(self, page: Page) -> list[dict[str, str]]:
+        return self.unmatched_reagents_from_records(self.read_current_page_reagents(page))
+
+    @staticmethod
+    def unmatched_reagents_from_records(records: list[dict[str, str]]) -> list[dict[str, str]]:
+        property_key = "\u7269\u5316\u7279\u6027"
+        return [record for record in records if record.get(property_key, "").strip() == "-"]
+
+    def save_auto_pass_blocking_unmatched(self, unmatched: list[dict[str, str]]) -> None:
+        if not unmatched:
+            return
+        output_path = self._log_dir() / "auto_pass_blocked_unmatched_reagents.xlsx"
+        output_path = self.write_excel_with_fallback(
+            pd.DataFrame(unmatched, columns=self.reagent_columns()),
+            output_path,
+        )
+        print(f"Saved unmatched reagent rows that blocked auto-pass: {output_path}")
 
     def goto_first_reagent_page(self, page: Page) -> bool:
         first_page = page.locator(".ant-pagination-item-1").first
