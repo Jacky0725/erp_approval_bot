@@ -20,7 +20,6 @@ class ReagentPageMixin:
 
         print(f"Opening page: {target_name}")
         self.click_visible_text(page, target_name)
-        self.wait_for_home(page)
         self.wait_for_table_ready(page)
 
         try:

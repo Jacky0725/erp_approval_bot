@@ -80,8 +80,8 @@ class ErpSessionMixin:
 
                     with stage_logger.stage("login"):
                         self.login(page, username, password, log_dir)
-                    with stage_logger.stage("wait_for_home"):
-                        self.wait_for_home(page)
+                    with stage_logger.stage("wait_for_app_shell"):
+                        self.wait_for_app_shell(page)
 
                     if after_login:
                         with stage_logger.stage(getattr(after_login, "__name__", "after_login")):
@@ -246,6 +246,17 @@ class ErpSessionMixin:
             page.wait_for_selector("text=\u5e02\u573a\u7ba1\u7406", timeout=15000)
         except TimeoutError:
             print("Home menu text was not confirmed; continuing with current page.")
+
+    def wait_for_app_shell(self, page: Page) -> None:
+        try:
+            page.wait_for_load_state("domcontentloaded", timeout=8000)
+        except TimeoutError:
+            print("DOM content was not fully confirmed after login; continuing with current page.")
+
+        try:
+            page.wait_for_selector("text=\u8bd5\u5242\u7ba1\u7406, text=\u5e02\u573a\u7ba1\u7406", timeout=8000)
+        except TimeoutError:
+            print("ERP shell menu text was not confirmed; continuing so target page click can retry/fail explicitly.")
 
     def print_page_structure(self, page: Page) -> None:
         print("\n=== buttons ===")
