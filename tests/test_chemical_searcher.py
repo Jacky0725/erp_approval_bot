@@ -15,9 +15,10 @@ from web_researcher import ResearchPage  # noqa: E402
 
 
 class RecordingSearcher(ChemicalSearcher):
-    def __init__(self, *args: Any, succeed: bool = True, **kwargs: Any) -> None:
+    def __init__(self, *args: Any, succeed: bool = True, allow_fallback: bool = False, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self.succeed = succeed
+        self.allow_fallback = allow_fallback
         self.queries: list[str] = []
 
     def _search_chemsrc(
@@ -40,6 +41,11 @@ class RecordingSearcher(ChemicalSearcher):
         validation_names: list[str] | None = None,
     ) -> dict[str, Any] | None:
         self.queries.append(query)
+        return None
+
+    def _fallback_web_research(self, *args: Any, **kwargs: Any) -> dict[str, Any] | None:
+        if self.allow_fallback:
+            return super()._fallback_web_research(*args, **kwargs)
         return None
 
 
@@ -303,7 +309,7 @@ class ChemicalSearcherTest(unittest.TestCase):
                     )
                 ]
 
-        searcher = RecordingSearcher(root_dir=ROOT_DIR, succeed=False)
+        searcher = RecordingSearcher(root_dir=ROOT_DIR, succeed=False, allow_fallback=True)
         with patch("chemical_searcher.LlmExtractor", FakeExtractor), patch("chemical_searcher.WebResearcher", LowQualityResearcher):
             result = searcher.search("NaOH", cas="1310-73-2")
 

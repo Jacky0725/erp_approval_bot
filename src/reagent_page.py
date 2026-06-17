@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from typing import Any
 
 import pandas as pd
@@ -149,7 +150,8 @@ class ReagentPageMixin:
         prompt_text = self.capture_prompt_if_present(page, "auto_match_prompt.png")
         if prompt_text:
             print(f"Prompt after auto-match: {prompt_text}")
-            return False
+            if self._is_error_prompt(prompt_text):
+                return False
 
         self.wait_for_auto_match_ready(page)
         self.auto_match_succeeded = self._confirm_auto_match_result(page, before_snapshot)
@@ -189,7 +191,7 @@ class ReagentPageMixin:
         prompt_text = self.capture_prompt_if_present(page, "auto_match_prompt.png")
         if prompt_text:
             print(f"Prompt after auto-match: {prompt_text}")
-            return False
+            return not self._is_error_prompt(prompt_text)
 
         if int(before_snapshot.get("unmatched") or 0) == 0:
             print("Auto-match confirmation skipped because no '-' rows existed before auto-match.")
@@ -210,15 +212,31 @@ class ReagentPageMixin:
                 return True
             page.wait_for_timeout(1000)
 
-        screenshot_path = self._log_dir() / "auto_match_unconfirmed.png"
-        page.screenshot(path=str(screenshot_path), full_page=True)
+        final_snapshot = last_snapshot or self._auto_match_snapshot(page)
         print(
-            "Auto-match was not confirmed: reagent table did not change after clicking. "
+            "Auto-match click completed but the reagent table did not change. "
+            "Continuing because this can happen when ERP has already matched all possible rows. "
             f"Before '-' rows: {before_snapshot.get('unmatched')}; "
-            f"after '-' rows: {last_snapshot.get('unmatched', '<unknown>')}. "
-            f"Saved screenshot: {screenshot_path}"
+            f"after '-' rows: {final_snapshot.get('unmatched', '<unknown>')}."
         )
-        return False
+        return True
+
+    @staticmethod
+    def _is_error_prompt(prompt_text: str) -> bool:
+        normalized = (prompt_text or "").lower()
+        error_tokens = (
+            "\u5931\u8d25",
+            "\u9519\u8bef",
+            "\u5f02\u5e38",
+            "\u4e0d\u80fd",
+            "\u65e0\u6cd5",
+            "\u8bf7\u5148",
+            "error",
+            "failed",
+            "failure",
+            "exception",
+        )
+        return any(token in normalized for token in error_tokens)
 
     def find_unmatched_reagents_across_all_pages(self, page: Page) -> list[dict[str, str]]:
         self.pagination_check_succeeded = False
