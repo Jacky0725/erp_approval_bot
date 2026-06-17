@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+import re
 from typing import Any
 
 import pandas as pd
@@ -125,9 +126,75 @@ class ReagentPageMixin:
             print(f"{key}: {value}")
         return True
 
+    def open_task_detail_by_list_number(self, page: Page, target_list_number: str) -> bool:
+        self.enter_reagent_judgement_page(page)
+        target_list_number = str(target_list_number or "").strip()
+        if not target_list_number:
+            raise RuntimeError("Target reagent list number is empty.")
+
+        tasks = self.read_todo_tasks(page)
+        if not tasks:
+            print("No todo tasks found; target detail page was not opened.")
+            return False
+
+        list_number_key = "\u8bd5\u5242\u6e05\u5355\u53f7"
+        customer_name_key = "\u5ba2\u6237\u540d\u79f0"
+        approval_state_key = "\u6280\u672f\u5ba1\u6279\u72b6\u6001"
+        applicant_key = "\u7533\u8bf7\u4eba"
+
+        matched_index = next(
+            (
+                index
+                for index, task in enumerate(tasks)
+                if self.extract_list_number(task.get(list_number_key, "")) == target_list_number
+            ),
+            None,
+        )
+        if matched_index is None:
+            print(f"Target task was not found in current todo page: {target_list_number}")
+            print("Current todo task list numbers:")
+            for task in tasks:
+                print(f"- {task.get(list_number_key, '')}")
+            return False
+
+        target_task = tasks[matched_index]
+        target_row = page.locator("tbody tr.ant-table-row").nth(matched_index)
+        detail_button = target_row.locator("button").filter(has_text="\u8be6\u60c5").first
+
+        if not detail_button.count():
+            raise RuntimeError(f"Could not find detail button for target task: {target_list_number}")
+
+        print(f"Opening target task detail: {target_list_number}")
+        detail_button.click()
+        self.wait_for_detail_ready(page, target_task)
+
+        detail_info = self.read_detail_info(page)
+        merged_info = {
+            "\u5f53\u524d\u6e05\u5355\u53f7": detail_info.get("\u5f53\u524d\u6e05\u5355\u53f7") or target_task.get(list_number_key, ""),
+            customer_name_key: detail_info.get(customer_name_key) or target_task.get(customer_name_key, ""),
+            "\u72b6\u6001": detail_info.get("\u72b6\u6001") or target_task.get(approval_state_key, ""),
+            applicant_key: detail_info.get(applicant_key) or target_task.get(applicant_key, ""),
+        }
+
+        print("Task detail:")
+        for key, value in merged_info.items():
+            print(f"{key}: {value}")
+        return True
+
+    @staticmethod
+    def extract_list_number(value: str) -> str:
+        text = str(value or "").strip()
+        match = re.search(r"SJ\d+", text, flags=re.I)
+        return match.group(0) if match else text
+
     def perform_auto_match(self, page: Page) -> bool:
         self.auto_match_succeeded = False
-        if not self.open_first_task_detail(page):
+        target_list_number = str(getattr(self, "target_list_number", "") or "").strip()
+        if target_list_number:
+            detail_opened = self.open_task_detail_by_list_number(page, target_list_number)
+        else:
+            detail_opened = self.open_first_task_detail(page)
+        if not detail_opened:
             return False
 
         self.wait_for_reagent_table_ready(page)

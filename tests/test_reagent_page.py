@@ -101,6 +101,20 @@ class ReagentPageAutoMatchTest(unittest.TestCase):
         self.assertTrue(bot.pagination_check_succeeded)
         self.assertEqual(bot.saved_unmatched, result)
 
+    def test_target_detail_not_found_does_not_open_first_task(self) -> None:
+        class Bot(ReagentPageMixin):
+            def enter_reagent_judgement_page(self, page: FakePage) -> None:
+                return None
+
+            def read_todo_tasks(self, page: FakePage) -> list[dict[str, str]]:
+                return [{"\u8bd5\u5242\u6e05\u5355\u53f7": "SJ0001"}]
+
+        bot = Bot()
+        self.assertFalse(bot.open_task_detail_by_list_number(FakePage(), "SJ9999"))
+
+    def test_extract_list_number_ignores_urgent_suffix(self) -> None:
+        self.assertEqual(ReagentPageMixin.extract_list_number("SJ202606170003 \u52a0\u6025"), "SJ202606170003")
+
 
 if __name__ == "__main__":
     unittest.main()

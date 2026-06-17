@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import yaml
@@ -22,6 +23,7 @@ def main() -> None:
     settings = load_settings()
 
     browser_bot = BrowserBot(settings=settings, root_dir=ROOT_DIR)
+    browser_bot.target_list_number = os.getenv("TARGET_LIST_NUMBER", "").strip()
     browser_bot.run_semi_auto_approval_suggestions()
 
 
