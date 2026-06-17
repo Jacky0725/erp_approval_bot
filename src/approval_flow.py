@@ -11,6 +11,7 @@ from chemical_searcher import ChemicalSearcher
 from llm_extractor import LlmExtractor
 from rule_engine import RuleEngine
 from rule_maintainer import RuleMaintainer
+from stage_logger import StageLogger
 
 
 class ApprovalFlowMixin:
@@ -79,27 +80,34 @@ class ApprovalFlowMixin:
         )
 
     def generate_approval_suggestions(self, page: Page) -> None:
+        stage_logger = getattr(self, "stage_logger", None) or StageLogger()
+        self.stage_logger = stage_logger
         self.save_results = []
         self.auto_match_succeeded = False
         self.pagination_check_succeeded = False
-        if not self.perform_auto_match(page):
-            print("Semi-auto approval suggestions stopped because no detail page or auto-match result is available.")
-            return
-        self.wait_for_reagent_table_ready(page)
-        self._current_detail_info = self.read_detail_info(page)
+        with stage_logger.stage("perform_auto_match"):
+            if not self.perform_auto_match(page):
+                print("Semi-auto approval suggestions stopped because no detail page or auto-match result is available.")
+                return
+        with stage_logger.stage("wait_reagent_table_ready"):
+            self.wait_for_reagent_table_ready(page)
+        with stage_logger.stage("read_detail_info"):
+            self._current_detail_info = self.read_detail_info(page)
 
         property_key = "\u7269\u5316\u7279\u6027"
         name_key = "\u8bd5\u5242\u540d\u79f0"
         cas_key = "CAS\u53f7"
-        sort_succeeded = self.sort_property_column_until_unmatched_visible(page)
+        with stage_logger.stage("sort_property_column"):
+            sort_succeeded = self.sort_property_column_until_unmatched_visible(page)
         if not sort_succeeded:
             print("Sorting did not bring '-' into the first rows within 4 clicks; reading current page '-' rows anyway.")
 
-        unmatched_reagents = [
-            record
-            for record in self.read_current_page_reagents(page)
-            if record.get(property_key, "").strip() == "-"
-        ]
+        with stage_logger.stage("read_current_page_unmatched"):
+            unmatched_reagents = [
+                record
+                for record in self.read_current_page_reagents(page)
+                if record.get(property_key, "").strip() == "-"
+            ]
 
         print(f"Found {len(unmatched_reagents)} current-page reagent row(s) with physicochemical property '-'.")
 
@@ -113,29 +121,34 @@ class ApprovalFlowMixin:
         for index, reagent in enumerate(unmatched_reagents, start=1):
             reagent_name = reagent.get(name_key, "").strip()
             cas = reagent.get(cas_key, "").strip()
-            print(f"Processing reagent {index}/{len(unmatched_reagents)}: {reagent_name} / {cas}")
+            stage_logger.event(f"Processing reagent {index}/{len(unmatched_reagents)}: {reagent_name} / {cas}")
 
-            search_result = searcher.search(
-                reagent_name,
-                cas=cas,
-                specification=reagent.get("\u89c4\u683c", ""),
-                unit=reagent.get("\u89c4\u683c\u5355\u4f4d", ""),
-            )
+            with stage_logger.stage("chemical_search", f"{index}/{len(unmatched_reagents)} {reagent_name}"):
+                search_result = searcher.search(
+                    reagent_name,
+                    cas=cas,
+                    specification=reagent.get("\u89c4\u683c", ""),
+                    unit=reagent.get("\u89c4\u683c\u5355\u4f4d", ""),
+                )
             name_result = search_result.get("name_normalization", {})
             self.mark_duplicate_search_url_if_needed(reagent, search_result, seen_search_urls)
             search_name = search_result.get("name") or name_result.get("standard_name") or name_result.get("cleaned_name") or reagent_name
             search_cas = search_result.get("cas") or name_result.get("cas") or cas
             if search_result.get("need_manual_review"):
-                self.add_manual_review_item_from_search_failure(reagent, name_result, search_result)
-            extracted = extractor.extract_properties(
-                raw_text=search_result.get("raw_text", ""),
-                name=f"{reagent_name} / {search_result.get('name') or str(search_name)}",
-                cas=search_result.get("cas") or str(search_cas),
-            )
-            classification = rule_engine.classify(self._classification_input(reagent, search_result, extracted))
+                with stage_logger.stage("add_manual_review_item", reagent_name):
+                    self.add_manual_review_item_from_search_failure(reagent, name_result, search_result)
+            with stage_logger.stage("llm_extract", f"{index}/{len(unmatched_reagents)} {reagent_name}"):
+                extracted = extractor.extract_properties(
+                    raw_text=search_result.get("raw_text", ""),
+                    name=f"{reagent_name} / {search_result.get('name') or str(search_name)}",
+                    cas=search_result.get("cas") or str(search_cas),
+                )
+            with stage_logger.stage("rule_classify", reagent_name):
+                classification = rule_engine.classify(self._classification_input(reagent, search_result, extracted))
             try:
-                if rule_maintainer.record_candidate(reagent, name_result, search_result, extracted, classification):
-                    print(f"Recorded pending rule candidate: {reagent_name}")
+                with stage_logger.stage("record_rule_candidate", reagent_name):
+                    if rule_maintainer.record_candidate(reagent, name_result, search_result, extracted, classification):
+                        print(f"Recorded pending rule candidate: {reagent_name}")
             except Exception as error:
                 print(f"Could not record rule candidate for {reagent_name}: {error}")
             suggestions.append(
@@ -143,14 +156,16 @@ class ApprovalFlowMixin:
             )
 
         output_path = self._log_dir() / "approval_suggestions.xlsx"
-        output_path = self.write_excel_with_fallback(
-            pd.DataFrame(suggestions, columns=self.approval_suggestion_columns()),
-            output_path,
-        )
+        with stage_logger.stage("write_approval_suggestions"):
+            output_path = self.write_excel_with_fallback(
+                pd.DataFrame(suggestions, columns=self.approval_suggestion_columns()),
+                output_path,
+            )
         print(f"Saved approval suggestions: {output_path}")
         self.record_save_result("local_approval_suggestions", True, str(output_path))
 
-        self.try_auto_pass_current_task(page)
+        with stage_logger.stage("try_auto_pass_current_task"):
+            self.try_auto_pass_current_task(page)
 
     def _classification_input(
         self,

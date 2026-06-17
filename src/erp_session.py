@@ -7,6 +7,8 @@ from typing import Any
 
 from playwright.sync_api import Error, Locator, Page, TimeoutError, sync_playwright
 
+from stage_logger import StageLogger
+
 
 USERNAME_SELECTORS = [
     "input[name='username']",
@@ -45,6 +47,8 @@ LOGIN_BUTTON_SELECTORS = [
 class ErpSessionMixin:
 
     def run_after_login_capture(self, screenshot_name: str, html_name: str, after_login: Any | None) -> None:
+        stage_logger = getattr(self, "stage_logger", None) or StageLogger()
+        self.stage_logger = stage_logger
         erp_url = os.getenv("ERP_URL")
         username = os.getenv("ERP_USERNAME")
         password = os.getenv("ERP_PASSWORD")
@@ -70,18 +74,22 @@ class ErpSessionMixin:
                 page.set_default_timeout(int(browser_settings.get("timeout_ms", 30000)))
 
                 try:
-                    print(f"Opening ERP login page: {erp_url}")
-                    print(f"Browser session attempt {attempt}/3")
-                    self.open_login_page(page, erp_url)
+                    stage_logger.event(f"Browser session attempt {attempt}/3")
+                    with stage_logger.stage("open_login_page", erp_url):
+                        self.open_login_page(page, erp_url)
 
-                    self.login(page, username, password, log_dir)
-                    self.wait_for_home(page)
+                    with stage_logger.stage("login"):
+                        self.login(page, username, password, log_dir)
+                    with stage_logger.stage("wait_for_home"):
+                        self.wait_for_home(page)
 
                     if after_login:
-                        after_login(page)
+                        with stage_logger.stage(getattr(after_login, "__name__", "after_login")):
+                            after_login(page)
 
-                    page.screenshot(path=str(screenshot_path), full_page=True)
-                    html_path.write_text(page.content(), encoding="utf-8")
+                    with stage_logger.stage("save_final_capture"):
+                        page.screenshot(path=str(screenshot_path), full_page=True)
+                        html_path.write_text(page.content(), encoding="utf-8")
 
                     print(f"Saved homepage screenshot: {screenshot_path}")
                     print(f"Saved homepage HTML: {html_path}")

@@ -11,6 +11,8 @@ llm:
   provider: siliconflow
   base_url: https://api.siliconflow.cn/v1
   model: deepseek-ai/DeepSeek-V3.2
+  timeout_seconds: 45
+  max_retries: 1
 
 paths:
   rules_excel: config/rules.xlsx

@@ -79,6 +79,16 @@ class LlmExtractor:
             or llm_settings.get("base_url")
             or "https://api.siliconflow.cn/v1"
         )
+        self.timeout_seconds = float(
+            os.getenv("LLM_TIMEOUT_SECONDS")
+            or llm_settings.get("timeout_seconds")
+            or 45
+        )
+        self.max_retries = int(
+            os.getenv("LLM_MAX_RETRIES")
+            or llm_settings.get("max_retries")
+            or 1
+        )
         self.api_key_env = "SILICONFLOW_API_KEY" if self.provider == "siliconflow" else "OPENAI_API_KEY"
         self.client: OpenAI | None = None
 
@@ -125,7 +135,12 @@ class LlmExtractor:
                 or os.getenv("LLM_API_KEY")
                 or os.getenv("OPENAI_API_KEY")
             )
-            self.client = OpenAI(api_key=api_key, base_url=self.base_url)
+            self.client = OpenAI(
+                api_key=api_key,
+                base_url=self.base_url,
+                timeout=self.timeout_seconds,
+                max_retries=self.max_retries,
+            )
         return self.client
 
     def extract_reagent_fields(self, text: str) -> dict[str, Any]:
