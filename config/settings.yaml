@@ -14,6 +14,8 @@ llm:
 
 paths:
   rules_excel: config/rules.xlsx
+  structured_rules_excel: config/rules_structured.xlsx
+  rule_candidates_excel: config/rule_candidates.xlsx
   name_aliases_yaml: config/name_aliases.yaml
   review_queue_excel: data/review_queue.xlsx
   audit_log_dir: data/logs

@@ -5,6 +5,7 @@ __pycache__/
 data/logs/*.html
 data/logs/*.png
 data/logs/*.xlsx
+config/rule_candidates.xlsx
 
 /data/
 /rules.xlsx

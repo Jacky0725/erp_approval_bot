@@ -39,8 +39,75 @@ class RuleEngine:
     @classmethod
     def from_settings(cls, settings: dict[str, Any], root_dir: Path) -> "RuleEngine":
         paths = settings.get("paths", {})
+        structured_path = root_dir / paths.get("structured_rules_excel", "config/rules_structured.xlsx")
+        if structured_path.exists():
+            return cls.from_structured_excel(structured_path)
         rules_path = root_dir / paths.get("rules_excel", "config/rules.xlsx")
         return cls.from_excel(rules_path)
+
+    @classmethod
+    def from_structured_excel(cls, rules_path: str | Path) -> "RuleEngine":
+        categories = pd.read_excel(rules_path, sheet_name="categories", engine="openpyxl").fillna("")
+        rules_raw = pd.read_excel(rules_path, sheet_name="rules", engine="openpyxl").fillna("")
+        try:
+            examples_raw = pd.read_excel(rules_path, sheet_name="examples", engine="openpyxl").fillna("")
+        except ValueError:
+            examples_raw = pd.DataFrame()
+
+        categories = cls._enabled_rows(categories)
+        rules_raw = cls._enabled_rows(rules_raw)
+        examples_raw = cls._enabled_rows(examples_raw)
+
+        priority = [
+            str(row["category"]).strip()
+            for _, row in categories.sort_values("priority", kind="stable").iterrows()
+            if str(row.get("category", "")).strip()
+        ]
+
+        rule_entries: list[Rule] = []
+        for category in priority:
+            category_rules = rules_raw[rules_raw["category"].astype(str).str.strip() == category]
+            category_examples = (
+                examples_raw[examples_raw["category"].astype(str).str.strip() == category]
+                if not examples_raw.empty and "category" in examples_raw.columns
+                else pd.DataFrame()
+            )
+            explanation = "\n".join(
+                str(value).strip()
+                for value in category_rules.get("description", pd.Series(dtype=str)).tolist()
+                if str(value).strip()
+            )
+            explanation_keywords = tuple(
+                str(row.get("pattern", "")).strip()
+                for _, row in category_rules.iterrows()
+                if str(row.get("pattern", "")).strip()
+                and not cls._structured_condition_requires_special_handling(str(row.get("condition", "")))
+            )
+            examples = "\n".join(
+                str(value).strip()
+                for value in category_examples.get("example_name", pd.Series(dtype=str)).tolist()
+                if str(value).strip()
+            )
+            example_keywords = tuple(
+                str(value).strip()
+                for value in category_examples.get("example_name", pd.Series(dtype=str)).tolist()
+                if str(value).strip()
+            )
+            if explanation_keywords or example_keywords:
+                rule_entries.append(
+                    Rule(
+                        category=category,
+                        explanation=explanation,
+                        examples=examples,
+                        explanation_keywords=explanation_keywords,
+                        example_keywords=example_keywords,
+                    )
+                )
+
+        for rule in rule_entries:
+            if rule.category not in priority:
+                priority.append(rule.category)
+        return cls(rules=rule_entries, priority=priority)
 
     @classmethod
     def from_excel(cls, rules_path: str | Path) -> "RuleEngine":
@@ -75,6 +142,18 @@ class RuleEngine:
         ]
         priority = cls._priority_from_remarks(remarks, [rule.category for rule in rules])
         return cls(rules=rules, priority=priority)
+
+    @staticmethod
+    def _enabled_rows(dataframe: pd.DataFrame) -> pd.DataFrame:
+        if dataframe.empty or "enabled" not in dataframe.columns:
+            return dataframe
+        enabled = dataframe["enabled"].astype(str).str.strip().str.lower().isin({"true", "1", "yes", "y"})
+        return dataframe[enabled]
+
+    @staticmethod
+    def _structured_condition_requires_special_handling(condition: str) -> bool:
+        normalized = str(condition).strip().lower()
+        return bool(normalized and normalized != "any" and "concentration" in normalized)
 
     def classify(self, reagent_info: dict[str, Any]) -> dict[str, Any]:
         text = self._reagent_text(reagent_info)

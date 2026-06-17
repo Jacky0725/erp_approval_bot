@@ -10,6 +10,7 @@ import pandas as pd
 from chemical_searcher import ChemicalSearcher
 from llm_extractor import LlmExtractor
 from rule_engine import RuleEngine
+from rule_maintainer import RuleMaintainer
 
 
 class ApprovalFlowMixin:
@@ -105,6 +106,7 @@ class ApprovalFlowMixin:
         searcher = ChemicalSearcher(settings=self.settings, root_dir=self.root_dir)
         extractor = LlmExtractor(settings=self.settings)
         rule_engine = RuleEngine.from_settings(self.settings, self.root_dir)
+        rule_maintainer = RuleMaintainer.from_settings(self.settings, self.root_dir)
         suggestions: list[dict[str, Any]] = []
         seen_search_urls: dict[str, str] = {}
 
@@ -131,6 +133,11 @@ class ApprovalFlowMixin:
                 cas=search_result.get("cas") or str(search_cas),
             )
             classification = rule_engine.classify(self._classification_input(reagent, search_result, extracted))
+            try:
+                if rule_maintainer.record_candidate(reagent, name_result, search_result, extracted, classification):
+                    print(f"Recorded pending rule candidate: {reagent_name}")
+            except Exception as error:
+                print(f"Could not record rule candidate for {reagent_name}: {error}")
             suggestions.append(
                 self._approval_suggestion_row(reagent, name_result, search_result, extracted, classification)
             )
