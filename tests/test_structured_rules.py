@@ -57,6 +57,34 @@ class StructuredRulesTest(unittest.TestCase):
 
         self.assertEqual(result["final_category"], "\u6eb4\u7898\u7c7b")
 
+    def test_bromine_iodine_does_not_match_raw_text_noise(self) -> None:
+        result = self.engine.classify(
+            {
+                "reagent_name": "\u987a\u5f0f-3-\u7f9f\u57fa\u73af\u4e01\u57fa\u7fa7\u9178\u7532\u916f",
+                "standard_name": "\u987a\u5f0f-3-\u7f9f\u57fa\u73af\u4e01\u57fa\u7fa7\u9178\u7532\u916f",
+                "english_name": "methyl cis-3-hydroxycyclobutane carboxylate",
+                "text": "web page footer mentions bromo bromide iodide unrelated terms",
+                "evidence": ["bromide was found in an unrelated navigation block"],
+                "allow_default_normal": True,
+            }
+        )
+
+        self.assertNotEqual(result["final_category"], "\u6eb4\u7898\u7c7b")
+
+    def test_hydrochloride_salt_does_not_match_special_acid(self) -> None:
+        result = self.engine.classify(
+            {
+                "reagent_name": "(S)-1-\u6c28\u57fa\u7425\u73c0\u91784-\u7532\u916f\u53d4\u4e01\u916f\u76d0\u9178\u76d0",
+                "standard_name": "(S)-1-\u6c28\u57fa\u7425\u73c0\u91784-\u7532\u916f\u53d4\u4e01\u916f\u76d0\u9178\u76d0",
+                "english_name": "(S)-1-amino succinic acid methyl tert-butyl ester hydrochloride",
+                "suggested_categories": ["\u7279\u6b8a\u9178"],
+                "text": "hydrochloride salt. source mentions hydrochloric acid in unrelated context.",
+                "allow_default_normal": True,
+            }
+        )
+
+        self.assertNotEqual(result["final_category"], "\u7279\u6b8a\u9178")
+
 
 if __name__ == "__main__":
     unittest.main()

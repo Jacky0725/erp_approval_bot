@@ -544,6 +544,23 @@ class ReagentPageMixin:
 
         return None
 
+    def find_reagent_row_by_sequence(self, page: Page, sequence: str) -> Locator | None:
+        sequence = str(sequence or "").strip()
+        if not sequence:
+            return None
+
+        rows = page.locator("tbody tr.ant-table-row")
+        count = rows.count()
+        for index in range(count):
+            row = rows.nth(index)
+            cells = row.locator("td")
+            try:
+                if cells.count() > 1 and self.safe_inner_text(cells.nth(1)).strip() == sequence:
+                    return row
+            except Error:
+                continue
+        return None
+
     def wait_for_property_editor_ready(self, page: Page) -> None:
         try:
             page.wait_for_selector(".ant-modal:visible, .ant-drawer:visible, .ant-form:visible, tbody tr.ant-table-row", timeout=15000)

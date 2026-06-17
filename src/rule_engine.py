@@ -162,7 +162,10 @@ class RuleEngine:
 
         matches: dict[str, RuleMatch] = {}
         for rule in self.rules:
-            explanation_hits = self._hits(rule.explanation_keywords, text)
+            if rule.category == "\u6eb4\u7898\u7c7b":
+                explanation_hits = []
+            else:
+                explanation_hits = self._hits(rule.explanation_keywords, text)
             example_hits = self._specific_example_hits(rule.example_keywords, reagent_info)
             category_hits = self._category_suggestion_hits(rule.category, reagent_info)
             halogen_hits = self._bromine_iodine_hits(rule.category, reagent_info)
@@ -325,6 +328,11 @@ class RuleEngine:
 
     @staticmethod
     def _category_suggestion_hits(category: str, reagent_info: dict[str, Any]) -> list[str]:
+        if category == "\u7279\u6b8a\u9178" and RuleEngine._is_hydrochloride_salt(reagent_info):
+            return []
+        if category == "\u6eb4\u7898\u7c7b":
+            return []
+
         suggested = reagent_info.get("suggested_categories", [])
         if isinstance(suggested, str):
             suggested_values = re.split(r"[,，;；\n]+", suggested)
@@ -370,12 +378,10 @@ class RuleEngine:
             return []
 
         parts = []
-        for key in ("name", "reagent_name", "chemical_name", "text"):
+        for key in ("name", "reagent_name", "chemical_name", "standard_name", "cleaned_name", "english_name"):
             value = reagent_info.get(key)
             if value:
                 parts.append(str(value))
-        for value in reagent_info.get("evidence", []) or []:
-            parts.append(str(value))
         text = " ".join(parts).lower()
 
         hits = []
@@ -410,6 +416,9 @@ class RuleEngine:
         text = RuleEngine._raw_reagent_text(reagent_info).lower()
         hits: list[str] = []
 
+        if category == "\u7279\u6b8a\u9178" and RuleEngine._is_hydrochloride_salt(reagent_info):
+            return []
+
         if category == "\u6613\u7206\u7c7b" and RuleEngine._contains_azide(text):
             hits.append("\u53e0\u6c2e/\u53e0\u5316/azide")
 
@@ -440,6 +449,16 @@ class RuleEngine:
     @staticmethod
     def _contains_perchloric_acid(text: str) -> bool:
         return "\u9ad8\u6c2f\u9178" in text or "perchloric acid" in text
+
+    @staticmethod
+    def _is_hydrochloride_salt(reagent_info: dict[str, Any]) -> bool:
+        name_text = RuleEngine._normalize_text(
+            " ".join(
+                str(reagent_info.get(key) or "")
+                for key in ("name", "reagent_name", "chemical_name", "standard_name", "cleaned_name", "english_name")
+            )
+        )
+        return "\u76d0\u9178\u76d0" in name_text or "hydrochloride" in name_text
 
     @staticmethod
     def _first_percent_concentration(text: str) -> float | None:

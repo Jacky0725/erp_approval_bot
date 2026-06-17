@@ -24,6 +24,8 @@ paths:
 
 approval:
   default_action: manual_review
+  write_mode: disabled
+  write_min_confidence: 0.8
   allowed_actions:
     - approve
     - reject

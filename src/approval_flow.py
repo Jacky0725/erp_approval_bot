@@ -7,6 +7,7 @@ from playwright.sync_api import Error, Locator, Page
 
 import pandas as pd
 
+from approval_writer import ApprovalWriter
 from chemical_searcher import ChemicalSearcher
 from llm_extractor import LlmExtractor
 from rule_engine import RuleEngine
@@ -73,11 +74,20 @@ class ApprovalFlowMixin:
         )
 
     def run_semi_auto_approval_suggestions(self) -> None:
+        after_login = (
+            self.generate_all_todo_approval_suggestions
+            if self.process_all_todos_enabled()
+            else self.generate_approval_suggestions
+        )
         self.run_after_login_capture(
             screenshot_name="after_auto_match.png",
             html_name="after_auto_match.html",
-            after_login=self.generate_approval_suggestions,
+            after_login=after_login,
         )
+
+    def process_all_todos_enabled(self) -> bool:
+        value = os.getenv("PROCESS_ALL_TODOS", "")
+        return value.strip().lower() in {"1", "true", "yes", "y", "on"}
 
     def generate_approval_suggestions(self, page: Page) -> None:
         stage_logger = getattr(self, "stage_logger", None) or StageLogger()
@@ -164,8 +174,118 @@ class ApprovalFlowMixin:
         print(f"Saved approval suggestions: {output_path}")
         self.record_save_result("local_approval_suggestions", True, str(output_path))
 
+        with stage_logger.stage("apply_approval_write_mode"):
+            self.apply_approval_write_mode(page, suggestions)
+
         with stage_logger.stage("try_auto_pass_current_task"):
             self.try_auto_pass_current_task(page)
+
+    def generate_all_todo_approval_suggestions(self, page: Page) -> None:
+        self.enter_reagent_judgement_page(page)
+        tasks = self.read_todo_tasks(page)
+        list_key = "\u8bd5\u5242\u6e05\u5355\u53f7"
+        list_numbers = [self.extract_list_number(task.get(list_key, "")) for task in tasks]
+        list_numbers = [value for value in list_numbers if value]
+        print(f"Found {len(list_numbers)} todo list number(s) to process.")
+
+        original_target = getattr(self, "target_list_number", "")
+        try:
+            for index, list_number in enumerate(list_numbers, start=1):
+                print(f"Processing todo detail {index}/{len(list_numbers)}: {list_number}")
+                self.target_list_number = list_number
+                self.generate_approval_suggestions(page)
+        finally:
+            self.target_list_number = original_target
+
+    def apply_approval_write_mode(self, page: Page, suggestions: list[dict[str, Any]]) -> None:
+        mode = self.approval_write_mode()
+        if mode == "disabled":
+            print("Approval write mode is disabled; no webpage fields will be changed.")
+            return
+
+        candidates = self.high_confidence_write_candidates(suggestions)
+        if not candidates:
+            print("No high-confidence approval suggestion is eligible for webpage writing.")
+            return
+
+        if mode in {"test_one", "save_one"}:
+            candidates = candidates[:1]
+        elif mode in {"single_page", "generate_library"}:
+            pass
+        elif mode == "multi_page":
+            print("Multi-page write mode is reserved but not enabled in this safety pass; processing current page only.")
+        else:
+            print(f"Unknown APPROVAL_WRITE_MODE={mode}; no webpage fields will be changed.")
+            return
+
+        writer = ApprovalWriter(settings=self.settings)
+        for row_index, suggestion in enumerate(candidates, start=1):
+            sequence = str(suggestion.get("\u5e8f\u53f7") or "").strip()
+            category = str(suggestion.get("\u6700\u7ec8\u5efa\u8bae\u7c7b\u522b") or "").strip()
+            reagent_name = str(suggestion.get("\u8bd5\u5242\u540d\u79f0") or "").strip()
+            print(f"Approval write candidate {row_index}/{len(candidates)}: {sequence} {reagent_name} -> {category}")
+
+            row = self.find_reagent_row_by_sequence(page, sequence)
+            if row is None:
+                self.record_save_result(f"reagent_save_{sequence}", False, "row not found")
+                print(f"Could not find current-page row for sequence: {sequence}")
+                continue
+
+            opened = writer.open_technical_judgement(row)
+            if not opened:
+                self.record_save_result(f"reagent_save_{sequence}", False, "technical judgement button not found")
+                print(f"Could not open technical judgement for sequence: {sequence}")
+                continue
+
+            page.wait_for_timeout(500)
+            selected = writer.choose_property(page, category)
+            if not selected:
+                self.record_save_result(f"reagent_save_{sequence}", False, f"could not select {category}")
+                print(f"Could not select physicochemical property {category} for sequence: {sequence}")
+                continue
+
+            screenshot_path = self._log_dir() / f"write_mode_{mode}_{sequence}.png"
+            page.screenshot(path=str(screenshot_path), full_page=True)
+            print(f"Saved approval write screenshot before save: {screenshot_path}")
+
+            if mode == "test_one":
+                print("Test write mode: selected value for inspection only; not saving.")
+                return
+
+            saved = writer.save(row)
+            self.record_save_result(f"reagent_save_{sequence}", saved, category)
+            print(f"Save result for sequence {sequence}: {saved}")
+            page.wait_for_timeout(800)
+
+            if mode == "generate_library" and saved:
+                generated = writer.generate_reagent_library(row)
+                self.record_save_result(f"reagent_library_{sequence}", generated, category)
+                print(f"Generate reagent library result for sequence {sequence}: {generated}")
+
+            if mode == "save_one":
+                return
+
+    def approval_write_mode(self) -> str:
+        configured = (self.settings.get("approval", {}) or {}).get("write_mode", "disabled")
+        return str(os.getenv("APPROVAL_WRITE_MODE") or configured or "disabled").strip().lower()
+
+    def high_confidence_write_candidates(self, suggestions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        threshold = float(os.getenv("APPROVAL_WRITE_MIN_CONFIDENCE") or self.settings.get("approval", {}).get("write_min_confidence", 0.8))
+        output: list[dict[str, Any]] = []
+        for suggestion in suggestions:
+            category = str(suggestion.get("\u6700\u7ec8\u5efa\u8bae\u7c7b\u522b") or "").strip()
+            if not category:
+                continue
+            if str(suggestion.get("\u9700\u4eba\u5de5\u590d\u6838")).strip().lower() in {"true", "1", "yes"}:
+                continue
+            try:
+                confidence = float(suggestion.get("\u7f6e\u4fe1\u5ea6") or 0.0)
+            except (TypeError, ValueError):
+                confidence = 0.0
+            if confidence < threshold:
+                continue
+            output.append(suggestion)
+        return output
 
     def _classification_input(
         self,
@@ -183,6 +303,10 @@ class ApprovalFlowMixin:
         ]
         return {
             "reagent_name": reagent.get("\u8bd5\u5242\u540d\u79f0", ""),
+            "name": search_result.get("name", ""),
+            "standard_name": (search_result.get("name_normalization", {}) or {}).get("standard_name", ""),
+            "cleaned_name": (search_result.get("name_normalization", {}) or {}).get("cleaned_name", ""),
+            "english_name": (search_result.get("name_normalization", {}) or {}).get("english_name", ""),
             "cas": reagent.get("CAS\u53f7", ""),
             "text": " ".join(str(part) for part in text_parts if part),
             "flash_point": extracted.get("flash_point", ""),

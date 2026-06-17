@@ -54,6 +54,9 @@ Rules:
   Only mark oxidizing=true when the source says the substance is an oxidizer
   or shows oxidizer-specific evidence such as H272, Hazard Class 5.1,
   oxidizing solid/liquid/gas, or strong oxidizer.
+- A hydrochloride salt is not hydrochloric acid. Do not infer strong acid,
+  special acid, or corrosive acid behavior only from "hydrochloride",
+  "\u76d0\u9178\u76d0", or an organic compound name ending with hydrochloride salt.
 """.strip()
 
 
