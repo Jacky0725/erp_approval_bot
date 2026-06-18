@@ -19,12 +19,18 @@ from browser_bot import BrowserBot
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 CONFIG_PATH = ROOT_DIR / "config" / "settings.yaml"
+ENV_PATH = ROOT_DIR / ".env"
 LOG_DIR = ROOT_DIR / "data" / "logs"
 
 
 def load_settings() -> dict[str, Any]:
     with CONFIG_PATH.open("r", encoding="utf-8") as file:
         return yaml.safe_load(file) or {}
+
+
+def save_settings(settings: dict[str, Any]) -> None:
+    with CONFIG_PATH.open("w", encoding="utf-8") as file:
+        yaml.safe_dump(settings, file, allow_unicode=True, sort_keys=False)
 
 
 class LineBufferWriter(io.TextIOBase):
@@ -247,21 +253,126 @@ def approval_summary(root_dir: Path = ROOT_DIR) -> dict[str, Any]:
 
 
 def runtime_config_snapshot() -> dict[str, Any]:
-    load_dotenv(ROOT_DIR / ".env")
+    load_dotenv(ENV_PATH)
     settings = load_settings()
+    approval = settings.get("approval", {}) or {}
+    llm = settings.get("llm", {}) or {}
     return {
         "erp_url_configured": bool(os.getenv("ERP_URL", "").strip()),
+        "erp_url": os.getenv("ERP_URL", ""),
         "erp_username_configured": bool(os.getenv("ERP_USERNAME", "").strip()),
+        "erp_username": os.getenv("ERP_USERNAME", ""),
+        "erp_password_configured": bool(os.getenv("ERP_PASSWORD", "").strip()),
+        "siliconflow_api_key_configured": bool(os.getenv("SILICONFLOW_API_KEY", "").strip()),
         "auto_pass": os.getenv("AUTO_PASS", "false"),
         "target_list_number": os.getenv("TARGET_LIST_NUMBER", ""),
         "process_all_todos": os.getenv("PROCESS_ALL_TODOS", "false"),
         "approval_write_mode": os.getenv(
             "APPROVAL_WRITE_MODE",
-            str((settings.get("approval", {}) or {}).get("write_mode", "disabled")),
+            str(approval.get("write_mode", "disabled")),
         ),
-        "llm_provider": (settings.get("llm", {}) or {}).get("provider", ""),
-        "llm_model": (settings.get("llm", {}) or {}).get("model", ""),
+        "approval_write_min_confidence": os.getenv(
+            "APPROVAL_WRITE_MIN_CONFIDENCE",
+            str(approval.get("write_min_confidence", 0.8)),
+        ),
+        "llm_provider": llm.get("provider", ""),
+        "llm_base_url": llm.get("base_url", ""),
+        "llm_model": llm.get("model", ""),
+        "llm_timeout_seconds": llm.get("timeout_seconds", 45),
+        "llm_max_retries": llm.get("max_retries", 1),
     }
+
+
+def save_runtime_config(form: dict[str, str]) -> dict[str, Any]:
+    env_updates = {
+        "ERP_URL": form.get("erp_url", "").strip(),
+        "ERP_USERNAME": form.get("erp_username", "").strip(),
+        "AUTO_PASS": form.get("auto_pass", "false").strip().lower(),
+        "TARGET_LIST_NUMBER": form.get("target_list_number", "").strip(),
+        "PROCESS_ALL_TODOS": form.get("process_all_todos", "false").strip().lower(),
+        "PROCESS_ALL_TODOS_MAX": form.get("process_all_todos_max", "50").strip() or "50",
+        "APPROVAL_WRITE_MODE": form.get("approval_write_mode", "disabled").strip() or "disabled",
+        "APPROVAL_WRITE_MIN_CONFIDENCE": form.get("approval_write_min_confidence", "0.8").strip() or "0.8",
+        "LLM_PROVIDER": form.get("llm_provider", "siliconflow").strip() or "siliconflow",
+        "SILICONFLOW_BASE_URL": form.get("llm_base_url", "").strip(),
+        "SILICONFLOW_MODEL": form.get("llm_model", "").strip(),
+    }
+
+    erp_password = form.get("erp_password", "").strip()
+    if erp_password:
+        env_updates["ERP_PASSWORD"] = erp_password
+
+    api_key = form.get("siliconflow_api_key", "").strip()
+    if api_key:
+        env_updates["SILICONFLOW_API_KEY"] = api_key
+
+    update_env_file(ENV_PATH, env_updates)
+
+    settings = load_settings()
+    llm = settings.setdefault("llm", {})
+    llm["provider"] = env_updates["LLM_PROVIDER"]
+    if env_updates["SILICONFLOW_BASE_URL"]:
+        llm["base_url"] = env_updates["SILICONFLOW_BASE_URL"]
+    if env_updates["SILICONFLOW_MODEL"]:
+        llm["model"] = env_updates["SILICONFLOW_MODEL"]
+    llm["timeout_seconds"] = coerce_int(form.get("llm_timeout_seconds", ""), llm.get("timeout_seconds", 45))
+    llm["max_retries"] = coerce_int(form.get("llm_max_retries", ""), llm.get("max_retries", 1))
+
+    approval = settings.setdefault("approval", {})
+    approval["write_mode"] = env_updates["APPROVAL_WRITE_MODE"]
+    approval["write_min_confidence"] = coerce_float(
+        env_updates["APPROVAL_WRITE_MIN_CONFIDENCE"],
+        approval.get("write_min_confidence", 0.8),
+    )
+    save_settings(settings)
+
+    return runtime_config_snapshot()
+
+
+def update_env_file(path: Path, updates: dict[str, str]) -> None:
+    lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+    seen: set[str] = set()
+    output: list[str] = []
+
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in line:
+            output.append(line)
+            continue
+
+        key = line.split("=", 1)[0].strip()
+        if key in updates:
+            output.append(f"{key}={escape_env_value(updates[key])}")
+            seen.add(key)
+        else:
+            output.append(line)
+
+    for key, value in updates.items():
+        if key not in seen:
+            output.append(f"{key}={escape_env_value(value)}")
+
+    path.write_text("\n".join(output).rstrip() + "\n", encoding="utf-8")
+    load_dotenv(path, override=True)
+
+
+def escape_env_value(value: str) -> str:
+    if any(char.isspace() for char in value) or "#" in value:
+        return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+    return value
+
+
+def coerce_int(value: str, fallback: Any) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return int(fallback)
+
+
+def coerce_float(value: str, fallback: Any) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return float(fallback)
 
 
 manager = AutomationJobManager()

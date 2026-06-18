@@ -16,26 +16,28 @@
       </div>
     </div>
     <nav>
-      <a class="active" href="#">工作台</a>
-      <a href="#todo">待办审批</a>
+      <a class="active" href="#workbench">工作台</a>
+      <a href="#run">运行控制</a>
+      <a href="#base-settings">基础设置</a>
       <a href="#suggestions">建议结果</a>
       <a href="#evidence">判定证据</a>
       <a href="#artifacts">产物下载</a>
       <a href="#logs">日志审计</a>
-      <a href="#settings">运行设置</a>
     </nav>
   </aside>
 
-  <main class="shell">
+  <main class="shell" id="workbench">
     <header class="topbar">
       <div>
         <p class="eyebrow">本地 FastAPI 控制台</p>
         <h1>试剂判定工作台</h1>
       </div>
-      <div class="top-actions">
+      <div class="command-strip">
         <span id="runBadge" class="badge">读取中</span>
-        <span class="pill">AUTO_PASS: <strong id="autoPassText">{{ runtime.auto_pass }}</strong></span>
-        <span class="pill">写入模式: <strong id="writeModeText">{{ runtime.approval_write_mode }}</strong></span>
+        <span class="pill">AUTO_PASS <strong id="autoPassText">{{ runtime.auto_pass }}</strong></span>
+        <span class="pill">写入模式 <strong id="writeModeText">{{ runtime.approval_write_mode }}</strong></span>
+        <span class="pill">处理范围 <strong id="processScopeText">{{ "全部待办" if runtime.process_all_todos == "true" else "单条/首条" }}</strong></span>
+        <a class="ghost-link" href="#base-settings">修改设置</a>
       </div>
     </header>
 
@@ -58,22 +60,33 @@
       </article>
       <article class="danger">
         <span>安全门</span>
-        <strong>默认关闭</strong>
+        <strong id="safetyGate">默认关闭</strong>
       </article>
     </section>
 
-    <section class="grid">
-      <section class="panel run-panel" id="settings">
+    <section class="timeline panel">
+      <div class="step done">登录 ERP</div>
+      <div class="step done">进入试剂判定</div>
+      <div class="step">一键匹配</div>
+      <div class="step">排序读取 "-"</div>
+      <div class="step">网站查询</div>
+      <div class="step">大模型整理</div>
+      <div class="step">规则判定</div>
+      <div class="step">生成建议表</div>
+    </section>
+
+    <section class="workspace-grid">
+      <section class="panel run-panel" id="run">
         <div class="panel-title">
           <div>
             <h2>运行控制</h2>
-            <p>启动任务后会打开 Playwright 浏览器，日志实时写入本地。</p>
+            <p>这里是本次任务参数。改动只影响点击按钮后的下一次运行。</p>
           </div>
         </div>
         <form id="runForm">
           <label>
             目标清单号
-            <input name="target_list_number" placeholder="例如 SJ202606170003">
+            <input name="target_list_number" value="{{ runtime.target_list_number }}" placeholder="例如 SJ202606170003">
           </label>
           <div class="form-row">
             <label>
@@ -88,7 +101,7 @@
             </label>
             <label>
               最低置信度
-              <input name="approval_write_min_confidence" value="0.8">
+              <input name="approval_write_min_confidence" value="{{ runtime.approval_write_min_confidence }}">
             </label>
           </div>
           <div class="switches">
@@ -105,6 +118,23 @@
         </form>
       </section>
 
+      <section class="panel inspector" id="evidence">
+        <div class="panel-title">
+          <div>
+            <h2>判定证据</h2>
+            <p>选取建议表首批记录的关键字段，后续可扩展为点击行查看详情。</p>
+          </div>
+        </div>
+        <div class="evidence-tabs">
+          <button type="button" class="tab active">Chemsrc</button>
+          <button type="button" class="tab">LLM 摘要</button>
+          <button type="button" class="tab">规则命中</button>
+        </div>
+        <div id="evidenceBox" class="evidence-box">
+          <p>暂无建议结果。</p>
+        </div>
+      </section>
+
       <section class="panel status-panel">
         <div class="panel-title">
           <div>
@@ -115,11 +145,87 @@
         <div class="status-list">
           <div><span>ERP URL</span><strong id="erpUrl">-</strong></div>
           <div><span>ERP 账号</span><strong id="erpUser">-</strong></div>
+          <div><span>ERP 密码</span><strong id="erpPassword">-</strong></div>
+          <div><span>SiliconFlow Key</span><strong id="apiKey">-</strong></div>
           <div><span>任务动作</span><strong id="currentAction">-</strong></div>
           <div><span>开始时间</span><strong id="startedAt">-</strong></div>
           <div><span>结束时间</span><strong id="finishedAt">-</strong></div>
         </div>
       </section>
+    </section>
+
+    <section class="panel settings-panel" id="base-settings">
+      <div class="panel-title">
+        <div>
+          <h2>基础设置</h2>
+          <p>保存后写入 `.env` 和 `config/settings.yaml`，下一次启动任务时生效。密钥和密码留空表示保留原值。</p>
+        </div>
+        <span id="settingsSaveState" class="save-state">未保存</span>
+      </div>
+      <form id="settingsForm" class="settings-form">
+        <div class="settings-grid">
+          <label>
+            ERP 登录地址
+            <input name="erp_url" value="{{ runtime.erp_url }}" placeholder="https://...">
+          </label>
+          <label>
+            ERP 账号
+            <input name="erp_username" value="{{ runtime.erp_username }}" autocomplete="username">
+          </label>
+          <label>
+            ERP 密码
+            <input name="erp_password" type="password" placeholder="留空则不修改" autocomplete="new-password">
+          </label>
+          <label>
+            SiliconFlow API Key
+            <input name="siliconflow_api_key" type="password" placeholder="留空则不修改">
+          </label>
+          <label>
+            LLM Provider
+            <input name="llm_provider" value="{{ runtime.llm_provider }}">
+          </label>
+          <label>
+            LLM Base URL
+            <input name="llm_base_url" value="{{ runtime.llm_base_url }}">
+          </label>
+          <label>
+            LLM Model
+            <input name="llm_model" value="{{ runtime.llm_model }}">
+          </label>
+          <label>
+            LLM 超时秒数
+            <input name="llm_timeout_seconds" value="{{ runtime.llm_timeout_seconds }}">
+          </label>
+          <label>
+            LLM 重试次数
+            <input name="llm_max_retries" value="{{ runtime.llm_max_retries }}">
+          </label>
+          <label>
+            默认目标清单
+            <input name="target_list_number" value="{{ runtime.target_list_number }}">
+          </label>
+          <label>
+            默认写入模式
+            <select name="approval_write_mode">
+              <option value="disabled">disabled</option>
+              <option value="test_one">test_one</option>
+              <option value="save_one">save_one</option>
+              <option value="single_page">single_page</option>
+              <option value="generate_library">generate_library</option>
+            </select>
+          </label>
+          <label>
+            默认最低置信度
+            <input name="approval_write_min_confidence" value="{{ runtime.approval_write_min_confidence }}">
+          </label>
+        </div>
+        <div class="switches">
+          <label class="check"><input type="checkbox" name="process_all_todos" value="true"> 默认处理所有待办</label>
+          <label>最多处理 <input class="small-input" name="process_all_todos_max" value="50"></label>
+          <label class="check danger-check"><input type="checkbox" name="auto_pass" value="true"> 默认 AUTO_PASS</label>
+          <button type="submit" class="primary">保存基础设置</button>
+        </div>
+      </form>
     </section>
 
     <section class="panel" id="suggestions">
@@ -151,7 +257,7 @@
       </div>
     </section>
 
-    <section class="grid lower-grid">
+    <section class="lower-grid">
       <section class="panel" id="artifacts">
         <div class="panel-title">
           <div>
@@ -175,18 +281,55 @@
   </main>
 
   <script>
-    const form = document.querySelector("#runForm");
+    const runForm = document.querySelector("#runForm");
+    const settingsForm = document.querySelector("#settingsForm");
+
+    function setSelectValue(form, name, value) {
+      const field = form.querySelector(`[name="${name}"]`);
+      if (field) field.value = value || field.value;
+    }
+
+    function setCheckbox(form, name, value) {
+      const field = form.querySelector(`[name="${name}"]`);
+      if (field) field.checked = String(value || "").toLowerCase() === "true";
+    }
+
+    setSelectValue(runForm, "approval_write_mode", "{{ runtime.approval_write_mode }}");
+    setSelectValue(settingsForm, "approval_write_mode", "{{ runtime.approval_write_mode }}");
+    setCheckbox(runForm, "process_all_todos", "{{ runtime.process_all_todos }}");
+    setCheckbox(runForm, "auto_pass", "{{ runtime.auto_pass }}");
+    setCheckbox(settingsForm, "process_all_todos", "{{ runtime.process_all_todos }}");
+    setCheckbox(settingsForm, "auto_pass", "{{ runtime.auto_pass }}");
+
     document.querySelectorAll("button[data-action]").forEach((button) => {
       button.addEventListener("click", async () => {
-        const data = new FormData(form);
+        const data = new FormData(runForm);
         data.set("action", button.dataset.action);
         const response = await fetch("/api/run", { method: "POST", body: data });
         const payload = await response.json();
         await refreshStatus();
         if (!payload.started) {
-          alert(payload.message || "任务未启动");
+          alert(payload.message || payload.detail || "任务未启动");
         }
       });
+    });
+
+    settingsForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const state = document.querySelector("#settingsSaveState");
+      state.textContent = "保存中";
+      const response = await fetch("/api/settings", { method: "POST", body: new FormData(settingsForm) });
+      const payload = await response.json();
+      if (!response.ok) {
+        state.textContent = payload.detail || "保存失败";
+        state.className = "save-state failed";
+        return;
+      }
+      state.textContent = "已保存";
+      state.className = "save-state saved";
+      settingsForm.querySelector('[name="erp_password"]').value = "";
+      settingsForm.querySelector('[name="siliconflow_api_key"]').value = "";
+      await refreshStatus();
     });
 
     function text(value, fallback = "-") {
@@ -210,6 +353,7 @@
       body.innerHTML = "";
       if (!rows || rows.length === 0) {
         body.innerHTML = '<tr><td colspan="8">暂无建议结果</td></tr>';
+        renderEvidence(null);
         return;
       }
       rows.forEach((row) => {
@@ -225,8 +369,29 @@
           <td>${text(row["置信度"])}</td>
           <td><span class="${manual === "true" ? "warn" : "ok"}">${text(row["需人工复核"])}</span></td>
         `;
+        tr.addEventListener("click", () => renderEvidence(row));
         body.appendChild(tr);
       });
+      renderEvidence(rows[0]);
+    }
+
+    function renderEvidence(row) {
+      const box = document.querySelector("#evidenceBox");
+      if (!row) {
+        box.innerHTML = "<p>暂无建议结果。</p>";
+        return;
+      }
+      box.innerHTML = `
+        <dl>
+          <dt>试剂</dt><dd>${text(row["试剂名称"])}</dd>
+          <dt>CAS</dt><dd>${text(row["CAS号"])}</dd>
+          <dt>标准名称</dt><dd>${text(row["标准化名称"])}</dd>
+          <dt>查询来源</dt><dd>${text(row["查询来源"])}</dd>
+          <dt>建议类别</dt><dd>${text(row["最终建议类别"])}</dd>
+          <dt>置信度</dt><dd>${text(row["置信度"])}</dd>
+          <dt>人工复核</dt><dd>${text(row["需人工复核"])}</dd>
+        </dl>
+      `;
     }
 
     function renderArtifacts(items) {
@@ -254,18 +419,22 @@
 
       document.querySelector("#runBadge").textContent = status.running ? "运行中" : (status.success === false ? "失败" : "空闲");
       document.querySelector("#runBadge").className = status.running ? "badge running" : (status.success === false ? "badge failed" : "badge");
-      document.querySelector("#statusLine").textContent = status.running ? "任务执行中，请保持浏览器窗口可见。" : text(status.error, "当前没有运行中的任务。");
+      document.querySelector("#statusLine").textContent = status.running ? "任务执行中，请保持 Playwright 浏览器可见。" : text(status.error, "当前没有运行中的任务。");
       document.querySelector("#erpUrl").textContent = runtime.erp_url_configured ? "已配置" : "未配置";
       document.querySelector("#erpUser").textContent = runtime.erp_username_configured ? "已配置" : "未配置";
+      document.querySelector("#erpPassword").textContent = runtime.erp_password_configured ? "已配置" : "未配置";
+      document.querySelector("#apiKey").textContent = runtime.siliconflow_api_key_configured ? "已配置" : "未配置";
       document.querySelector("#currentAction").textContent = text(status.action);
       document.querySelector("#startedAt").textContent = text(status.started_at);
       document.querySelector("#finishedAt").textContent = text(status.finished_at);
       document.querySelector("#autoPassText").textContent = text(runtime.auto_pass);
       document.querySelector("#writeModeText").textContent = text(runtime.approval_write_mode);
+      document.querySelector("#processScopeText").textContent = runtime.process_all_todos === "true" ? "全部待办" : "单条/首条";
       document.querySelector("#targetList").textContent = text(runtime.target_list_number);
       document.querySelector("#llmModel").textContent = text(runtime.llm_model);
       document.querySelector("#suggestionRows").textContent = text(approval.rows, "0");
       document.querySelector("#manualReview").textContent = text(approval.manual_review, "0");
+      document.querySelector("#safetyGate").textContent = runtime.auto_pass === "true" ? "需校验" : "默认关闭";
       document.querySelector("#suggestionMeta").textContent = approval.exists ? `最近更新：${text(approval.modified)}` : "尚未生成 approval_suggestions.xlsx";
 
       renderTags(approval.categories || {});

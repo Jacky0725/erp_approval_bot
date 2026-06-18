@@ -8,7 +8,14 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from web_runner import ROOT_DIR, approval_summary, artifact_summary, manager, runtime_config_snapshot
+from web_runner import (
+    ROOT_DIR,
+    approval_summary,
+    artifact_summary,
+    manager,
+    runtime_config_snapshot,
+    save_runtime_config,
+)
 
 
 TEMPLATES_DIR = ROOT_DIR / "src" / "templates"
@@ -44,6 +51,49 @@ def api_status() -> JSONResponse:
             "artifacts": artifact_summary(),
         }
     )
+
+
+@app.post("/api/settings")
+def api_settings(
+    erp_url: Annotated[str, Form()] = "",
+    erp_username: Annotated[str, Form()] = "",
+    erp_password: Annotated[str, Form()] = "",
+    target_list_number: Annotated[str, Form()] = "",
+    process_all_todos: Annotated[str, Form()] = "",
+    process_all_todos_max: Annotated[str, Form()] = "50",
+    approval_write_mode: Annotated[str, Form()] = "disabled",
+    approval_write_min_confidence: Annotated[str, Form()] = "0.8",
+    auto_pass: Annotated[str, Form()] = "",
+    llm_provider: Annotated[str, Form()] = "siliconflow",
+    llm_base_url: Annotated[str, Form()] = "",
+    llm_model: Annotated[str, Form()] = "",
+    siliconflow_api_key: Annotated[str, Form()] = "",
+    llm_timeout_seconds: Annotated[str, Form()] = "45",
+    llm_max_retries: Annotated[str, Form()] = "1",
+) -> JSONResponse:
+    if manager.status().get("running"):
+        raise HTTPException(status_code=409, detail="当前有任务正在运行，基础设置将在任务结束后再修改。")
+
+    snapshot = save_runtime_config(
+        {
+            "erp_url": erp_url,
+            "erp_username": erp_username,
+            "erp_password": erp_password,
+            "target_list_number": target_list_number,
+            "process_all_todos": normalize_checkbox(process_all_todos),
+            "process_all_todos_max": process_all_todos_max,
+            "approval_write_mode": approval_write_mode,
+            "approval_write_min_confidence": approval_write_min_confidence,
+            "auto_pass": normalize_checkbox(auto_pass),
+            "llm_provider": llm_provider,
+            "llm_base_url": llm_base_url,
+            "llm_model": llm_model,
+            "siliconflow_api_key": siliconflow_api_key,
+            "llm_timeout_seconds": llm_timeout_seconds,
+            "llm_max_retries": llm_max_retries,
+        }
+    )
+    return JSONResponse({"saved": True, "runtime": snapshot})
 
 
 @app.post("/api/run")

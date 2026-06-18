@@ -67,13 +67,19 @@ http://127.0.0.1:8000
 
 ## Web 控制台
 
-第一阶段控制台提供：
+控制台提供：
 
 - 查看 ERP 配置状态、AUTO_PASS、写入模式、目标清单。
+- 编辑 ERP 登录地址、账号、密码。
+- 编辑 SiliconFlow API Key、LLM Provider、Base URL、模型名、超时和重试次数。
+- 编辑默认目标清单、是否处理所有待办、写入模式、最低置信度和 AUTO_PASS。
 - 启动“生成审批建议”“导出待办”“采集首页”“采集试剂判定页”。
+- 查看流程步骤、当前状态和建议表首条判定证据。
 - 实时查看最近运行日志。
 - 预览 `data/logs/approval_suggestions.xlsx`。
 - 下载截图、HTML、Excel 和日志产物。
+
+基础设置保存后会写入 `.env` 和 `config/settings.yaml`，下一次启动任务时生效。ERP 密码和 API Key 在页面中不会回显，输入框留空表示保留原值。若已有自动化任务正在运行，控制台会拒绝保存基础设置，避免运行中配置被改动。
 
 后续如果审批模块、规则模块、查询模块或人工复核模块发生变化，需要同步维护 `src/web_app.py`、`src/web_runner.py`、`src/templates/dashboard.html` 和 `src/static/dashboard.css` 中对应的入口、状态展示和说明。
 
