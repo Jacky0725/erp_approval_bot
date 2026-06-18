@@ -181,21 +181,60 @@ class ApprovalFlowMixin:
             self.try_auto_pass_current_task(page)
 
     def generate_all_todo_approval_suggestions(self, page: Page) -> None:
-        self.enter_reagent_judgement_page(page)
-        tasks = self.read_todo_tasks(page)
-        list_key = "\u8bd5\u5242\u6e05\u5355\u53f7"
-        list_numbers = [self.extract_list_number(task.get(list_key, "")) for task in tasks]
-        list_numbers = [value for value in list_numbers if value]
-        print(f"Found {len(list_numbers)} todo list number(s) to process.")
-
         original_target = getattr(self, "target_list_number", "")
+        processed_list_numbers: set[str] = set()
+        max_todos = self.max_process_all_todos_count()
+
         try:
-            for index, list_number in enumerate(list_numbers, start=1):
-                print(f"Processing todo detail {index}/{len(list_numbers)}: {list_number}")
+            while len(processed_list_numbers) < max_todos:
+                self.enter_reagent_judgement_page(page)
+                tasks = self.read_todo_tasks(page)
+                list_numbers = self.todo_list_numbers(tasks)
+                next_list_number = self.next_unprocessed_list_number(tasks, processed_list_numbers)
+
+                print(
+                    f"Todo list refresh: {len(list_numbers)} visible task(s), "
+                    f"{len(processed_list_numbers)} already processed in this run."
+                )
+                if not next_list_number:
+                    print("No unprocessed todo task remains on the current todo page.")
+                    break
+
+                list_number = next_list_number
+                print(f"Processing todo detail {len(processed_list_numbers) + 1}: {list_number}")
                 self.target_list_number = list_number
-                self.generate_approval_suggestions(page)
+                try:
+                    self.generate_approval_suggestions(page)
+                finally:
+                    processed_list_numbers.add(list_number)
+
+            if len(processed_list_numbers) >= max_todos:
+                print(f"Stopped all-todo processing after PROCESS_ALL_TODOS_MAX={max_todos}.")
         finally:
             self.target_list_number = original_target
+
+    def todo_list_numbers(self, tasks: list[dict[str, str]]) -> list[str]:
+        list_key = "\u8bd5\u5242\u6e05\u5355\u53f7"
+        return [
+            list_number
+            for list_number in (self.extract_list_number(task.get(list_key, "")) for task in tasks)
+            if list_number
+        ]
+
+    def next_unprocessed_list_number(self, tasks: list[dict[str, str]], processed: set[str]) -> str:
+        for list_number in self.todo_list_numbers(tasks):
+            if list_number not in processed:
+                return list_number
+        return ""
+
+    def max_process_all_todos_count(self) -> int:
+        value = os.getenv("PROCESS_ALL_TODOS_MAX", "50")
+        try:
+            max_count = int(value)
+        except ValueError:
+            print(f"Invalid PROCESS_ALL_TODOS_MAX={value}; using 50.")
+            return 50
+        return max(1, max_count)
 
     def apply_approval_write_mode(self, page: Page, suggestions: list[dict[str, Any]]) -> None:
         mode = self.approval_write_mode()
