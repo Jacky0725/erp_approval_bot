@@ -317,6 +317,28 @@ class ChemicalSearcherTest(unittest.TestCase):
         self.assertEqual(result["fallback_source"], "GuideChem")
         self.assertIn("low", result["failure_reason"])
 
+    def test_nonstandard_selenium_name_gets_manual_review_candidates(self) -> None:
+        name_result = {
+            "raw_name": "硫酸亚硒",
+            "cleaned_name": "硫酸亚硒",
+            "standard_name": "硫酸亚硒",
+            "english_name": "Selenium(II) sulfate",
+            "confidence": 0.6,
+            "need_manual_review": True,
+            "reason": "low confidence",
+        }
+
+        result = ChemicalSearcher(root_dir=ROOT_DIR)._name_result_with_nonstandard_diagnostic(
+            name_result,
+            name="硫酸亚硒",
+            cas="",
+        )
+
+        self.assertTrue(result["suspected_invalid_name"])
+        self.assertIn("硫酸硒", result["candidate_names"])
+        self.assertIn("二硫化硒", result["candidate_names"])
+        self.assertTrue(result["need_manual_review"])
+
 
 if __name__ == "__main__":
     unittest.main()

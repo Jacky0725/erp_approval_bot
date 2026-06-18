@@ -129,12 +129,68 @@ class ChemicalSearcher:
         if fallback_result:
             return fallback_result
 
+        name_result = self._name_result_with_nonstandard_diagnostic(name_result, name=name, cas=cas_no)
+        nonstandard_reason = str(name_result.get("suspected_invalid_reason") or "").strip()
+        reason = f"Chemsrc 和 ChemicalBook 均查询失败或无有效结果。查询关键词: {', '.join(failed_queries)}"
+        if nonstandard_reason:
+            reason = f"{reason}；{nonstandard_reason}"
+
         return self._manual_result(
             name=search_name or name,
             cas=cas_no,
-            reason=f"Chemsrc 和 ChemicalBook 均查询失败或无有效结果。查询关键词: {', '.join(failed_queries)}",
+            reason=reason,
             name_normalization=name_result,
         )
+
+    def _name_result_with_nonstandard_diagnostic(
+        self,
+        name_result: dict[str, Any],
+        name: str,
+        cas: str,
+    ) -> dict[str, Any]:
+        result = dict(name_result or {})
+        if cas:
+            return result
+
+        try:
+            confidence = float(result.get("confidence") or 0.0)
+        except (TypeError, ValueError):
+            confidence = 0.0
+        if confidence >= 0.8:
+            return result
+
+        candidates = self._nonstandard_name_candidates(result, name)
+        if not candidates:
+            return result
+
+        result["candidate_names"] = candidates
+        result["suspected_invalid_name"] = True
+        result["need_manual_review"] = True
+        result["suspected_invalid_reason"] = (
+            "疑似非标准试剂名或 ERP 录入错误；无 CAS 且主站/托底查询均未取得可信页面。"
+            f"建议人工核对是否应为：{', '.join(candidates)}。"
+        )
+        reason = str(result.get("reason") or "").strip()
+        if result["suspected_invalid_reason"] not in reason:
+            result["reason"] = f"{reason} {result['suspected_invalid_reason']}".strip()
+        return result
+
+    @staticmethod
+    def _nonstandard_name_candidates(name_result: dict[str, Any], name: str) -> list[str]:
+        texts = [
+            name,
+            name_result.get("raw_name", ""),
+            name_result.get("cleaned_name", ""),
+            name_result.get("standard_name", ""),
+            name_result.get("english_name", ""),
+        ]
+        normalized = " ".join(str(value or "") for value in texts).lower()
+        candidates: list[str] = []
+
+        if "硫酸亚硒" in normalized or "selenium(ii) sulfate" in normalized:
+            candidates.extend(["硫酸硒", "二硫化硒", "亚硒酸盐", "硒酸盐"])
+
+        return list(dict.fromkeys(candidates))
 
     def _detail_result_from_url(
         self,
