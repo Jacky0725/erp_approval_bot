@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import html
+import copy
 import re
 import socket
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from difflib import SequenceMatcher
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -58,6 +59,11 @@ class ChemicalSearcher:
     settings: dict[str, Any] | None = None
     root_dir: Any | None = None
     timeout_seconds: int = 20
+    _search_cache: dict[tuple[str, str, str, str], dict[str, Any]] = field(
+        default_factory=dict,
+        init=False,
+        repr=False,
+    )
 
     def search(
         self,
@@ -66,6 +72,10 @@ class ChemicalSearcher:
         specification: str = "",
         unit: str = "",
     ) -> dict[str, Any]:
+        cache_key = self._cache_key(reagent_name, cas, specification, unit)
+        if cache_key in self._search_cache:
+            return copy.deepcopy(self._search_cache[cache_key])
+
         name = reagent_name.strip()
         normalizer = NameNormalizer(settings=self.settings, root_dir=self.root_dir)
         name_result = normalizer.normalize(raw_name=name, cas=cas, specification=specification, unit=unit)
@@ -93,21 +103,21 @@ class ChemicalSearcher:
             if result:
                 result["name_normalization"] = name_result
                 result["query"] = cas_no or standard_name or source_url
-                return result
-            return self._manual_result(
+                return self._remember_result(cache_key, result)
+            return self._remember_result(cache_key, self._manual_result(
                 name=standard_name or english_name or name,
                 cas=cas_no,
                 reason=f"人工确认 URL 抓取失败或 CAS/名称校验未通过: {source_url}",
                 name_normalization=name_result,
-            )
+            ))
 
         if not queries:
-            return self._manual_result(
+            return self._remember_result(cache_key, self._manual_result(
                 name=name,
                 cas=cas_no,
                 reason="试剂名称和 CAS 号均为空，名称标准化后也无可查询名称。",
                 name_normalization=name_result,
-            )
+            ))
 
         search_name = standard_name or cleaned_name or english_name or name
         failed_queries: list[str] = []
@@ -118,7 +128,7 @@ class ChemicalSearcher:
                 if result:
                     result["name_normalization"] = name_result
                     result["query"] = query
-                    return result
+                    return self._remember_result(cache_key, result)
             failed_queries.append(query)
 
         fallback_result = self._fallback_web_research(
@@ -130,7 +140,7 @@ class ChemicalSearcher:
             validation_names=self._validation_names(search_name, standard_name, cleaned_name, english_name, aliases),
         )
         if fallback_result:
-            return fallback_result
+            return self._remember_result(cache_key, fallback_result)
 
         name_result = self._name_result_with_nonstandard_diagnostic(name_result, name=name, cas=cas_no)
         nonstandard_reason = str(name_result.get("suspected_invalid_reason") or "").strip()
@@ -138,12 +148,34 @@ class ChemicalSearcher:
         if nonstandard_reason:
             reason = f"{reason}；{nonstandard_reason}"
 
-        return self._manual_result(
+        return self._remember_result(cache_key, self._manual_result(
             name=search_name or name,
             cas=cas_no,
             reason=reason,
             name_normalization=name_result,
+        ))
+
+    @staticmethod
+    def _cache_key(
+        reagent_name: str,
+        cas: str = "",
+        specification: str = "",
+        unit: str = "",
+    ) -> tuple[str, str, str, str]:
+        return (
+            str(reagent_name or "").strip().lower(),
+            str(cas or "").strip().lower(),
+            str(specification or "").strip().lower(),
+            str(unit or "").strip().lower(),
         )
+
+    def _remember_result(
+        self,
+        cache_key: tuple[str, str, str, str],
+        result: dict[str, Any],
+    ) -> dict[str, Any]:
+        self._search_cache[cache_key] = copy.deepcopy(result)
+        return copy.deepcopy(result)
 
     def _name_result_with_nonstandard_diagnostic(
         self,

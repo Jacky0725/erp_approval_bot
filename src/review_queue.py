@@ -5,6 +5,19 @@ from typing import Any
 import pandas as pd
 
 
+BLOCKING_REVIEW_STATUSES = {
+    "",
+    "pending",
+    "manual_review",
+    "open",
+    "todo",
+    "待处理",
+    "待复核",
+    "人工复核",
+    "需人工复核",
+}
+
+
 class ReviewQueueMixin:
 
     def current_list_has_manual_review_item(self, list_number: str) -> tuple[bool, str]:
@@ -53,12 +66,27 @@ class ReviewQueueMixin:
             print(f"No manual review item for current list in review queue: {list_number}")
             return False, ""
 
+        blocking = self._blocking_review_rows(matched)
+        if blocking.empty:
+            print(f"Review queue has no pending manual review item for current list: {list_number}")
+            return False, ""
+
         output_path = self._log_dir() / "auto_pass_blocked_review_queue.xlsx"
-        output_path = self.write_excel_with_fallback(matched, output_path)
+        output_path = self.write_excel_with_fallback(blocking, output_path)
         return (
             True,
-            f"Review queue contains {len(matched)} manual review row(s) for current list; saved {output_path}.",
+            f"Review queue contains {len(blocking)} pending manual review row(s) for current list; saved {output_path}.",
         )
+
+    @staticmethod
+    def _blocking_review_rows(rows: pd.DataFrame) -> pd.DataFrame:
+        if rows.empty:
+            return rows
+        status_column = next((column for column in ("status", "状态", "处理状态") if column in rows.columns), "")
+        if not status_column:
+            return rows
+        normalized = rows[status_column].astype(str).str.strip().str.lower()
+        return rows[normalized.isin(BLOCKING_REVIEW_STATUSES)]
 
     def add_manual_review_item_from_search_failure(
         self,

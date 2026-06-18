@@ -119,6 +119,19 @@ class ChemicalSearcherTest(unittest.TestCase):
         self.assertEqual(result["name_normalization"]["standard_name"], "氢氧化钠")
         self.assertIn("1310-73-2", result["raw_text"])
 
+    def test_repeated_identical_search_uses_cache(self) -> None:
+        searcher = RecordingSearcher(root_dir=ROOT_DIR, succeed=False)
+
+        first = searcher.search("NaOH 0.1mol/L 分析纯")
+        query_count = len(searcher.queries)
+        first["need_manual_review"] = False
+        second = searcher.search("NaOH 0.1mol/L 分析纯")
+
+        self.assertGreater(query_count, 0)
+        self.assertEqual(len(searcher.queries), query_count)
+        self.assertTrue(second["need_manual_review"])
+        self.assertEqual(second["name_normalization"]["standard_name"], "氢氧化钠")
+
     def test_relevance_passes_for_similar_name_without_cas(self) -> None:
         searcher = ChemicalSearcher(root_dir=ROOT_DIR)
         relevance = searcher._result_relevance(

@@ -116,6 +116,7 @@ class ApprovalFlowTodoLoopTest(unittest.TestCase):
             def __init__(self) -> None:
                 self.page_number = 1
                 self.applied_pages: list[list[dict[str, object]]] = []
+                self.partial_lengths: list[int] = []
                 self.stage_logger = StageLogger()
 
             def goto_first_reagent_page(self, page: object) -> bool:
@@ -130,6 +131,9 @@ class ApprovalFlowTodoLoopTest(unittest.TestCase):
 
             def apply_approval_write_mode(self, page: object, suggestions: list[dict[str, object]]) -> None:
                 self.applied_pages.append(suggestions)
+
+            def write_partial_approval_suggestions(self, suggestions: list[dict[str, object]]) -> None:
+                self.partial_lengths.append(len(suggestions))
 
             def click_next_reagent_page(self, page: object) -> tuple[bool, bool]:
                 self.page_number += 1
@@ -146,6 +150,7 @@ class ApprovalFlowTodoLoopTest(unittest.TestCase):
 
         self.assertEqual([row["\u5e8f\u53f7"] for row in result], ["1", "2"])
         self.assertEqual(len(bot.applied_pages), 2)
+        self.assertEqual(bot.partial_lengths, [1, 2])
 
 
 if __name__ == "__main__":

@@ -232,6 +232,8 @@ class ApprovalFlowMixin:
                 page_label=current_page,
             )
             all_suggestions.extend(page_suggestions)
+            if page_suggestions:
+                self.write_partial_approval_suggestions(all_suggestions)
 
             if page_suggestions:
                 with self.stage_logger.stage("apply_approval_write_mode", f"page {current_page}"):
@@ -254,6 +256,16 @@ class ApprovalFlowMixin:
                 raise RuntimeError("Stopped multi-page approval after 200 pages; page navigation may be stuck.")
 
         return all_suggestions
+
+    def write_partial_approval_suggestions(self, suggestions: list[dict[str, Any]]) -> None:
+        if not suggestions:
+            return
+        output_path = self._log_dir() / "approval_suggestions_partial.xlsx"
+        output_path = self.write_excel_with_fallback(
+            pd.DataFrame(suggestions, columns=self.approval_suggestion_columns()),
+            output_path,
+        )
+        print(f"Saved partial approval suggestions: {output_path}")
 
     def process_current_unmatched_reagent_page(
         self,

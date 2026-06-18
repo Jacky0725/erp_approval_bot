@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -35,6 +35,9 @@ class RuleMatch:
 class RuleEngine:
     rules: list[Rule]
     priority: list[str]
+    manual_review_categories: set[str] = field(
+        default_factory=lambda: {UNKNOWN_CATEGORY, "不建议接收类"}
+    )
 
     @classmethod
     def from_settings(cls, settings: dict[str, Any], root_dir: Path) -> "RuleEngine":
@@ -63,6 +66,14 @@ class RuleEngine:
             for _, row in categories.sort_values("priority", kind="stable").iterrows()
             if str(row.get("category", "")).strip()
         ]
+        manual_review_categories = {
+            str(row.get("category", "")).strip()
+            for _, row in categories.iterrows()
+            if str(row.get("category", "")).strip()
+            and str(row.get("default_manual_review", "")).strip().lower()
+            in {"true", "1", "yes", "y", "on"}
+        }
+        manual_review_categories.update({UNKNOWN_CATEGORY, "不建议接收类"})
 
         rule_entries: list[Rule] = []
         for category in priority:
@@ -107,7 +118,11 @@ class RuleEngine:
         for rule in rule_entries:
             if rule.category not in priority:
                 priority.append(rule.category)
-        return cls(rules=rule_entries, priority=priority)
+        return cls(
+            rules=rule_entries,
+            priority=priority,
+            manual_review_categories=manual_review_categories,
+        )
 
     @classmethod
     def from_excel(cls, rules_path: str | Path) -> "RuleEngine":
@@ -226,7 +241,7 @@ class RuleEngine:
         matched_categories = self._sort_matched_categories(matches)
         final_category = matched_categories[0]
         confidence = self._confidence(matches[final_category])
-        need_manual_review = final_category in {UNKNOWN_CATEGORY, "不建议接收类"} or confidence < 0.55
+        need_manual_review = final_category in self.manual_review_categories or confidence < 0.55
 
         return {
             "final_category": final_category,

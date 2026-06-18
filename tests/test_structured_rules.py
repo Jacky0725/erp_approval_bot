@@ -85,6 +85,12 @@ class StructuredRulesTest(unittest.TestCase):
 
         self.assertNotEqual(result["final_category"], "\u7279\u6b8a\u9178")
 
+    def test_default_manual_review_category_blocks_auto_pass(self) -> None:
+        result = self.engine.classify({"reagent_name": "\u6c30\u5316\u94a0", "text": "\u6c30\u5316\u94a0"})
+
+        self.assertEqual(result["final_category"], "\u5267\u6bd2\u54c1")
+        self.assertTrue(result["need_manual_review"])
+
 
 if __name__ == "__main__":
     unittest.main()
