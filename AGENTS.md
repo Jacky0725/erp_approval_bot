@@ -19,6 +19,10 @@ This repository contains a Python + Playwright automation bot for reagent approv
 - Keep chemical information lookup helpers in `src/chemical_searcher.py`.
 - Keep LLM-based text extraction isolated in `src/llm_extractor.py`.
 - Keep audit output centralized in `src/audit_logger.py`.
+- Keep the local management UI in sync with workflow/module changes:
+  - `src/web_app.py` exposes FastAPI routes and artifact downloads.
+  - `src/web_runner.py` maps UI actions to automation modules and captures logs.
+  - `src/templates/dashboard.html` and `src/static/dashboard.css` show status, suggestions, artifacts, and controls.
 - Configuration belongs in `config/settings.yaml`.
 - Secrets belong in `.env`; do not commit real credentials.
 

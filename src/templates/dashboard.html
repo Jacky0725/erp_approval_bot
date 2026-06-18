@@ -1,0 +1,281 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>试剂审批自动化控制台</title>
+  <link rel="stylesheet" href="/static/dashboard.css">
+</head>
+<body>
+  <aside class="sidebar">
+    <div class="brand">
+      <div class="brand-mark">RA</div>
+      <div>
+        <strong>试剂审批自动化</strong>
+        <span>ERP Approval Bot</span>
+      </div>
+    </div>
+    <nav>
+      <a class="active" href="#">工作台</a>
+      <a href="#todo">待办审批</a>
+      <a href="#suggestions">建议结果</a>
+      <a href="#evidence">判定证据</a>
+      <a href="#artifacts">产物下载</a>
+      <a href="#logs">日志审计</a>
+      <a href="#settings">运行设置</a>
+    </nav>
+  </aside>
+
+  <main class="shell">
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">本地 FastAPI 控制台</p>
+        <h1>试剂判定工作台</h1>
+      </div>
+      <div class="top-actions">
+        <span id="runBadge" class="badge">读取中</span>
+        <span class="pill">AUTO_PASS: <strong id="autoPassText">{{ runtime.auto_pass }}</strong></span>
+        <span class="pill">写入模式: <strong id="writeModeText">{{ runtime.approval_write_mode }}</strong></span>
+      </div>
+    </header>
+
+    <section class="metrics">
+      <article>
+        <span>建议结果</span>
+        <strong id="suggestionRows">{{ approval.rows }}</strong>
+      </article>
+      <article>
+        <span>人工复核</span>
+        <strong id="manualReview">{{ approval.manual_review }}</strong>
+      </article>
+      <article>
+        <span>目标清单</span>
+        <strong id="targetList">{{ runtime.target_list_number or "-" }}</strong>
+      </article>
+      <article>
+        <span>大模型</span>
+        <strong id="llmModel">{{ runtime.llm_model }}</strong>
+      </article>
+      <article class="danger">
+        <span>安全门</span>
+        <strong>默认关闭</strong>
+      </article>
+    </section>
+
+    <section class="grid">
+      <section class="panel run-panel" id="settings">
+        <div class="panel-title">
+          <div>
+            <h2>运行控制</h2>
+            <p>启动任务后会打开 Playwright 浏览器，日志实时写入本地。</p>
+          </div>
+        </div>
+        <form id="runForm">
+          <label>
+            目标清单号
+            <input name="target_list_number" placeholder="例如 SJ202606170003">
+          </label>
+          <div class="form-row">
+            <label>
+              写入模式
+              <select name="approval_write_mode">
+                <option value="disabled">disabled - 只生成建议</option>
+                <option value="test_one">test_one - 单条填写测试</option>
+                <option value="save_one">save_one - 单条保存</option>
+                <option value="single_page">single_page - 当前页保存</option>
+                <option value="generate_library">generate_library - 保存并生成试剂库</option>
+              </select>
+            </label>
+            <label>
+              最低置信度
+              <input name="approval_write_min_confidence" value="0.8">
+            </label>
+          </div>
+          <div class="switches">
+            <label class="check"><input type="checkbox" name="process_all_todos" value="true"> 处理所有待办</label>
+            <label>最多处理 <input class="small-input" name="process_all_todos_max" value="50"></label>
+            <label class="check danger-check"><input type="checkbox" name="auto_pass" value="true"> AUTO_PASS</label>
+          </div>
+          <div class="button-row">
+            <button type="button" data-action="suggestions" class="primary">生成审批建议</button>
+            <button type="button" data-action="todo_export">导出待办</button>
+            <button type="button" data-action="judgement_capture">采集试剂判定页</button>
+            <button type="button" data-action="debug_capture">采集首页</button>
+          </div>
+        </form>
+      </section>
+
+      <section class="panel status-panel">
+        <div class="panel-title">
+          <div>
+            <h2>当前状态</h2>
+            <p id="statusLine">等待刷新</p>
+          </div>
+        </div>
+        <div class="status-list">
+          <div><span>ERP URL</span><strong id="erpUrl">-</strong></div>
+          <div><span>ERP 账号</span><strong id="erpUser">-</strong></div>
+          <div><span>任务动作</span><strong id="currentAction">-</strong></div>
+          <div><span>开始时间</span><strong id="startedAt">-</strong></div>
+          <div><span>结束时间</span><strong id="finishedAt">-</strong></div>
+        </div>
+      </section>
+    </section>
+
+    <section class="panel" id="suggestions">
+      <div class="panel-title">
+        <div>
+          <h2>审批建议结果</h2>
+          <p id="suggestionMeta">读取 data/logs/approval_suggestions.xlsx</p>
+        </div>
+        <div id="categoryTags" class="tag-row"></div>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>序号</th>
+              <th>试剂名称</th>
+              <th>CAS号</th>
+              <th>标准名称</th>
+              <th>查询来源</th>
+              <th>建议类别</th>
+              <th>置信度</th>
+              <th>人工复核</th>
+            </tr>
+          </thead>
+          <tbody id="suggestionTable">
+            <tr><td colspan="8">暂无建议结果</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="grid lower-grid">
+      <section class="panel" id="artifacts">
+        <div class="panel-title">
+          <div>
+            <h2>产物下载</h2>
+            <p>截图、HTML、Excel、运行日志。</p>
+          </div>
+        </div>
+        <div id="artifactList" class="artifact-list"></div>
+      </section>
+
+      <section class="panel" id="logs">
+        <div class="panel-title">
+          <div>
+            <h2>运行日志</h2>
+            <p>最近 160 行输出。</p>
+          </div>
+        </div>
+        <pre id="logBox">等待任务输出...</pre>
+      </section>
+    </section>
+  </main>
+
+  <script>
+    const form = document.querySelector("#runForm");
+    document.querySelectorAll("button[data-action]").forEach((button) => {
+      button.addEventListener("click", async () => {
+        const data = new FormData(form);
+        data.set("action", button.dataset.action);
+        const response = await fetch("/api/run", { method: "POST", body: data });
+        const payload = await response.json();
+        await refreshStatus();
+        if (!payload.started) {
+          alert(payload.message || "任务未启动");
+        }
+      });
+    });
+
+    function text(value, fallback = "-") {
+      if (value === null || value === undefined || value === "") return fallback;
+      return value;
+    }
+
+    function renderTags(categories) {
+      const holder = document.querySelector("#categoryTags");
+      holder.innerHTML = "";
+      Object.entries(categories || {}).forEach(([name, count]) => {
+        const tag = document.createElement("span");
+        tag.className = "tag";
+        tag.textContent = `${name} ${count}`;
+        holder.appendChild(tag);
+      });
+    }
+
+    function renderSuggestions(rows) {
+      const body = document.querySelector("#suggestionTable");
+      body.innerHTML = "";
+      if (!rows || rows.length === 0) {
+        body.innerHTML = '<tr><td colspan="8">暂无建议结果</td></tr>';
+        return;
+      }
+      rows.forEach((row) => {
+        const tr = document.createElement("tr");
+        const manual = String(row["需人工复核"] || "").toLowerCase();
+        tr.innerHTML = `
+          <td>${text(row["序号"])}</td>
+          <td>${text(row["试剂名称"])}</td>
+          <td>${text(row["CAS号"])}</td>
+          <td>${text(row["标准化名称"])}</td>
+          <td>${text(row["查询来源"])}</td>
+          <td><span class="category">${text(row["最终建议类别"])}</span></td>
+          <td>${text(row["置信度"])}</td>
+          <td><span class="${manual === "true" ? "warn" : "ok"}">${text(row["需人工复核"])}</span></td>
+        `;
+        body.appendChild(tr);
+      });
+    }
+
+    function renderArtifacts(items) {
+      const holder = document.querySelector("#artifactList");
+      holder.innerHTML = "";
+      if (!items || items.length === 0) {
+        holder.textContent = "暂无产物";
+        return;
+      }
+      items.forEach((item) => {
+        const link = document.createElement("a");
+        link.href = item.download_url;
+        link.className = "artifact";
+        link.innerHTML = `<strong>${item.name}</strong><span>${item.modified} · ${Math.ceil(item.size / 1024)} KB</span>`;
+        holder.appendChild(link);
+      });
+    }
+
+    async function refreshStatus() {
+      const response = await fetch("/api/status");
+      const data = await response.json();
+      const status = data.status || {};
+      const runtime = data.runtime || {};
+      const approval = data.approval || {};
+
+      document.querySelector("#runBadge").textContent = status.running ? "运行中" : (status.success === false ? "失败" : "空闲");
+      document.querySelector("#runBadge").className = status.running ? "badge running" : (status.success === false ? "badge failed" : "badge");
+      document.querySelector("#statusLine").textContent = status.running ? "任务执行中，请保持浏览器窗口可见。" : text(status.error, "当前没有运行中的任务。");
+      document.querySelector("#erpUrl").textContent = runtime.erp_url_configured ? "已配置" : "未配置";
+      document.querySelector("#erpUser").textContent = runtime.erp_username_configured ? "已配置" : "未配置";
+      document.querySelector("#currentAction").textContent = text(status.action);
+      document.querySelector("#startedAt").textContent = text(status.started_at);
+      document.querySelector("#finishedAt").textContent = text(status.finished_at);
+      document.querySelector("#autoPassText").textContent = text(runtime.auto_pass);
+      document.querySelector("#writeModeText").textContent = text(runtime.approval_write_mode);
+      document.querySelector("#targetList").textContent = text(runtime.target_list_number);
+      document.querySelector("#llmModel").textContent = text(runtime.llm_model);
+      document.querySelector("#suggestionRows").textContent = text(approval.rows, "0");
+      document.querySelector("#manualReview").textContent = text(approval.manual_review, "0");
+      document.querySelector("#suggestionMeta").textContent = approval.exists ? `最近更新：${text(approval.modified)}` : "尚未生成 approval_suggestions.xlsx";
+
+      renderTags(approval.categories || {});
+      renderSuggestions(approval.preview || []);
+      renderArtifacts(data.artifacts || []);
+      document.querySelector("#logBox").textContent = (status.log_tail || []).join("\\n") || "等待任务输出...";
+    }
+
+    refreshStatus();
+    setInterval(refreshStatus, 2500);
+  </script>
+</body>
+</html>
