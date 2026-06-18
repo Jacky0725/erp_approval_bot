@@ -459,12 +459,10 @@ class ApprovalFlowMixin:
     ) -> bool:
         evidence = extracted.get("evidence", []) or []
         llm_failed = any("LLM extraction failed" in str(item) for item in evidence)
-        low_extraction_confidence = float(extracted.get("confidence") or 0.0) < 0.35
         return bool(
             search_result.get("need_manual_review", True)
             or name_result.get("need_manual_review", True)
             or llm_failed
-            or low_extraction_confidence
             or classification.get("need_manual_review", True)
         )
 

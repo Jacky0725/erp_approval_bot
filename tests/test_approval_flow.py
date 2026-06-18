@@ -63,6 +63,33 @@ class ApprovalFlowTodoLoopTest(unittest.TestCase):
         with patch.dict(os.environ, {"PROCESS_ALL_TODOS_MAX": "abc"}, clear=True):
             self.assertEqual(bot.max_process_all_todos_count(), 50)
 
+    def test_empty_extracted_evidence_does_not_force_manual_review(self) -> None:
+        bot = Bot()
+
+        result = bot._suggestion_needs_manual_review(
+            search_result={"need_manual_review": False, "relevance_passed": True},
+            name_result={"need_manual_review": False},
+            extracted={"confidence": 0.0, "evidence": []},
+            classification={"need_manual_review": False, "final_category": "\u666e\u901a\u7c7b"},
+        )
+
+        self.assertFalse(result)
+
+    def test_high_confidence_candidate_allows_empty_evidence_when_not_manual_review(self) -> None:
+        bot = Bot()
+        bot.settings = {"approval": {"write_min_confidence": 0.8}}
+        suggestion = {
+            "\u6700\u7ec8\u5efa\u8bae\u7c7b\u522b": "\u666e\u901a\u7c7b",
+            "\u9700\u4eba\u5de5\u590d\u6838": False,
+            "\u7f6e\u4fe1\u5ea6": 0.8,
+            "\u8bc1\u636e": "",
+        }
+
+        with patch.dict(os.environ, {}, clear=True):
+            result = bot.high_confidence_write_candidates([suggestion])
+
+        self.assertEqual(result, [suggestion])
+
 
 if __name__ == "__main__":
     unittest.main()
