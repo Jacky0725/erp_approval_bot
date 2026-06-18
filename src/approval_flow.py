@@ -104,66 +104,37 @@ class ApprovalFlowMixin:
         with stage_logger.stage("read_detail_info"):
             self._current_detail_info = self.read_detail_info(page)
 
-        property_key = "\u7269\u5316\u7279\u6027"
-        name_key = "\u8bd5\u5242\u540d\u79f0"
-        cas_key = "CAS\u53f7"
         with stage_logger.stage("sort_property_column"):
             sort_succeeded = self.sort_property_column_until_unmatched_visible(page)
         if not sort_succeeded:
             print("Sorting did not bring '-' into the first rows within 4 clicks; reading current page '-' rows anyway.")
 
-        with stage_logger.stage("read_current_page_unmatched"):
-            unmatched_reagents = [
-                record
-                for record in self.read_current_page_reagents(page)
-                if record.get(property_key, "").strip() == "-"
-            ]
-
-        print(f"Found {len(unmatched_reagents)} current-page reagent row(s) with physicochemical property '-'.")
-
         searcher = ChemicalSearcher(settings=self.settings, root_dir=self.root_dir)
         extractor = LlmExtractor(settings=self.settings)
         rule_engine = RuleEngine.from_settings(self.settings, self.root_dir)
         rule_maintainer = RuleMaintainer.from_settings(self.settings, self.root_dir)
-        suggestions: list[dict[str, Any]] = []
         seen_search_urls: dict[str, str] = {}
 
-        for index, reagent in enumerate(unmatched_reagents, start=1):
-            reagent_name = reagent.get(name_key, "").strip()
-            cas = reagent.get(cas_key, "").strip()
-            stage_logger.event(f"Processing reagent {index}/{len(unmatched_reagents)}: {reagent_name} / {cas}")
-
-            with stage_logger.stage("chemical_search", f"{index}/{len(unmatched_reagents)} {reagent_name}"):
-                search_result = searcher.search(
-                    reagent_name,
-                    cas=cas,
-                    specification=reagent.get("\u89c4\u683c", ""),
-                    unit=reagent.get("\u89c4\u683c\u5355\u4f4d", ""),
-                )
-            name_result = search_result.get("name_normalization", {})
-            self.mark_duplicate_search_url_if_needed(reagent, search_result, seen_search_urls)
-            search_name = search_result.get("name") or name_result.get("standard_name") or name_result.get("cleaned_name") or reagent_name
-            search_cas = search_result.get("cas") or name_result.get("cas") or cas
-            if search_result.get("need_manual_review"):
-                with stage_logger.stage("add_manual_review_item", reagent_name):
-                    self.add_manual_review_item_from_search_failure(reagent, name_result, search_result)
-            with stage_logger.stage("llm_extract", f"{index}/{len(unmatched_reagents)} {reagent_name}"):
-                extracted = extractor.extract_properties(
-                    raw_text=search_result.get("raw_text", ""),
-                    name=f"{reagent_name} / {search_result.get('name') or str(search_name)}",
-                    cas=search_result.get("cas") or str(search_cas),
-                )
-            with stage_logger.stage("rule_classify", reagent_name):
-                classification = rule_engine.classify(self._classification_input(reagent, search_result, extracted))
-            try:
-                with stage_logger.stage("record_rule_candidate", reagent_name):
-                    if rule_maintainer.record_candidate(reagent, name_result, search_result, extracted, classification):
-                        print(f"Recorded pending rule candidate: {reagent_name}")
-            except Exception as error:
-                print(f"Could not record rule candidate for {reagent_name}: {error}")
-            suggestions.append(
-                self._approval_suggestion_row(reagent, name_result, search_result, extracted, classification)
+        if self.approval_write_mode() == "multi_page":
+            suggestions = self.process_unmatched_reagent_pages(
+                page,
+                searcher,
+                extractor,
+                rule_engine,
+                rule_maintainer,
+                seen_search_urls,
             )
+        else:
+            suggestions = self.process_current_unmatched_reagent_page(
+                page,
+                searcher,
+                extractor,
+                rule_engine,
+                rule_maintainer,
+                seen_search_urls,
+            )
+            with stage_logger.stage("apply_approval_write_mode"):
+                self.apply_approval_write_mode(page, suggestions)
 
         output_path = self._log_dir() / "approval_suggestions.xlsx"
         with stage_logger.stage("write_approval_suggestions"):
@@ -173,9 +144,6 @@ class ApprovalFlowMixin:
             )
         print(f"Saved approval suggestions: {output_path}")
         self.record_save_result("local_approval_suggestions", True, str(output_path))
-
-        with stage_logger.stage("apply_approval_write_mode"):
-            self.apply_approval_write_mode(page, suggestions)
 
         with stage_logger.stage("try_auto_pass_current_task"):
             self.try_auto_pass_current_task(page)
@@ -236,6 +204,182 @@ class ApprovalFlowMixin:
             return 50
         return max(1, max_count)
 
+    def process_unmatched_reagent_pages(
+        self,
+        page: Page,
+        searcher: ChemicalSearcher,
+        extractor: LlmExtractor,
+        rule_engine: RuleEngine,
+        rule_maintainer: RuleMaintainer,
+        seen_search_urls: dict[str, str],
+    ) -> list[dict[str, Any]]:
+        if not self.goto_first_reagent_page(page):
+            print("Could not move to first reagent page; multi-page mode will continue from current page.")
+
+        all_suggestions: list[dict[str, Any]] = []
+        visited_pages = 0
+
+        while True:
+            visited_pages += 1
+            current_page = self.current_reagent_page_number(page) or str(visited_pages)
+            page_suggestions = self.process_current_unmatched_reagent_page(
+                page,
+                searcher,
+                extractor,
+                rule_engine,
+                rule_maintainer,
+                seen_search_urls,
+                page_label=current_page,
+            )
+            all_suggestions.extend(page_suggestions)
+
+            if page_suggestions:
+                with self.stage_logger.stage("apply_approval_write_mode", f"page {current_page}"):
+                    self.apply_approval_write_mode(page, page_suggestions)
+
+            moved_next, terminal_or_error = self.click_next_reagent_page(page)
+            if not moved_next:
+                if terminal_or_error:
+                    print("Multi-page mode reached the last reagent page.")
+                else:
+                    print("Multi-page mode stopped because next-page navigation could not be verified.")
+                break
+
+            next_unmatched = self.current_page_unmatched_reagents(page)
+            if not next_unmatched:
+                print("Next sorted reagent page has no '-' rows; multi-page mode considers this list complete.")
+                break
+
+            if visited_pages >= 200:
+                raise RuntimeError("Stopped multi-page approval after 200 pages; page navigation may be stuck.")
+
+        return all_suggestions
+
+    def process_current_unmatched_reagent_page(
+        self,
+        page: Page,
+        searcher: ChemicalSearcher,
+        extractor: LlmExtractor,
+        rule_engine: RuleEngine,
+        rule_maintainer: RuleMaintainer,
+        seen_search_urls: dict[str, str],
+        page_label: str = "",
+    ) -> list[dict[str, Any]]:
+        stage_logger = getattr(self, "stage_logger", None) or StageLogger()
+        property_key = "\u7269\u5316\u7279\u6027"
+        name_key = "\u8bd5\u5242\u540d\u79f0"
+        cas_key = "CAS\u53f7"
+
+        with stage_logger.stage("read_current_page_unmatched", f"page {page_label}".strip()):
+            unmatched_reagents = [
+                record
+                for record in self.read_current_page_reagents(page)
+                if record.get(property_key, "").strip() == "-"
+            ]
+
+        page_text = f" page {page_label}" if page_label else ""
+        print(f"Found {len(unmatched_reagents)} current-page{page_text} reagent row(s) with physicochemical property '-'.")
+
+        suggestions: list[dict[str, Any]] = []
+        for index, reagent in enumerate(unmatched_reagents, start=1):
+            reagent_name = reagent.get(name_key, "").strip()
+            cas = reagent.get(cas_key, "").strip()
+            progress = f"{index}/{len(unmatched_reagents)}"
+            if page_label:
+                progress = f"page {page_label} {progress}"
+            stage_logger.event(f"Processing reagent {progress}: {reagent_name} / {cas}")
+
+            direct_suggestion = self.direct_business_rule_suggestion(reagent, rule_engine)
+            if direct_suggestion:
+                suggestions.append(direct_suggestion)
+                sequence = reagent.get("\u5e8f\u53f7", "")
+                category = direct_suggestion.get("\u6700\u7ec8\u5efa\u8bae\u7c7b\u522b", "")
+                print(
+                    "Direct business rule suggestion: "
+                    f"{sequence} {reagent_name} -> {category}"
+                )
+                continue
+
+            with stage_logger.stage("chemical_search", f"{progress} {reagent_name}"):
+                search_result = searcher.search(
+                    reagent_name,
+                    cas=cas,
+                    specification=reagent.get("\u89c4\u683c", ""),
+                    unit=reagent.get("\u89c4\u683c\u5355\u4f4d", ""),
+                )
+            name_result = search_result.get("name_normalization", {})
+            self.mark_duplicate_search_url_if_needed(reagent, search_result, seen_search_urls)
+            search_name = search_result.get("name") or name_result.get("standard_name") or name_result.get("cleaned_name") or reagent_name
+            search_cas = search_result.get("cas") or name_result.get("cas") or cas
+            if search_result.get("need_manual_review"):
+                with stage_logger.stage("add_manual_review_item", reagent_name):
+                    self.add_manual_review_item_from_search_failure(reagent, name_result, search_result)
+            with stage_logger.stage("llm_extract", f"{progress} {reagent_name}"):
+                extracted = extractor.extract_properties(
+                    raw_text=search_result.get("raw_text", ""),
+                    name=f"{reagent_name} / {search_result.get('name') or str(search_name)}",
+                    cas=search_result.get("cas") or str(search_cas),
+                )
+            with stage_logger.stage("rule_classify", reagent_name):
+                classification = rule_engine.classify(self._classification_input(reagent, search_result, extracted))
+            try:
+                with stage_logger.stage("record_rule_candidate", reagent_name):
+                    if rule_maintainer.record_candidate(reagent, name_result, search_result, extracted, classification):
+                        print(f"Recorded pending rule candidate: {reagent_name}")
+            except Exception as error:
+                print(f"Could not record rule candidate for {reagent_name}: {error}")
+            suggestions.append(
+                self._approval_suggestion_row(reagent, name_result, search_result, extracted, classification)
+            )
+
+        return suggestions
+
+    def direct_business_rule_suggestion(
+        self,
+        reagent: dict[str, str],
+        rule_engine: RuleEngine,
+    ) -> dict[str, Any] | None:
+        reagent_name = reagent.get("\u8bd5\u5242\u540d\u79f0", "")
+        classification = rule_engine.classify(
+            {
+                "reagent_name": reagent_name,
+                "name": reagent_name,
+                "standard_name": reagent_name,
+                "cleaned_name": reagent_name,
+                "text": reagent_name,
+            }
+        )
+        if classification.get("final_category") != "\u666e\u901a\u7c7b":
+            return None
+        if "\u836f\u5178\u8272\u5ea6" not in str(classification.get("reason", "")):
+            return None
+
+        name_result = {
+            "standard_name": reagent_name,
+            "cleaned_name": reagent_name,
+            "confidence": 0.95,
+            "need_manual_review": False,
+            "reason": "\u547d\u4e2d\u836f\u5178\u8272\u5ea6\u6807\u51c6\u54c1\u4e1a\u52a1\u89c4\u5219",
+        }
+        search_result = {
+            "name": reagent_name,
+            "cas": reagent.get("CAS\u53f7", ""),
+            "source": "business_rule",
+            "url": "",
+            "raw_text": "",
+            "need_manual_review": False,
+            "relevance_passed": True,
+            "source_confidence": 0.95,
+            "evidence_quality": "business_rule",
+            "name_normalization": name_result,
+        }
+        extracted = {
+            "suggested_categories": ["\u666e\u901a\u7c7b"],
+            "evidence": [classification.get("reason", "")],
+            "confidence": 0.95,
+        }
+        return self._approval_suggestion_row(reagent, name_result, search_result, extracted, classification)
+
     def apply_approval_write_mode(self, page: Page, suggestions: list[dict[str, Any]]) -> None:
         mode = self.approval_write_mode()
         if mode == "disabled":
@@ -252,7 +396,7 @@ class ApprovalFlowMixin:
         elif mode in {"single_page", "generate_library"}:
             pass
         elif mode == "multi_page":
-            print("Multi-page write mode is reserved but not enabled in this safety pass; processing current page only.")
+            pass
         else:
             print(f"Unknown APPROVAL_WRITE_MODE={mode}; no webpage fields will be changed.")
             return

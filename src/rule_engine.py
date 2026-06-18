@@ -160,6 +160,15 @@ class RuleEngine:
         if not text:
             return self._manual_result("无法判断：试剂信息为空。")
 
+        if self._is_pharmacopoeia_color_standard(reagent_info):
+            return {
+                "final_category": NORMAL_CATEGORY,
+                "matched_categories": [NORMAL_CATEGORY],
+                "reason": "试剂名称命中“药典色度标准品/色度标准溶液”业务规则，按普通类处理。",
+                "confidence": 0.95,
+                "need_manual_review": False,
+            }
+
         matches: dict[str, RuleMatch] = {}
         for rule in self.rules:
             if rule.category == "\u6eb4\u7898\u7c7b":
@@ -449,6 +458,24 @@ class RuleEngine:
     @staticmethod
     def _contains_perchloric_acid(text: str) -> bool:
         return "\u9ad8\u6c2f\u9178" in text or "perchloric acid" in text
+
+    @staticmethod
+    def _is_pharmacopoeia_color_standard(reagent_info: dict[str, Any]) -> bool:
+        name_text = RuleEngine._normalize_text(
+            " ".join(
+                str(reagent_info.get(key) or "")
+                for key in ("name", "reagent_name", "chemical_name", "standard_name", "cleaned_name")
+            )
+        )
+        tokens = (
+            "药典色度标准品",
+            "药典色度标准溶液",
+            "欧洲药典色度标准溶液",
+            "pharmacopoeiacolorstandard",
+            "pharmacopoeialcolorstandard",
+            "europeanpharmacopoeiacolorstandardsolution",
+        )
+        return any(RuleEngine._normalize_text(token) in name_text for token in tokens)
 
     @staticmethod
     def _is_hydrochloride_salt(reagent_info: dict[str, Any]) -> bool:

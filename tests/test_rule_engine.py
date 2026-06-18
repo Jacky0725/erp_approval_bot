@@ -62,6 +62,18 @@ class RuleEngineTest(unittest.TestCase):
         self.assertEqual(result["final_category"], "普通类")
         self.assertFalse(result["need_manual_review"])
 
+    def test_pharmacopoeia_color_standard_is_normal(self) -> None:
+        result = self.engine.classify(
+            {
+                "reagent_name": "药典色度标准品GY系用于检测颜色密度",
+                "text": "",
+            }
+        )
+
+        self.assertEqual(result["final_category"], "普通类")
+        self.assertFalse(result["need_manual_review"])
+        self.assertGreaterEqual(result["confidence"], 0.9)
+
     def test_example_column_alone_does_not_classify(self) -> None:
         engine = RuleEngine(
             rules=[
