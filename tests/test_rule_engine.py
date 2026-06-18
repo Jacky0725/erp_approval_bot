@@ -127,6 +127,42 @@ class RuleEngineTest(unittest.TestCase):
         self.assertEqual(high["final_category"], "\u6613\u7206\u7c7b")
         self.assertEqual(unknown["final_category"], "\u6613\u7206\u7c7b")
 
+    def test_low_flash_point_celsius_is_flammable_liquid(self) -> None:
+        result = self.engine.classify(
+            {
+                "reagent_name": "(2S)-2-(甲氧基甲基)环氧乙烷",
+                "text": "Glycidyl methyl ether. Flash Point 8.1±3.4 °C.",
+                "flash_point": "8.1±3.4 °C",
+                "allow_default_normal": True,
+            }
+        )
+
+        self.assertEqual(result["final_category"], "易燃液体")
+        self.assertFalse(result["need_manual_review"])
+
+    def test_flash_point_fahrenheit_is_converted_before_classifying(self) -> None:
+        result = self.engine.classify(
+            {
+                "reagent_name": "(2S)-2-(甲氧基甲基)环氧乙烷",
+                "text": "Methyl glycidyl ether. Flash Point: less than 69°F.",
+                "allow_default_normal": True,
+            }
+        )
+
+        self.assertEqual(result["final_category"], "易燃液体")
+        self.assertIn("闪点", result["reason"])
+
+    def test_flash_point_kelvin_is_converted_before_classifying(self) -> None:
+        result = self.engine.classify(
+            {
+                "reagent_name": "低闪点模拟试剂",
+                "flash_point": "333 K",
+                "allow_default_normal": True,
+            }
+        )
+
+        self.assertEqual(result["final_category"], "易燃液体")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -438,18 +438,121 @@ class RuleEngine:
             if category == "\u7279\u6b8a\u9178" and concentration is not None and concentration < 72.0:
                 hits.append("\u9ad8\u6c2f\u9178<72%")
 
+        if category == "\u6613\u71c3\u6db2\u4f53":
+            hits.extend(RuleEngine._flash_point_flammable_hits(reagent_info))
+
         return hits
 
     @staticmethod
     def _raw_reagent_text(reagent_info: dict[str, Any]) -> str:
         values: list[str] = []
-        for key in ("name", "reagent_name", "chemical_name", "text", "suggested_categories", "evidence"):
+        for key in (
+            "name",
+            "reagent_name",
+            "chemical_name",
+            "text",
+            "flash_point",
+            "suggested_categories",
+            "evidence",
+        ):
             value = reagent_info.get(key)
             if isinstance(value, list):
                 values.extend(str(item) for item in value)
             elif value is not None:
                 values.append(str(value))
         return " ".join(values)
+
+    @staticmethod
+    def _flash_point_flammable_hits(reagent_info: dict[str, Any]) -> list[str]:
+        hits: list[str] = []
+        for celsius, source in RuleEngine._flash_points_celsius(reagent_info):
+            if celsius < 60.0:
+                hits.append(f"\u95ea\u70b9 {celsius:.1f}\u00b0C < 60\u00b0C\uff08{source}\uff09")
+        return list(dict.fromkeys(hits))
+
+    @staticmethod
+    def _flash_points_celsius(reagent_info: dict[str, Any]) -> list[tuple[float, str]]:
+        values: list[tuple[float, str]] = []
+        flash_point = str(reagent_info.get("flash_point") or "").strip()
+        if flash_point:
+            values.extend(RuleEngine._temperatures_from_text(flash_point, require_flash_context=False))
+
+        text_parts: list[str] = []
+        for key in ("text", "evidence"):
+            value = reagent_info.get(key)
+            if isinstance(value, list):
+                text_parts.extend(str(item) for item in value)
+            elif value:
+                text_parts.append(str(value))
+        text = " ".join(text_parts)
+        if text:
+            values.extend(RuleEngine._temperatures_from_text(text, require_flash_context=True))
+
+        unique: list[tuple[float, str]] = []
+        seen: set[tuple[float, str]] = set()
+        for celsius, source in values:
+            key = (round(celsius, 3), source)
+            if key not in seen:
+                seen.add(key)
+                unique.append((celsius, source))
+        return unique
+
+    @staticmethod
+    def _temperatures_from_text(text: str, require_flash_context: bool) -> list[tuple[float, str]]:
+        normalized = (
+            str(text or "")
+            .replace("\u2103", "\u00b0C")
+            .replace("\u2109", "\u00b0F")
+            .replace("\u00ba", "\u00b0")
+            .replace("\uff05", "%")
+        )
+        snippets = [normalized]
+        if require_flash_context:
+            context_pattern = re.compile(
+                r"(?:flash\s*point|\u95ea\u70b9)[^\n;。；]{0,80}",
+                flags=re.I,
+            )
+            snippets = [match.group(0) for match in context_pattern.finditer(normalized)]
+
+        results: list[tuple[float, str]] = []
+        temperature_pattern = re.compile(
+            r"(?P<prefix><|<=|>|>=|less\s+than|below|under|about|approximately|~)?\s*"
+            r"(?P<value>-?\d+(?:\.\d+)?)"
+            r"(?:\s*(?:\+/-|\u00b1)\s*\d+(?:\.\d+)?)?\s*"
+            r"(?P<unit>\u00b0\s*[CFK]|[CFK]\b|\u534e\u6c0f\u5ea6|\u6444\u6c0f\u5ea6|\u5f00\u5c14\u6587)",
+            flags=re.I,
+        )
+        for snippet in snippets:
+            for match in temperature_pattern.finditer(snippet):
+                value = float(match.group("value"))
+                unit = RuleEngine._normalize_temperature_unit(match.group("unit"))
+                celsius = RuleEngine._to_celsius(value, unit)
+                if celsius is None:
+                    continue
+                raw = match.group(0).strip()
+                results.append((celsius, raw))
+        return results
+
+    @staticmethod
+    def _normalize_temperature_unit(unit: str) -> str:
+        compact = re.sub(r"\s+", "", str(unit or "")).lower()
+        if compact in {"\u00b0c", "c", "\u6444\u6c0f\u5ea6"}:
+            return "c"
+        if compact in {"\u00b0f", "f", "\u534e\u6c0f\u5ea6"}:
+            return "f"
+        if compact in {"\u00b0k", "k", "\u5f00\u5c14\u6587"}:
+            return "k"
+        return ""
+
+    @staticmethod
+    def _to_celsius(value: float, unit: str) -> float | None:
+        if unit == "c":
+            return value
+        if unit == "f":
+            return (value - 32.0) * 5.0 / 9.0
+        if unit == "k":
+            return value - 273.15
+        return None
 
     @staticmethod
     def _contains_azide(text: str) -> bool:
