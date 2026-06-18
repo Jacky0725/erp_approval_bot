@@ -340,5 +340,14 @@ class ChemicalSearcherTest(unittest.TestCase):
         self.assertTrue(result["need_manual_review"])
 
 
+    def test_erp_cas_is_query_priority_even_when_name_matches_different_alias(self) -> None:
+        searcher = RecordingSearcher(root_dir=ROOT_DIR)
+        result = searcher.search("????", cas="1310-73-2")
+
+        self.assertEqual(searcher.queries, ["1310-73-2"])
+        self.assertEqual(result["query"], "1310-73-2")
+        self.assertEqual(result["cas"], "1310-73-2")
+
+
 if __name__ == "__main__":
     unittest.main()

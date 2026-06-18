@@ -70,11 +70,14 @@ class ChemicalSearcher:
         normalizer = NameNormalizer(settings=self.settings, root_dir=self.root_dir)
         name_result = normalizer.normalize(raw_name=name, cas=cas, specification=specification, unit=unit)
 
-        cas_no = self._extract_cas(str(name_result.get("cas") or "")) or self._extract_cas(str(cas or ""))
+        input_cas = self._extract_cas(str(cas or ""))
+        cas_no = input_cas or self._extract_cas(str(name_result.get("cas") or ""))
         standard_name = str(name_result.get("standard_name") or "").strip()
         cleaned_name = str(name_result.get("cleaned_name") or "").strip()
         english_name = str(name_result.get("english_name") or "").strip()
         source_url = str(name_result.get("source_url") or name_result.get("chemsrc_url") or "").strip()
+        if input_cas and source_url and input_cas not in source_url:
+            source_url = ""
         aliases = [str(value).strip() for value in (name_result.get("aliases") or []) if str(value).strip()]
         queries = self._query_candidates(cas_no, standard_name, cleaned_name, english_name)
 

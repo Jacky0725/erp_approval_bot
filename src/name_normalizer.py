@@ -100,18 +100,28 @@ class NameNormalizer:
         if alias_match:
             standard_name = alias_match["standard_name"]
             aliases = alias_match.get("aliases", [])
-            matched_cas = alias_match.get("cas", cas_no)
+            alias_cas = self._extract_cas(str(alias_match.get("cas", "")))
+            matched_cas = cas_no or alias_cas
+            source_url = ""
+            if not cas_no or not alias_cas or alias_cas == cas_no:
+                source_url = alias_match.get("source_url", "") or self._source_url_for_standard_name(standard_name)
+            reason = "Matched standard name by configured alias."
+            if cas_no and alias_cas and alias_cas != cas_no:
+                reason = (
+                    "ERP provided CAS number has priority; configured alias matched the reagent name "
+                    "but its CAS/source URL was ignored because it conflicts with the ERP CAS."
+                )
             return self._result(
                 raw_name=raw_name,
                 cleaned_name=cleaned_name,
                 standard_name=standard_name,
                 english_name=alias_match.get("english_name", "") or self._english_name_for_standard_name(standard_name),
-                source_url=alias_match.get("source_url", "") or self._source_url_for_standard_name(standard_name),
+                source_url=source_url,
                 cas=matched_cas,
                 concentration=concentration,
                 aliases=aliases,
                 confidence=0.92,
-                reason="Matched standard name by configured alias.",
+                reason=reason,
             )
 
         abbreviation_match = self._lookup_abbreviation(cleaned_name, raw_name)

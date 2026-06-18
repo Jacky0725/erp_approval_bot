@@ -105,5 +105,35 @@ class NameNormalizerTest(unittest.TestCase):
         self.assertEqual(result["source_url"], "https://www.chemsrc.com/cas/10025-77-1_825977.html")
 
 
+    def test_erp_cas_overrides_conflicting_alias_cas_and_url(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            aliases_path = Path(temp_dir) / "name_aliases.yaml"
+            aliases_path.write_text(
+                """
+cas:
+  64-17-5:
+    standard_name: ethanol
+    english_name: ethanol
+    source_url: https://www.chemsrc.com/cas/64-17-5_123.html
+    aliases: [wrong-alias]
+aliases:
+  wrong-alias:
+    standard_name: ethanol
+    english_name: ethanol
+    cas: 64-17-5
+    source_url: https://www.chemsrc.com/cas/64-17-5_123.html
+abbreviations: {}
+""".lstrip(),
+                encoding="utf-8",
+            )
+
+            normalizer = NameNormalizer(root_dir=ROOT_DIR, aliases_path=aliases_path, enable_llm=False)
+            result = normalizer.normalize(raw_name="wrong-alias", cas="1310-73-2")
+
+        self.assertEqual(result["cas"], "1310-73-2")
+        self.assertEqual(result["source_url"], "")
+        self.assertIn("ERP provided CAS number has priority", result["reason"])
+
+
 if __name__ == "__main__":
     unittest.main()
