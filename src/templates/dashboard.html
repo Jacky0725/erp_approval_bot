@@ -36,7 +36,7 @@
         <span id="runBadge" class="badge">读取中</span>
         <span class="pill">AUTO_PASS <strong id="autoPassText">{{ runtime.auto_pass }}</strong></span>
         <span class="pill">写入模式 <strong id="writeModeText">{{ runtime.approval_write_mode }}</strong></span>
-        <span class="pill">处理范围 <strong id="processScopeText">{{ "全部待办" if runtime.process_all_todos == "true" else "指定/首条" }}</strong></span>
+        <span class="pill">处理范围 <strong id="processScopeText">{{ "全部待办" if runtime.process_all_todos == "true" else "勾选清单/首条" }}</strong></span>
         <a class="ghost-link" href="#settings">修改设置</a>
       </div>
     </header>
@@ -52,7 +52,7 @@
       </article>
       <article>
         <span>目标清单</span>
-        <strong id="targetList">{{ runtime.target_list_number or "-" }}</strong>
+        <strong id="targetList">-</strong>
       </article>
       <article>
         <span>大模型</span>
@@ -85,10 +85,6 @@
         </div>
         <form id="runForm">
           <input type="hidden" name="target_list_numbers" value="">
-          <label>
-            手动清单号
-            <input name="target_list_number" value="{{ runtime.target_list_number }}" placeholder="未勾选下方清单时使用，例如 SJ202606170001">
-          </label>
           <div class="todo-picker">
             <div class="todo-picker-head">
               <div>
@@ -186,7 +182,6 @@
           <label>LLM Model <input name="llm_model" value="{{ runtime.llm_model }}"></label>
           <label>LLM 超时秒数 <input name="llm_timeout_seconds" value="{{ runtime.llm_timeout_seconds }}"></label>
           <label>LLM 重试次数 <input name="llm_max_retries" value="{{ runtime.llm_max_retries }}"></label>
-          <label>默认目标清单 <input name="target_list_number" value="{{ runtime.target_list_number }}"></label>
           <label>
             默认写入模式
             <select name="approval_write_mode">
@@ -607,9 +602,9 @@
       document.querySelector("#finishedAt").textContent = safe(status.finished_at);
       document.querySelector("#autoPassText").textContent = safe(runtime.auto_pass);
       document.querySelector("#writeModeText").textContent = safe(runtime.approval_write_mode);
-      document.querySelector("#processScopeText").textContent = runtime.process_all_todos === "true" ? "全部待办" : "指定/首条";
+      document.querySelector("#processScopeText").textContent = runtime.process_all_todos === "true" ? "全部待办" : "勾选清单/首条";
       const selectedLists = selectedTodoNumbers();
-      document.querySelector("#targetList").textContent = selectedLists.length ? `${selectedLists.length} 个清单` : safe(runtime.target_list_number);
+      document.querySelector("#targetList").textContent = selectedLists.length ? `${selectedLists.length} 个清单` : "-";
       document.querySelector("#llmModel").textContent = safe(runtime.llm_model);
       document.querySelector("#suggestionRows").textContent = safe(approval.rows, "0");
       document.querySelector("#manualReview").textContent = safe(reviewQueue.pending, "0");

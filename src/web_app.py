@@ -64,7 +64,6 @@ def api_settings(
     erp_url: Annotated[str, Form()] = "",
     erp_username: Annotated[str, Form()] = "",
     erp_password: Annotated[str, Form()] = "",
-    target_list_number: Annotated[str, Form()] = "",
     target_list_numbers: Annotated[str, Form()] = "",
     process_all_todos: Annotated[str, Form()] = "",
     process_all_todos_max: Annotated[str, Form()] = "50",
@@ -86,7 +85,6 @@ def api_settings(
             "erp_url": erp_url,
             "erp_username": erp_username,
             "erp_password": erp_password,
-            "target_list_number": target_list_number,
             "process_all_todos": normalize_checkbox(process_all_todos),
             "process_all_todos_max": process_all_todos_max,
             "approval_write_mode": approval_write_mode,
@@ -106,7 +104,6 @@ def api_settings(
 @app.post("/api/run")
 def api_run(
     action: Annotated[str, Form()],
-    target_list_number: Annotated[str, Form()] = "",
     target_list_numbers: Annotated[str, Form()] = "",
     process_all_todos: Annotated[str, Form()] = "",
     process_all_todos_max: Annotated[str, Form()] = "50",
@@ -119,7 +116,7 @@ def api_run(
         raise HTTPException(status_code=400, detail=f"Unsupported action: {action}")
 
     options = {
-        "TARGET_LIST_NUMBER": target_list_number.strip(),
+        "TARGET_LIST_NUMBER": "",
         "TARGET_LIST_NUMBERS": target_list_numbers.strip(),
         "PROCESS_ALL_TODOS": normalize_checkbox(process_all_todos),
         "PROCESS_ALL_TODOS_MAX": process_all_todos_max.strip() or "50",
