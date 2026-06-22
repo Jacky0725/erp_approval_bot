@@ -13,6 +13,7 @@ from web_runner import (
     approval_summary,
     artifact_summary,
     manager,
+    review_queue_summary,
     runtime_config_snapshot,
     save_runtime_config,
 )
@@ -37,6 +38,7 @@ def dashboard(request: Request) -> HTMLResponse:
             "status": manager.status(),
             "approval": approval_summary(),
             "artifacts": artifact_summary(),
+            "review_queue": review_queue_summary(),
         },
     )
 
@@ -49,6 +51,7 @@ def api_status() -> JSONResponse:
             "status": manager.status(),
             "approval": approval_summary(),
             "artifacts": artifact_summary(),
+            "review_queue": review_queue_summary(),
         }
     )
 

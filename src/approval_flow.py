@@ -217,11 +217,42 @@ class ApprovalFlowMixin:
             print("Could not move to first reagent page; multi-page mode will continue from current page.")
 
         all_suggestions: list[dict[str, Any]] = []
-        visited_pages = 0
+        handled_reagent_keys: set[str] = set()
+        visited_steps = 0
+        refresh_sorted_first_page = True
 
         while True:
-            visited_pages += 1
-            current_page = self.current_reagent_page_number(page) or str(visited_pages)
+            visited_steps += 1
+            if refresh_sorted_first_page:
+                self.goto_first_reagent_page(page)
+                self.sort_property_column_until_unmatched_visible(page)
+                refresh_sorted_first_page = False
+
+            current_page = self.current_reagent_page_number(page) or str(visited_steps)
+            current_unmatched = self.current_page_unmatched_reagents(page)
+            unhandled_unmatched = [
+                reagent
+                for reagent in current_unmatched
+                if self.reagent_work_key(reagent) not in handled_reagent_keys
+            ]
+            if current_unmatched and not unhandled_unmatched:
+                print(
+                    f"Reagent page {current_page} still has {len(current_unmatched)} '-' row(s), "
+                    "but all were already processed or queued; moving to the next sorted page."
+                )
+                moved_next, terminal_or_error = self.click_next_reagent_page(page)
+                if not moved_next:
+                    if terminal_or_error:
+                        print("Multi-page mode reached the last sorted reagent page.")
+                    else:
+                        print("Multi-page mode stopped because next-page navigation could not be verified.")
+                    break
+                continue
+
+            if not current_unmatched:
+                print("Current sorted reagent page has no '-' rows; multi-page mode considers this list complete.")
+                break
+
             page_suggestions = self.process_current_unmatched_reagent_page(
                 page,
                 searcher,
@@ -230,6 +261,7 @@ class ApprovalFlowMixin:
                 rule_maintainer,
                 seen_search_urls,
                 page_label=current_page,
+                skip_reagent_keys=handled_reagent_keys,
             )
             all_suggestions.extend(page_suggestions)
             if page_suggestions:
@@ -239,6 +271,11 @@ class ApprovalFlowMixin:
                 with self.stage_logger.stage("apply_approval_write_mode", f"page {current_page}"):
                     self.apply_approval_write_mode(page, page_suggestions)
 
+            handled_reagent_keys.update(self.reagent_work_key(reagent) for reagent in current_unmatched)
+            if page_suggestions:
+                refresh_sorted_first_page = True
+                continue
+
             moved_next, terminal_or_error = self.click_next_reagent_page(page)
             if not moved_next:
                 if terminal_or_error:
@@ -247,12 +284,7 @@ class ApprovalFlowMixin:
                     print("Multi-page mode stopped because next-page navigation could not be verified.")
                 break
 
-            next_unmatched = self.current_page_unmatched_reagents(page)
-            if not next_unmatched:
-                print("Next sorted reagent page has no '-' rows; multi-page mode considers this list complete.")
-                break
-
-            if visited_pages >= 200:
+            if visited_steps >= 200:
                 raise RuntimeError("Stopped multi-page approval after 200 pages; page navigation may be stuck.")
 
         return all_suggestions
@@ -276,11 +308,13 @@ class ApprovalFlowMixin:
         rule_maintainer: RuleMaintainer,
         seen_search_urls: dict[str, str],
         page_label: str = "",
+        skip_reagent_keys: set[str] | None = None,
     ) -> list[dict[str, Any]]:
         stage_logger = getattr(self, "stage_logger", None) or StageLogger()
         property_key = "\u7269\u5316\u7279\u6027"
         name_key = "\u8bd5\u5242\u540d\u79f0"
         cas_key = "CAS\u53f7"
+        skip_reagent_keys = skip_reagent_keys or set()
 
         with stage_logger.stage("read_current_page_unmatched", f"page {page_label}".strip()):
             unmatched_reagents = [
@@ -288,8 +322,16 @@ class ApprovalFlowMixin:
                 for record in self.read_current_page_reagents(page)
                 if record.get(property_key, "").strip() == "-"
             ]
+            skipped_count = sum(1 for record in unmatched_reagents if self.reagent_work_key(record) in skip_reagent_keys)
+            unmatched_reagents = [
+                record
+                for record in unmatched_reagents
+                if self.reagent_work_key(record) not in skip_reagent_keys
+            ]
 
         page_text = f" page {page_label}" if page_label else ""
+        if skipped_count:
+            print(f"Skipped {skipped_count} already processed current-page '-' reagent row(s).")
         print(f"Found {len(unmatched_reagents)} current-page{page_text} reagent row(s) with physicochemical property '-'.")
 
         suggestions: list[dict[str, Any]] = []
@@ -346,12 +388,34 @@ class ApprovalFlowMixin:
 
         return suggestions
 
+    @staticmethod
+    def reagent_work_key(reagent: dict[str, Any]) -> str:
+        parts = [
+            str(reagent.get("\u5e8f\u53f7", "")).strip(),
+            str(reagent.get("\u8bd5\u5242\u540d\u79f0", "")).strip(),
+            str(reagent.get("CAS\u53f7", "")).strip(),
+            str(reagent.get("\u89c4\u683c", "")).strip(),
+            str(reagent.get("\u89c4\u683c\u5355\u4f4d", "")).strip(),
+        ]
+        return "|".join(parts)
+
     def direct_business_rule_suggestion(
         self,
         reagent: dict[str, str],
         rule_engine: RuleEngine,
     ) -> dict[str, Any] | None:
         reagent_name = reagent.get("\u8bd5\u5242\u540d\u79f0", "")
+        kit_reason = self.product_kit_normal_reason(reagent_name)
+        if kit_reason:
+            classification = {
+                "final_category": "\u666e\u901a\u7c7b",
+                "matched_categories": ["\u666e\u901a\u7c7b"],
+                "reason": kit_reason,
+                "confidence": 0.9,
+                "need_manual_review": False,
+            }
+            return self._direct_normal_suggestion(reagent, reagent_name, classification, kit_reason)
+
         classification = rule_engine.classify(
             {
                 "reagent_name": reagent_name,
@@ -365,13 +429,60 @@ class ApprovalFlowMixin:
             return None
         if "\u836f\u5178\u8272\u5ea6" not in str(classification.get("reason", "")):
             return None
+        return self._direct_normal_suggestion(
+            reagent,
+            reagent_name,
+            classification,
+            "\u547d\u4e2d\u836f\u5178\u8272\u5ea6\u6807\u51c6\u54c1\u4e1a\u52a1\u89c4\u5219",
+        )
+
+    @staticmethod
+    def product_kit_normal_reason(reagent_name: str) -> str:
+        normalized = str(reagent_name or "").replace(" ", "").lower()
+        tokens = (
+            "\u8bd5\u5242\u76d2",
+            "\u7eaf\u5316\u8bd5\u5242",
+            "\u7f13\u51b2\u6761",
+            "\u6bd4\u8272\u6db2",
+            "\u5e95\u7269",
+            "geneclean",
+            "spin",
+            "dna\u7eaf\u5316",
+            "rna\u7eaf\u5316",
+            "hydranal",
+            "water-std",
+            "waterstd",
+            "tmb",
+            "substrate",
+            "minitrap",
+            "pdmnitrap",
+            "pdminitrap",
+            "bufferstrips",
+            "bufferstrip",
+            "excelgel",
+            "gelbuffer",
+            "kit",
+        )
+        if any(token in normalized for token in tokens) and not any(
+            risk_token in normalized for risk_token in ("\u53e0\u6c2e", "\u53e0\u5316", "\u9ad8\u6c2f\u9178", "azide")
+        ):
+            return "\u8bd5\u5242\u540d\u79f0\u547d\u4e2d\u8bd5\u5242\u76d2/\u6807\u51c6\u6db2/\u5546\u54c1\u8bd5\u5242\u4e1a\u52a1\u89c4\u5219\uff0c\u6309\u666e\u901a\u7c7b\u5904\u7406\u3002"
+        return ""
+
+    def _direct_normal_suggestion(
+        self,
+        reagent: dict[str, str],
+        reagent_name: str,
+        classification: dict[str, Any],
+        name_reason: str,
+    ) -> dict[str, Any]:
 
         name_result = {
             "standard_name": reagent_name,
             "cleaned_name": reagent_name,
-            "confidence": 0.95,
+            "confidence": classification.get("confidence", 0.9),
             "need_manual_review": False,
-            "reason": "\u547d\u4e2d\u836f\u5178\u8272\u5ea6\u6807\u51c6\u54c1\u4e1a\u52a1\u89c4\u5219",
+            "reason": name_reason,
         }
         search_result = {
             "name": reagent_name,
@@ -381,7 +492,7 @@ class ApprovalFlowMixin:
             "raw_text": "",
             "need_manual_review": False,
             "relevance_passed": True,
-            "source_confidence": 0.95,
+            "source_confidence": classification.get("confidence", 0.9),
             "evidence_quality": "business_rule",
             "name_normalization": name_result,
         }
@@ -433,7 +544,7 @@ class ApprovalFlowMixin:
                 continue
 
             page.wait_for_timeout(500)
-            selected = writer.choose_property(page, category)
+            selected = writer.choose_property(page, category, row)
             if not selected:
                 self.record_save_result(f"reagent_save_{sequence}", False, f"could not select {category}")
                 print(f"Could not select physicochemical property {category} for sequence: {sequence}")

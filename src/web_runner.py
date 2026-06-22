@@ -21,6 +21,20 @@ ROOT_DIR = Path(__file__).resolve().parents[1]
 CONFIG_PATH = ROOT_DIR / "config" / "settings.yaml"
 ENV_PATH = ROOT_DIR / ".env"
 LOG_DIR = ROOT_DIR / "data" / "logs"
+REVIEW_QUEUE_PATH = ROOT_DIR / "data" / "review_queue.xlsx"
+
+
+BLOCKING_REVIEW_STATUSES = {
+    "",
+    "pending",
+    "manual_review",
+    "open",
+    "todo",
+    "待处理",
+    "待复核",
+    "人工复核",
+    "需人工复核",
+}
 
 
 def load_settings() -> dict[str, Any]:
@@ -247,6 +261,62 @@ def approval_summary(root_dir: Path = ROOT_DIR) -> dict[str, Any]:
         "rows": int(len(frame)),
         "categories": categories,
         "manual_review": manual_review,
+        "preview": preview,
+        "modified": datetime.fromtimestamp(path.stat().st_mtime).isoformat(timespec="seconds"),
+    }
+
+
+def review_queue_summary(root_dir: Path = ROOT_DIR) -> dict[str, Any]:
+    path = root_dir / "data" / "review_queue.xlsx"
+    if not path.exists():
+        return {"exists": False, "rows": 0, "pending": 0, "preview": []}
+
+    try:
+        frame = pd.read_excel(path, dtype=str).fillna("")
+    except Exception as exc:  # noqa: BLE001
+        return {"exists": True, "error": str(exc), "rows": 0, "pending": 0, "preview": []}
+
+    status_column = next((column for column in ("status", "状态", "处理状态") if column in frame.columns), "")
+    if status_column:
+        normalized = frame[status_column].astype(str).str.strip().str.lower()
+        pending_frame = frame[normalized.isin(BLOCKING_REVIEW_STATUSES)].copy()
+    else:
+        pending_frame = frame.copy()
+
+    def first_existing(row: pd.Series, columns: list[str]) -> str:
+        for column in columns:
+            if column in row.index:
+                value = str(row.get(column, "")).strip()
+                if value:
+                    return value
+        return ""
+
+    def compact_reason(value: str, limit: int = 260) -> str:
+        text = " ".join(str(value or "").split())
+        if len(text) <= limit:
+            return text
+        return text[:limit].rstrip() + "..."
+
+    preview: list[dict[str, str]] = []
+    for _, row in pending_frame.tail(30).iloc[::-1].iterrows():
+        reason = first_existing(row, ["reason", "原因", "复核原因", "manual_review_reason"])
+        preview.append(
+            {
+                "timestamp": first_existing(row, ["timestamp", "时间"]),
+                "list_number": first_existing(row, ["试剂清单号", "当前清单号", "清单号", "list_number"]),
+                "reagent_name": first_existing(row, ["试剂名称", "chemical_name", "reagent_name"]),
+                "cas": first_existing(row, ["cas", "CAS号"]),
+                "standard_name": first_existing(row, ["standard_name", "标准化名称"]),
+                "reason": compact_reason(reason),
+                "reason_full": reason,
+                "status": first_existing(row, ["status", "状态", "处理状态"]) or "pending",
+            }
+        )
+
+    return {
+        "exists": True,
+        "rows": int(len(frame)),
+        "pending": int(len(pending_frame)),
         "preview": preview,
         "modified": datetime.fromtimestamp(path.stat().st_mtime).isoformat(timespec="seconds"),
     }

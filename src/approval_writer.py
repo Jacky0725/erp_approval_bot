@@ -21,11 +21,11 @@ class ApprovalWriter:
             except (Error, TimeoutError):
                 return False
 
-    def choose_property(self, page: Page, property_name: str) -> bool:
+    def choose_property(self, page: Page, property_name: str, row: Locator | None = None) -> bool:
         if not property_name.strip():
             return False
 
-        if not self._open_property_dropdown(page):
+        if not self._open_property_dropdown(page, row):
             return False
 
         candidates = [
@@ -49,10 +49,17 @@ class ApprovalWriter:
     def generate_reagent_library(self, row: Locator) -> bool:
         return self._click_row_action(row, "\u751f\u6210\u8bd5\u5242\u5e93")
 
-    def _open_property_dropdown(self, page: Page) -> bool:
+    def _open_property_dropdown(self, page: Page, row: Locator | None = None) -> bool:
         selectors = (self.settings or {}).get("selectors", {})
         configured = str(selectors.get("property_select", "") or "").strip()
         candidates = []
+        if row is not None:
+            candidates.extend(
+                [
+                    row.locator(".ant-select").first,
+                    row.locator("input[role='combobox']").first,
+                ]
+            )
         if configured:
             candidates.append(page.locator(configured).first)
         candidates.extend(

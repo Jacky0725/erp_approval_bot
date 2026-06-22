@@ -387,7 +387,8 @@ class ReagentPageMixin:
         print(f"Saved unmatched reagent rows that blocked auto-pass: {output_path}")
 
     def goto_first_reagent_page(self, page: Page) -> bool:
-        first_page = page.locator(".ant-pagination-item-1").first
+        pagination = self.reagent_pagination(page)
+        first_page = pagination.locator(".ant-pagination-item-1").first if pagination else page.locator(".ant-pagination-item-1").last
         try:
             if first_page.count() and first_page.is_visible():
                 class_name = first_page.get_attribute("class") or ""
@@ -402,7 +403,12 @@ class ReagentPageMixin:
 
     def current_reagent_page_number(self, page: Page) -> str:
         try:
-            active = page.locator(".ant-pagination-item-active").first
+            pagination = self.reagent_pagination(page)
+            active = (
+                pagination.locator(".ant-pagination-item-active").first
+                if pagination
+                else page.locator(".ant-pagination-item-active").last
+            )
             if active.count():
                 return self.safe_inner_text(active)
         except Error:
@@ -411,7 +417,8 @@ class ReagentPageMixin:
 
     def total_reagent_pages(self, page: Page) -> int:
         try:
-            page_items = page.locator(".ant-pagination-item")
+            pagination = self.reagent_pagination(page)
+            page_items = pagination.locator(".ant-pagination-item") if pagination else page.locator(".ant-pagination-item")
             values = []
             for index in range(page_items.count()):
                 text = self.safe_inner_text(page_items.nth(index))
@@ -422,7 +429,8 @@ class ReagentPageMixin:
             return 0
 
     def click_next_reagent_page(self, page: Page) -> tuple[bool, bool]:
-        next_button = page.locator(".ant-pagination-next").first
+        pagination = self.reagent_pagination(page)
+        next_button = pagination.locator(".ant-pagination-next").first if pagination else page.locator(".ant-pagination-next").last
         try:
             if not next_button.count() or not next_button.is_visible():
                 return False, True
@@ -442,6 +450,21 @@ class ReagentPageMixin:
         except Error as error:
             print(f"Could not click next reagent page: {error}")
             return False, False
+
+    def reagent_pagination(self, page: Page) -> Locator | None:
+        candidates = [
+            page.locator("xpath=//*[normalize-space()='试剂清单']/ancestor::*[contains(@class,'ant-card') or contains(@class,'ant-table-wrapper') or contains(@class,'ant-row') or contains(@class,'ant-col')][1]").locator(".ant-pagination").last,
+            page.locator("xpath=//*[contains(normalize-space(),'试剂清单')]/following::ul[contains(@class,'ant-pagination')][1]"),
+            page.locator(".ant-table-wrapper").last.locator(".ant-pagination").last,
+            page.locator(".ant-pagination").last,
+        ]
+        for candidate in candidates:
+            try:
+                if candidate.count() and candidate.is_visible():
+                    return candidate
+            except Error:
+                continue
+        return None
 
     def export_current_page_reagents(self, page: Page) -> None:
         self.open_first_task_detail(page)
@@ -514,20 +537,21 @@ class ReagentPageMixin:
     def sort_property_column_until_unmatched_visible(self, page: Page) -> bool:
         property_key = "\u7269\u5316\u7279\u6027"
 
-        for attempt in range(1, 5):
-            print(f"Clicking physicochemical property header, attempt {attempt}/4.")
+        for attempt in range(1, 6):
+            print(f"Clicking physicochemical property header, attempt {attempt}/5.")
             self.click_reagent_property_header(page)
             self.wait_for_reagent_table_ready(page)
             page.wait_for_timeout(500)
 
-            first_properties = [
-                record.get(property_key, "").strip()
-                for record in self.read_current_page_reagents(page)[:5]
-            ]
+            properties = [record.get(property_key, "").strip() for record in self.read_current_page_reagents(page)]
+            first_properties = properties[:5]
             print(f"First 5 physicochemical properties after attempt {attempt}: {first_properties}")
 
             if "-" in first_properties:
                 print("Sorting considered successful because '-' appeared in the first rows.")
+                return True
+            if "-" in properties:
+                print("Sorting considered usable because current page still contains '-' rows.")
                 return True
 
         return False
@@ -686,6 +710,11 @@ class ReagentPageMixin:
             (wantedColumns) => {
               const displayText = (text) => (text || '').replace(/\\s+/g, ' ').trim();
               const normalizeHeader = (text) => displayText(text).replace(/\\s+/g, '');
+              const isVisible = (node) => {
+                const rect = node.getBoundingClientRect();
+                const style = window.getComputedStyle(node);
+                return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+              };
               const fallbackColumnIndexes = {
                 ['\\u5e8f\\u53f7']: 1,
                 ['\\u5206\\u7c7b\\u8bf4\\u660e']: 2,
@@ -697,6 +726,129 @@ class ReagentPageMixin:
                 ['\\u7269\\u5316\\u7279\\u6027']: 8,
                 ['\\u6280\\u672f\\u5ba1\\u6279\\u5907\\u6ce8']: 9,
               };
+              const parseLogicalTable = () => {
+                const parseRowsWithHeaders = (headers, rows) => {
+                  const columnIndexes = {};
+                  for (const wanted of wantedColumns) {
+                    const wantedHeader = normalizeHeader(wanted);
+                    const index = headers.findIndex((header) => header === wantedHeader || header.includes(wantedHeader));
+                    columnIndexes[wanted] = index >= 0 ? index : fallbackColumnIndexes[wanted];
+                  }
+
+                  return rows.map((row) => {
+                    const cells = Array.from(row.querySelectorAll('td'));
+                    const reagent = {};
+
+                    for (const wanted of wantedColumns) {
+                      const index = columnIndexes[wanted];
+                      reagent[wanted] = cells[index] ? displayText(cells[index].innerText) : '';
+                    }
+
+                    return reagent;
+                  }).filter((record) => Object.values(record).some(Boolean));
+                };
+                const hasUsableRecordProperties = (records) => {
+                  const propertyKey = '\\u7269\\u5316\\u7279\\u6027';
+                  const nameKey = '\\u8bd5\\u5242\\u540d\\u79f0';
+                  return records.some((record) => record[propertyKey] && record[propertyKey] !== nameKey);
+                };
+
+                const containers = Array.from(document.querySelectorAll('.ant-table-container'));
+                for (const container of containers) {
+                  const headers = Array.from(container.querySelectorAll('thead th')).map((th) => normalizeHeader(th.innerText));
+                  if (!headers.some((header) => header.includes('\\u8bd5\\u5242\\u540d\\u79f0'))
+                    || !headers.some((header) => header.includes('\\u7269\\u5316\\u7279\\u6027'))) {
+                    continue;
+                  }
+                  const rows = Array.from(container.querySelectorAll('tbody tr.ant-table-row'));
+                  const records = parseRowsWithHeaders(headers, rows);
+                  if (records.length && hasUsableRecordProperties(records)) {
+                    return records;
+                  }
+                }
+
+                const candidateTables = Array.from(document.querySelectorAll(
+                  '.ant-table-body table, .ant-table-content table, .ant-table-container table'
+                ));
+                const reagentTables = candidateTables.filter((table) => {
+                  const headers = Array.from(table.querySelectorAll('thead th')).map((th) => normalizeHeader(th.innerText));
+                  return headers.some((header) => header.includes('\\u8bd5\\u5242\\u540d\\u79f0'))
+                    && headers.some((header) => header.includes('\\u7269\\u5316\\u7279\\u6027'));
+                });
+
+                for (const table of reagentTables) {
+                  const headers = Array.from(table.querySelectorAll('thead th')).map((th) => normalizeHeader(th.innerText));
+                  const rows = Array.from(table.querySelectorAll('tbody tr.ant-table-row'));
+                  const records = parseRowsWithHeaders(headers, rows);
+                  if (records.length && hasUsableRecordProperties(records)) {
+                    return records;
+                  }
+                }
+
+                return [];
+              };
+
+              const logicalRecords = parseLogicalTable();
+              if (logicalRecords.length) {
+                return logicalRecords;
+              }
+
+              const visibleHeaders = Array.from(document.querySelectorAll('thead th')).filter(isVisible);
+              const headerCenters = {};
+              for (const wanted of wantedColumns) {
+                const wantedHeader = normalizeHeader(wanted);
+                const matched = visibleHeaders
+                  .map((th) => ({ th, text: normalizeHeader(th.innerText), rect: th.getBoundingClientRect() }))
+                  .filter((item) => item.text === wantedHeader || item.text.includes(wantedHeader))
+                  .sort((a, b) => b.rect.width - a.rect.width)[0];
+                if (matched) {
+                  headerCenters[wanted] = matched.rect.left + matched.rect.width / 2;
+                }
+              }
+
+              const visibleRows = Array.from(document.querySelectorAll('tbody tr.ant-table-row')).filter(isVisible);
+              const groupedRows = new Map();
+              for (const row of visibleRows) {
+                const rect = row.getBoundingClientRect();
+                const key = row.getAttribute('data-row-key') || String(Math.round(rect.top));
+                if (!groupedRows.has(key)) {
+                  groupedRows.set(key, []);
+                }
+                groupedRows.get(key).push(row);
+              }
+
+              const recordsByPosition = [];
+              for (const rows of groupedRows.values()) {
+                const cells = rows.flatMap((row) => Array.from(row.querySelectorAll('td')).filter(isVisible));
+                if (!cells.length) {
+                  continue;
+                }
+                const record = {};
+                for (const wanted of wantedColumns) {
+                  const centerX = headerCenters[wanted];
+                  let cell = null;
+                  if (Number.isFinite(centerX)) {
+                    cell = cells
+                      .map((td) => ({ td, rect: td.getBoundingClientRect() }))
+                      .filter((item) => item.rect.left - 2 <= centerX && item.rect.right + 2 >= centerX)
+                      .sort((a, b) => Math.abs((a.rect.left + a.rect.width / 2) - centerX) - Math.abs((b.rect.left + b.rect.width / 2) - centerX))[0]?.td || null;
+                  }
+                  if (!cell) {
+                    const fallbackIndex = fallbackColumnIndexes[wanted];
+                    cell = cells[fallbackIndex] || null;
+                  }
+                  record[wanted] = cell ? displayText(cell.innerText) : '';
+                }
+                recordsByPosition.push({ record, top: Math.min(...rows.map((row) => row.getBoundingClientRect().top)) });
+              }
+
+              const positioned = recordsByPosition
+                .sort((a, b) => a.top - b.top)
+                .map((item) => item.record)
+                .filter((record) => Object.values(record).some(Boolean));
+              if (positioned.length) {
+                return positioned;
+              }
 
               const tables = Array.from(document.querySelectorAll('table'));
               const reagentTable = tables.find((table) => {

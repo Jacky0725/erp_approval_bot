@@ -111,6 +111,65 @@ class ApprovalFlowTodoLoopTest(unittest.TestCase):
         self.assertFalse(suggestion["\u9700\u4eba\u5de5\u590d\u6838"])
         self.assertEqual(suggestion["\u67e5\u8be2\u6765\u6e90"], "business_rule")
 
+    def test_direct_business_rule_suggestion_allows_product_kit_without_search(self) -> None:
+        bot = Bot()
+        engine = RuleEngine.from_excel(ROOT_DIR / "config" / "rules.xlsx")
+
+        suggestion = bot.direct_business_rule_suggestion(
+            {
+                "\u5e8f\u53f7": "13",
+                "\u8bd5\u5242\u540d\u79f0": "L47 Geneclean SPIN DNA \u7eaf\u5316\u8bd5\u5242\u76d2(\u79bb\u5fc3\u67f1\u5f0f)",
+                "CAS\u53f7": "-",
+            },
+            engine,
+        )
+
+        self.assertIsNotNone(suggestion)
+        assert suggestion is not None
+        self.assertEqual(suggestion["\u6700\u7ec8\u5efa\u8bae\u7c7b\u522b"], "\u666e\u901a\u7c7b")
+        self.assertFalse(suggestion["\u9700\u4eba\u5de5\u590d\u6838"])
+        self.assertEqual(suggestion["\u67e5\u8be2\u6765\u6e90"], "business_rule")
+
+    def test_direct_business_rule_suggestion_allows_buffer_strip_product_without_search(self) -> None:
+        bot = Bot()
+        engine = RuleEngine.from_excel(ROOT_DIR / "config" / "rules.xlsx")
+
+        suggestion = bot.direct_business_rule_suggestion(
+            {
+                "\u5e8f\u53f7": "17",
+                "\u8bd5\u5242\u540d\u79f0": "BUFFER STRIPS SDS EXCELGEL",
+                "CAS\u53f7": "-",
+            },
+            engine,
+        )
+
+        self.assertIsNotNone(suggestion)
+        assert suggestion is not None
+        self.assertEqual(suggestion["\u6700\u7ec8\u5efa\u8bae\u7c7b\u522b"], "\u666e\u901a\u7c7b")
+        self.assertFalse(suggestion["\u9700\u4eba\u5de5\u590d\u6838"])
+        self.assertEqual(suggestion["\u67e5\u8be2\u6765\u6e90"], "business_rule")
+
+    def test_direct_business_rule_suggestion_allows_standard_solution_products_without_search(self) -> None:
+        bot = Bot()
+        engine = RuleEngine.from_excel(ROOT_DIR / "config" / "rules.xlsx")
+
+        for name in ("HYDRANAL WATER-STD 0.100mL", "TMB\u5e95\u7269", "\u7f8e\u56fd\u836f\u5178\u6bd4\u8272\u6db2\u5355\u8272-H", "PDMINITRAPG-10"):
+            with self.subTest(name=name):
+                suggestion = bot.direct_business_rule_suggestion(
+                    {
+                        "\u5e8f\u53f7": "17",
+                        "\u8bd5\u5242\u540d\u79f0": name,
+                        "CAS\u53f7": "-",
+                    },
+                    engine,
+                )
+
+                self.assertIsNotNone(suggestion)
+                assert suggestion is not None
+                self.assertEqual(suggestion["\u6700\u7ec8\u5efa\u8bae\u7c7b\u522b"], "\u666e\u901a\u7c7b")
+                self.assertFalse(suggestion["\u9700\u4eba\u5de5\u590d\u6838"])
+                self.assertEqual(suggestion["\u67e5\u8be2\u6765\u6e90"], "business_rule")
+
     def test_multi_page_mode_processes_until_next_page_has_no_unmatched_rows(self) -> None:
         class MultiPageBot(Bot):
             def __init__(self) -> None:
@@ -121,6 +180,9 @@ class ApprovalFlowTodoLoopTest(unittest.TestCase):
 
             def goto_first_reagent_page(self, page: object) -> bool:
                 self.page_number = 1
+                return True
+
+            def sort_property_column_until_unmatched_visible(self, page: object) -> bool:
                 return True
 
             def current_reagent_page_number(self, page: object) -> str:
@@ -140,8 +202,8 @@ class ApprovalFlowTodoLoopTest(unittest.TestCase):
                 return True, True
 
             def current_page_unmatched_reagents(self, page: object) -> list[dict[str, str]]:
-                if self.page_number == 2:
-                    return [{"\u7269\u5316\u7279\u6027": "-"}]
+                if self.page_number in {1, 2}:
+                    return [{"\u5e8f\u53f7": str(self.page_number), "\u7269\u5316\u7279\u6027": "-"}]
                 return []
 
         bot = MultiPageBot()
