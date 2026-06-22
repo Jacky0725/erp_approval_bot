@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import os
 from typing import Any
 
@@ -123,8 +124,6 @@ class ApprovalFlowMixin:
         if not sort_succeeded:
             print("Sorting did not bring '-' into the first rows within 4 clicks; reading current page '-' rows anyway.")
 
-        searcher = ChemicalSearcher(settings=self.settings, root_dir=self.root_dir)
-        extractor = LlmExtractor(settings=self.settings)
         rule_engine = RuleEngine.from_settings(self.settings, self.root_dir)
         rule_maintainer = RuleMaintainer.from_settings(self.settings, self.root_dir)
         seen_search_urls: dict[str, str] = {}
@@ -132,8 +131,6 @@ class ApprovalFlowMixin:
         if self.approval_write_mode() == "multi_page":
             suggestions = self.process_unmatched_reagent_pages(
                 page,
-                searcher,
-                extractor,
                 rule_engine,
                 rule_maintainer,
                 seen_search_urls,
@@ -141,8 +138,6 @@ class ApprovalFlowMixin:
         else:
             suggestions = self.process_current_unmatched_reagent_page(
                 page,
-                searcher,
-                extractor,
                 rule_engine,
                 rule_maintainer,
                 seen_search_urls,
@@ -249,8 +244,6 @@ class ApprovalFlowMixin:
     def process_unmatched_reagent_pages(
         self,
         page: Page,
-        searcher: ChemicalSearcher,
-        extractor: LlmExtractor,
         rule_engine: RuleEngine,
         rule_maintainer: RuleMaintainer,
         seen_search_urls: dict[str, str],
@@ -297,8 +290,6 @@ class ApprovalFlowMixin:
 
             page_suggestions = self.process_current_unmatched_reagent_page(
                 page,
-                searcher,
-                extractor,
                 rule_engine,
                 rule_maintainer,
                 seen_search_urls,
@@ -344,8 +335,6 @@ class ApprovalFlowMixin:
     def process_current_unmatched_reagent_page(
         self,
         page: Page,
-        searcher: ChemicalSearcher,
-        extractor: LlmExtractor,
         rule_engine: RuleEngine,
         rule_maintainer: RuleMaintainer,
         seen_search_urls: dict[str, str],
@@ -376,7 +365,8 @@ class ApprovalFlowMixin:
             print(f"Skipped {skipped_count} already processed current-page '-' reagent row(s).")
         print(f"Found {len(unmatched_reagents)} current-page{page_text} reagent row(s) with physicochemical property '-'.")
 
-        suggestions: list[dict[str, Any]] = []
+        suggestions_by_index: dict[int, dict[str, Any]] = {}
+        pending_reagents: list[dict[str, Any]] = []
         for index, reagent in enumerate(unmatched_reagents, start=1):
             reagent_name = reagent.get(name_key, "").strip()
             cas = reagent.get(cas_key, "").strip()
@@ -387,7 +377,7 @@ class ApprovalFlowMixin:
 
             direct_suggestion = self.direct_business_rule_suggestion(reagent, rule_engine)
             if direct_suggestion:
-                suggestions.append(direct_suggestion)
+                suggestions_by_index[index] = direct_suggestion
                 sequence = reagent.get("\u5e8f\u53f7", "")
                 category = direct_suggestion.get("\u6700\u7ec8\u5efa\u8bae\u7c7b\u522b", "")
                 print(
@@ -396,13 +386,19 @@ class ApprovalFlowMixin:
                 )
                 continue
 
-            with stage_logger.stage("chemical_search", f"{progress} {reagent_name}"):
-                search_result = searcher.search(
-                    reagent_name,
-                    cas=cas,
-                    specification=reagent.get("\u89c4\u683c", ""),
-                    unit=reagent.get("\u89c4\u683c\u5355\u4f4d", ""),
-                )
+            pending_reagents.append({"index": index, "progress": progress, "reagent": reagent})
+
+        if not pending_reagents:
+            return [suggestions_by_index[index] for index in sorted(suggestions_by_index)]
+
+        with stage_logger.stage("chemical_search", f"parallel {len(pending_reagents)} reagent(s)"):
+            search_results = self.search_reagents_parallel(pending_reagents)
+        prepared_items: list[dict[str, Any]] = []
+        for item in pending_reagents:
+            reagent = item["reagent"]
+            reagent_name = reagent.get(name_key, "").strip()
+            cas = reagent.get(cas_key, "").strip()
+            search_result = search_results.get(item["index"]) or self.search_failure_result(reagent, "parallel search did not return a result")
             name_result = search_result.get("name_normalization", {})
             self.mark_duplicate_search_url_if_needed(reagent, search_result, seen_search_urls)
             search_name = search_result.get("name") or name_result.get("standard_name") or name_result.get("cleaned_name") or reagent_name
@@ -410,25 +406,194 @@ class ApprovalFlowMixin:
             if search_result.get("need_manual_review"):
                 with stage_logger.stage("add_manual_review_item", reagent_name):
                     self.add_manual_review_item_from_search_failure(reagent, name_result, search_result)
-            with stage_logger.stage("llm_extract", f"{progress} {reagent_name}"):
-                extracted = extractor.extract_properties(
-                    raw_text=search_result.get("raw_text", ""),
-                    name=f"{reagent_name} / {search_result.get('name') or str(search_name)}",
-                    cas=search_result.get("cas") or str(search_cas),
-                )
-            with stage_logger.stage("rule_classify", reagent_name):
-                classification = rule_engine.classify(self._classification_input(reagent, search_result, extracted))
+            prepared_items.append(
+                {
+                    **item,
+                    "search_result": search_result,
+                    "name_result": name_result,
+                    "search_name": search_name,
+                    "search_cas": search_cas,
+                }
+            )
+
+        with stage_logger.stage("llm_extract", f"parallel {len(prepared_items)} reagent(s)"):
+            extracted_results = self.extract_and_classify_parallel(prepared_items, rule_engine)
+        with stage_logger.stage("rule_classify", f"parallel {len(prepared_items)} reagent(s)"):
+            print(f"Rule classification completed for {len(prepared_items)} reagent(s).")
+        for item in prepared_items:
+            reagent = item["reagent"]
+            reagent_name = reagent.get(name_key, "").strip()
+            name_result = item["name_result"]
+            search_result = item["search_result"]
+            extracted, classification = extracted_results.get(item["index"]) or self.empty_extraction_and_classification(
+                reagent,
+                search_result,
+                rule_engine,
+                "parallel LLM/classification did not return a result",
+            )
             try:
                 with stage_logger.stage("record_rule_candidate", reagent_name):
                     if rule_maintainer.record_candidate(reagent, name_result, search_result, extracted, classification):
                         print(f"Recorded pending rule candidate: {reagent_name}")
             except Exception as error:
                 print(f"Could not record rule candidate for {reagent_name}: {error}")
-            suggestions.append(
-                self._approval_suggestion_row(reagent, name_result, search_result, extracted, classification)
+            suggestions_by_index[item["index"]] = self._approval_suggestion_row(
+                reagent,
+                name_result,
+                search_result,
+                extracted,
+                classification,
             )
 
-        return suggestions
+        return [suggestions_by_index[index] for index in sorted(suggestions_by_index)]
+
+    def search_reagents_parallel(self, items: list[dict[str, Any]]) -> dict[int, dict[str, Any]]:
+        worker_count = self.parallel_worker_count()
+        if worker_count <= 1 or len(items) <= 1:
+            return {item["index"]: self.search_reagent_worker(item) for item in items}
+
+        print(f"Searching chemical websites with {worker_count} worker(s) for {len(items)} reagent(s).")
+        results: dict[int, dict[str, Any]] = {}
+        with ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix="chemical-search") as executor:
+            futures = {executor.submit(self.search_reagent_worker, item): item for item in items}
+            for future in as_completed(futures):
+                item = futures[future]
+                try:
+                    results[item["index"]] = future.result()
+                except Exception as error:  # noqa: BLE001 - keep one failed lookup from stopping the page
+                    results[item["index"]] = self.search_failure_result(item["reagent"], str(error))
+        return results
+
+    def search_reagent_worker(self, item: dict[str, Any]) -> dict[str, Any]:
+        reagent = item["reagent"]
+        reagent_name = reagent.get("\u8bd5\u5242\u540d\u79f0", "").strip()
+        print(f"[parallel search] START {item['progress']} {reagent_name}")
+        searcher = ChemicalSearcher(settings=self.settings, root_dir=self.root_dir)
+        result = searcher.search(
+            reagent_name,
+            cas=reagent.get("CAS\u53f7", "").strip(),
+            specification=reagent.get("\u89c4\u683c", ""),
+            unit=reagent.get("\u89c4\u683c\u5355\u4f4d", ""),
+        )
+        print(f"[parallel search] END {item['progress']} {reagent_name} -> {result.get('source') or 'manual_review'}")
+        return result
+
+    def extract_and_classify_parallel(
+        self,
+        items: list[dict[str, Any]],
+        rule_engine: RuleEngine,
+    ) -> dict[int, tuple[dict[str, Any], dict[str, Any]]]:
+        worker_count = self.parallel_worker_count()
+        if worker_count <= 1 or len(items) <= 1:
+            return {item["index"]: self.extract_and_classify_worker(item, rule_engine) for item in items}
+
+        print(f"Extracting LLM properties with {worker_count} worker(s) for {len(items)} reagent(s).")
+        results: dict[int, tuple[dict[str, Any], dict[str, Any]]] = {}
+        with ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix="llm-extract") as executor:
+            futures = {executor.submit(self.extract_and_classify_worker, item, rule_engine): item for item in items}
+            for future in as_completed(futures):
+                item = futures[future]
+                try:
+                    results[item["index"]] = future.result()
+                except Exception as error:  # noqa: BLE001
+                    results[item["index"]] = self.empty_extraction_and_classification(
+                        item["reagent"],
+                        item["search_result"],
+                        rule_engine,
+                        str(error),
+                    )
+        return results
+
+    def extract_and_classify_worker(
+        self,
+        item: dict[str, Any],
+        rule_engine: RuleEngine,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        reagent = item["reagent"]
+        reagent_name = reagent.get("\u8bd5\u5242\u540d\u79f0", "").strip()
+        search_result = item["search_result"]
+        print(f"[parallel llm] START {item['progress']} {reagent_name}")
+        extractor = LlmExtractor(settings=self.settings)
+        extracted = extractor.extract_properties(
+            raw_text=search_result.get("raw_text", ""),
+            name=f"{reagent_name} / {search_result.get('name') or str(item.get('search_name') or reagent_name)}",
+            cas=search_result.get("cas") or str(item.get("search_cas") or reagent.get("CAS\u53f7", "")),
+        )
+        classification = rule_engine.classify(self._classification_input(reagent, search_result, extracted))
+        print(
+            f"[parallel llm] END {item['progress']} {reagent_name} "
+            f"-> {classification.get('final_category') or '<manual_review>'}"
+        )
+        return extracted, classification
+
+    def parallel_worker_count(self) -> int:
+        approval_settings = self.settings.get("approval", {}) or {}
+        value = os.getenv("APPROVAL_PARALLEL_WORKERS") or approval_settings.get("parallel_workers", 3)
+        try:
+            workers = int(value)
+        except (TypeError, ValueError):
+            workers = 3
+        return max(1, min(8, workers))
+
+    @staticmethod
+    def search_failure_result(reagent: dict[str, Any], reason: str) -> dict[str, Any]:
+        name = str(reagent.get("\u8bd5\u5242\u540d\u79f0", "") or "").strip()
+        cas = str(reagent.get("CAS\u53f7", "") or "").strip()
+        return {
+            "name": name,
+            "cas": cas,
+            "source": "",
+            "url": "",
+            "raw_text": reason,
+            "hazard_keywords": [],
+            "need_manual_review": True,
+            "name_normalization": {
+                "raw_name": name,
+                "cleaned_name": name,
+                "standard_name": name,
+                "cas": cas,
+                "confidence": 0.0,
+                "need_manual_review": True,
+                "reason": reason,
+            },
+            "query": "",
+            "matched_site_name": "",
+            "name_similarity": 0.0,
+            "relevance_passed": False,
+            "source_confidence": 0.0,
+            "evidence_quality": "none",
+            "failure_reason": reason,
+            "fallback_source": "",
+            "fallback_url": "",
+            "used_llm_search_candidates": False,
+            "llm_search_candidates": [],
+        }
+
+    def empty_extraction_and_classification(
+        self,
+        reagent: dict[str, Any],
+        search_result: dict[str, Any],
+        rule_engine: RuleEngine,
+        reason: str,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        extracted = {
+            "name": reagent.get("\u8bd5\u5242\u540d\u79f0", ""),
+            "cas": reagent.get("CAS\u53f7", ""),
+            "flash_point": "",
+            "boiling_point": "",
+            "toxicity": "",
+            "corrosive": None,
+            "oxidizing": None,
+            "flammable": None,
+            "water_reactive": None,
+            "explosive_risk": None,
+            "heavy_metal": None,
+            "suggested_categories": [],
+            "evidence": [f"LLM/classification failed: {reason}"],
+            "confidence": 0.0,
+        }
+        classification = rule_engine.classify(self._classification_input(reagent, search_result, extracted))
+        return extracted, classification
 
     @staticmethod
     def reagent_work_key(reagent: dict[str, Any]) -> str:

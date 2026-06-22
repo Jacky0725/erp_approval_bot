@@ -718,6 +718,10 @@ def runtime_config_snapshot() -> dict[str, Any]:
             "APPROVAL_WRITE_MIN_CONFIDENCE",
             str(approval.get("write_min_confidence", 0.8)),
         ),
+        "approval_parallel_workers": os.getenv(
+            "APPROVAL_PARALLEL_WORKERS",
+            str(approval.get("parallel_workers", 3)),
+        ),
         "llm_provider": llm.get("provider", ""),
         "llm_base_url": llm.get("base_url", ""),
         "llm_model": llm.get("model", ""),
@@ -766,6 +770,10 @@ def save_runtime_config(form: dict[str, str]) -> dict[str, Any]:
     approval["write_min_confidence"] = coerce_float(
         env_updates["APPROVAL_WRITE_MIN_CONFIDENCE"],
         approval.get("write_min_confidence", 0.8),
+    )
+    approval["parallel_workers"] = coerce_int(
+        form.get("approval_parallel_workers", ""),
+        approval.get("parallel_workers", 3),
     )
     save_settings(settings)
 

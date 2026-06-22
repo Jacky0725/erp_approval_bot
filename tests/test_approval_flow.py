@@ -65,6 +65,22 @@ class ApprovalFlowTodoLoopTest(unittest.TestCase):
         with patch.dict(os.environ, {"PROCESS_ALL_TODOS_MAX": "abc"}, clear=True):
             self.assertEqual(bot.max_process_all_todos_count(), 50)
 
+    def test_parallel_worker_count_defaults_to_three_and_clamps(self) -> None:
+        bot = Bot()
+        bot.settings = {}
+
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(bot.parallel_worker_count(), 3)
+
+        with patch.dict(os.environ, {"APPROVAL_PARALLEL_WORKERS": "0"}, clear=True):
+            self.assertEqual(bot.parallel_worker_count(), 1)
+
+        with patch.dict(os.environ, {"APPROVAL_PARALLEL_WORKERS": "99"}, clear=True):
+            self.assertEqual(bot.parallel_worker_count(), 8)
+
+        with patch.dict(os.environ, {"APPROVAL_PARALLEL_WORKERS": "abc"}, clear=True):
+            self.assertEqual(bot.parallel_worker_count(), 3)
+
     def test_empty_extracted_evidence_does_not_force_manual_review(self) -> None:
         bot = Bot()
 
@@ -170,6 +186,56 @@ class ApprovalFlowTodoLoopTest(unittest.TestCase):
                 self.assertFalse(suggestion["\u9700\u4eba\u5de5\u590d\u6838"])
                 self.assertEqual(suggestion["\u67e5\u8be2\u6765\u6e90"], "business_rule")
 
+    def test_parallel_processing_keeps_table_order_with_direct_rules(self) -> None:
+        class OrderedBot(Bot):
+            def __init__(self) -> None:
+                self.settings = {"approval": {"parallel_workers": 3}}
+                self.root_dir = ROOT_DIR
+                self.stage_logger = StageLogger()
+
+            def read_current_page_reagents(self, page: object) -> list[dict[str, str]]:
+                return [
+                    {"\u5e8f\u53f7": "1", "\u8bd5\u5242\u540d\u79f0": "needs-search-a", "CAS\u53f7": "-", "\u7269\u5316\u7279\u6027": "-"},
+                    {"\u5e8f\u53f7": "2", "\u8bd5\u5242\u540d\u79f0": "\u836f\u5178\u8272\u5ea6\u6807\u51c6\u54c1", "CAS\u53f7": "-", "\u7269\u5316\u7279\u6027": "-"},
+                    {"\u5e8f\u53f7": "3", "\u8bd5\u5242\u540d\u79f0": "needs-search-b", "CAS\u53f7": "-", "\u7269\u5316\u7279\u6027": "-"},
+                ]
+
+            def search_reagents_parallel(self, items: list[dict[str, object]]) -> dict[int, dict[str, object]]:
+                return {
+                    int(item["index"]): self.search_failure_result(item["reagent"], "test")
+                    for item in items
+                }
+
+            def extract_and_classify_parallel(self, items: list[dict[str, object]], rule_engine: object) -> dict[int, tuple[dict[str, object], dict[str, object]]]:
+                results = {}
+                for item in items:
+                    results[int(item["index"])] = (
+                        {"evidence": ["test"], "confidence": 0.8},
+                        {
+                            "final_category": "\u666e\u901a\u7c7b",
+                            "matched_categories": ["\u666e\u901a\u7c7b"],
+                            "reason": "test",
+                            "confidence": 0.8,
+                            "need_manual_review": False,
+                        },
+                    )
+                return results
+
+            def add_manual_review_item_from_search_failure(self, *args: object, **kwargs: object) -> None:
+                return None
+
+        bot = OrderedBot()
+        engine = RuleEngine.from_excel(ROOT_DIR / "config" / "rules.xlsx")
+
+        suggestions = bot.process_current_unmatched_reagent_page(
+            object(),
+            engine,
+            None,
+            {},
+        )
+
+        self.assertEqual([row["\u5e8f\u53f7"] for row in suggestions], ["1", "2", "3"])
+
     def test_multi_page_mode_processes_until_next_page_has_no_unmatched_rows(self) -> None:
         class MultiPageBot(Bot):
             def __init__(self) -> None:
@@ -208,7 +274,7 @@ class ApprovalFlowTodoLoopTest(unittest.TestCase):
 
         bot = MultiPageBot()
 
-        result = bot.process_unmatched_reagent_pages(object(), None, None, None, None, {})
+        result = bot.process_unmatched_reagent_pages(object(), None, None, {})
 
         self.assertEqual([row["\u5e8f\u53f7"] for row in result], ["1", "2"])
         self.assertEqual(len(bot.applied_pages), 2)
