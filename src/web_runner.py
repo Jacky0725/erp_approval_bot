@@ -269,19 +269,12 @@ def approval_summary(root_dir: Path = ROOT_DIR) -> dict[str, Any]:
 def review_queue_summary(root_dir: Path = ROOT_DIR) -> dict[str, Any]:
     path = root_dir / "data" / "review_queue.xlsx"
     if not path.exists():
-        return {"exists": False, "rows": 0, "pending": 0, "preview": []}
+        return {"exists": False, "rows": 0, "pending": 0, "preview": [], "list_numbers": []}
 
     try:
         frame = pd.read_excel(path, dtype=str).fillna("")
     except Exception as exc:  # noqa: BLE001
-        return {"exists": True, "error": str(exc), "rows": 0, "pending": 0, "preview": []}
-
-    status_column = next((column for column in ("status", "状态", "处理状态") if column in frame.columns), "")
-    if status_column:
-        normalized = frame[status_column].astype(str).str.strip().str.lower()
-        pending_frame = frame[normalized.isin(BLOCKING_REVIEW_STATUSES)].copy()
-    else:
-        pending_frame = frame.copy()
+        return {"exists": True, "error": str(exc), "rows": 0, "pending": 0, "preview": [], "list_numbers": []}
 
     def first_existing(row: pd.Series, columns: list[str]) -> str:
         for column in columns:
@@ -291,14 +284,85 @@ def review_queue_summary(root_dir: Path = ROOT_DIR) -> dict[str, Any]:
                     return value
         return ""
 
+    status_column = next((column for column in ("status", "状态", "处理状态") if column in frame.columns), "")
+    if status_column:
+        normalized = frame[status_column].astype(str).str.strip().str.lower()
+        pending_frame = frame[normalized.isin(BLOCKING_REVIEW_STATUSES)].copy()
+    else:
+        pending_frame = frame.copy()
+
     def compact_reason(value: str, limit: int = 260) -> str:
         text = " ".join(str(value or "").split())
         if len(text) <= limit:
             return text
         return text[:limit].rstrip() + "..."
 
+    def natural_reason(value: str) -> str:
+        text = " ".join(str(value or "").split())
+        lowered = text.lower()
+        if not text:
+            return "缺少足够可信的物性证据，需要人工确认后再写入网页。"
+        if "duplicate search url" in lowered:
+            return "检索到的网页与其他试剂重复，可能没有匹配到当前试剂的专属页面，需要人工确认检索结果。"
+        if "chemsrc" in lowered and "chemicalbook" in lowered and ("失败" in text or "无有效结果" in text):
+            return "Chemsrc 和 ChemicalBook 都没有查到可信结果，需要人工核对试剂名称或补充物性资料。"
+        if "lookup failed" in lowered or "query failed" in lowered or "查询失败" in text:
+            return "化学资料查询失败，需要人工确认试剂名称、CAS 号或补充可靠资料来源。"
+        if "similarity" in lowered or "relevance" in lowered or "相似" in text:
+            return "检索结果与当前试剂名称相似度不足，可能不是同一种试剂，需要人工确认。"
+        if "confidence" in lowered or "置信度" in text:
+            return "规则判定置信度不足，需要人工复核后再决定物化特性。"
+        if "llm" in lowered or "大模型" in text:
+            return "大模型整理出的物性信息不够明确，需要人工复核证据。"
+        if "pubchem cid" in lowered or "molecularformula" in lowered or "iupacname" in lowered:
+            return "查询到了化学资料，但资料没有被规则稳定归类，需要人工核对物性证据后再处理。"
+        if "缺少" in text or "无足够" in text or "证据" in text:
+            return "缺少足够可信的物性证据，需要人工确认后再写入网页。"
+        return compact_reason(text)
+
+    def sort_value(row: pd.Series) -> pd.Timestamp:
+        raw_time = first_existing(row, ["timestamp", "时间"])
+        parsed = pd.to_datetime(raw_time, errors="coerce")
+        if pd.isna(parsed):
+            return pd.Timestamp.min
+        return parsed
+
+    if not pending_frame.empty:
+        pending_frame["_sort_time"] = pending_frame.apply(sort_value, axis=1)
+        pending_frame["_list_number"] = pending_frame.apply(
+            lambda row: first_existing(row, ["试剂清单号", "当前清单号", "清单号", "list_number"]),
+            axis=1,
+        )
+        pending_frame["_reagent_name"] = pending_frame.apply(
+            lambda row: first_existing(row, ["试剂名称", "chemical_name", "reagent_name"]),
+            axis=1,
+        )
+        pending_frame["_cas"] = pending_frame.apply(lambda row: first_existing(row, ["cas", "CAS号"]), axis=1)
+        pending_frame["_standard_name"] = pending_frame.apply(
+            lambda row: first_existing(row, ["standard_name", "标准化名称"]),
+            axis=1,
+        )
+        pending_frame["_review_key"] = (
+            pending_frame["_list_number"].astype(str)
+            + "|"
+            + pending_frame["_cas"].astype(str)
+            + "|"
+            + pending_frame["_reagent_name"].astype(str)
+            + "|"
+            + pending_frame["_standard_name"].astype(str)
+        )
+        pending_frame = (
+            pending_frame.sort_values("_sort_time", ascending=True)
+            .drop_duplicates("_review_key", keep="last")
+            .sort_values("_sort_time", ascending=False)
+        )
+
+    list_numbers = []
+    if not pending_frame.empty and "_list_number" in pending_frame.columns:
+        list_numbers = sorted(value for value in pending_frame["_list_number"].dropna().astype(str).unique() if value)
+
     preview: list[dict[str, str]] = []
-    for _, row in pending_frame.tail(30).iloc[::-1].iterrows():
+    for _, row in pending_frame.head(120).iterrows():
         reason = first_existing(row, ["reason", "原因", "复核原因", "manual_review_reason"])
         preview.append(
             {
@@ -307,7 +371,7 @@ def review_queue_summary(root_dir: Path = ROOT_DIR) -> dict[str, Any]:
                 "reagent_name": first_existing(row, ["试剂名称", "chemical_name", "reagent_name"]),
                 "cas": first_existing(row, ["cas", "CAS号"]),
                 "standard_name": first_existing(row, ["standard_name", "标准化名称"]),
-                "reason": compact_reason(reason),
+                "reason": natural_reason(reason),
                 "reason_full": reason,
                 "status": first_existing(row, ["status", "状态", "处理状态"]) or "pending",
             }
@@ -318,6 +382,7 @@ def review_queue_summary(root_dir: Path = ROOT_DIR) -> dict[str, Any]:
         "rows": int(len(frame)),
         "pending": int(len(pending_frame)),
         "preview": preview,
+        "list_numbers": list_numbers,
         "modified": datetime.fromtimestamp(path.stat().st_mtime).isoformat(timespec="seconds"),
     }
 

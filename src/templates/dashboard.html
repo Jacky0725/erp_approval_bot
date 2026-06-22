@@ -225,14 +225,23 @@
       <div class="panel-title">
         <div>
           <h2>人工复核项</h2>
-          <p id="reviewMeta">读取 data/review_queue.xlsx，并显示阻断自动通过的复核原因。</p>
+          <p id="reviewMeta">读取 data/review_queue.xlsx，默认显示仍待处理的最新复核项。</p>
+        </div>
+        <div class="review-tools">
+          <label>
+            清单号
+            <select id="reviewListFilter">
+              <option value="">全部清单</option>
+            </select>
+          </label>
+          <span id="reviewVisibleCount" class="review-count">显示 0 条</span>
         </div>
       </div>
       <div class="table-wrap">
         <table>
           <thead>
             <tr>
-              <th>时间</th>
+              <th><button type="button" id="reviewTimeSort" class="table-sort">时间 <span id="reviewSortIcon">↓</span></button></th>
               <th>清单号</th>
               <th>试剂名称</th>
               <th>CAS号</th>
@@ -274,6 +283,11 @@
   <script>
     const runForm = document.querySelector("#runForm");
     const settingsForm = document.querySelector("#settingsForm");
+    const reviewState = {
+      rows: [],
+      listNumber: "",
+      sortDirection: "desc",
+    };
 
     function setSelectValue(form, name, value) {
       const field = form.querySelector(`[name="${name}"]`);
@@ -398,12 +412,46 @@
     }
 
     function renderReviewQueue(queue) {
-      const body = document.querySelector("#reviewTable");
       const meta = document.querySelector("#reviewMeta");
       const rows = queue.preview || [];
       meta.textContent = queue.exists
-        ? `共 ${safe(queue.rows, 0)} 条，待处理 ${safe(queue.pending, 0)} 条；最近更新：${safe(queue.modified)}`
+        ? `共 ${safe(queue.rows, 0)} 条历史记录，当前待处理 ${safe(queue.pending, 0)} 条；最近更新：${safe(queue.modified)}`
         : "尚未生成 data/review_queue.xlsx";
+      reviewState.rows = rows;
+      updateReviewListFilter(queue.list_numbers || rows.map((row) => row.list_number).filter(Boolean));
+      renderReviewRows();
+    }
+
+    function updateReviewListFilter(listNumbers) {
+      const filter = document.querySelector("#reviewListFilter");
+      const current = reviewState.listNumber;
+      const unique = Array.from(new Set(listNumbers || [])).filter(Boolean).sort();
+      filter.innerHTML = '<option value="">全部清单</option>';
+      unique.forEach((listNumber) => {
+        const option = document.createElement("option");
+        option.value = listNumber;
+        option.textContent = listNumber;
+        filter.appendChild(option);
+      });
+      if (current && unique.includes(current)) {
+        filter.value = current;
+      } else {
+        reviewState.listNumber = "";
+      }
+    }
+
+    function renderReviewRows() {
+      const body = document.querySelector("#reviewTable");
+      const visibleCount = document.querySelector("#reviewVisibleCount");
+      const rows = reviewState.rows
+        .filter((row) => !reviewState.listNumber || row.list_number === reviewState.listNumber)
+        .sort((left, right) => {
+          const leftTime = Date.parse(left.timestamp || "") || 0;
+          const rightTime = Date.parse(right.timestamp || "") || 0;
+          return reviewState.sortDirection === "desc" ? rightTime - leftTime : leftTime - rightTime;
+        });
+      document.querySelector("#reviewSortIcon").textContent = reviewState.sortDirection === "desc" ? "↓" : "↑";
+      visibleCount.textContent = `显示 ${rows.length} 条`;
       body.innerHTML = "";
       if (!rows.length) {
         body.innerHTML = '<tr><td colspan="7">暂无人工复核项</td></tr>';
@@ -423,6 +471,16 @@
         body.appendChild(tr);
       });
     }
+
+    document.querySelector("#reviewListFilter").addEventListener("change", (event) => {
+      reviewState.listNumber = event.target.value;
+      renderReviewRows();
+    });
+
+    document.querySelector("#reviewTimeSort").addEventListener("click", () => {
+      reviewState.sortDirection = reviewState.sortDirection === "desc" ? "asc" : "desc";
+      renderReviewRows();
+    });
 
     function renderArtifacts(items) {
       const holder = document.querySelector("#artifactList");

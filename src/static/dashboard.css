@@ -397,7 +397,8 @@ select:focus {
 
 .switches,
 .button-row,
-.tag-row {
+.tag-row,
+.review-tools {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
@@ -419,6 +420,26 @@ select:focus {
 
 .danger-check {
   color: var(--red);
+}
+
+.review-tools {
+  justify-content: flex-end;
+}
+
+.review-tools label {
+  min-width: 210px;
+}
+
+.review-count {
+  min-height: 38px;
+  padding: 9px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel-soft);
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 900;
+  white-space: nowrap;
 }
 
 button {
@@ -513,6 +534,22 @@ th {
   background: #f8fafc;
   color: #435466;
   font-weight: 900;
+}
+
+.table-sort {
+  height: auto;
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: inherit;
+  font-weight: 900;
+}
+
+.table-sort:hover {
+  border-color: transparent;
+  color: var(--blue);
 }
 
 tbody tr {
