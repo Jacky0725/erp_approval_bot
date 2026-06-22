@@ -8,6 +8,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
+from llm_providers import fetch_provider_models, provider_options
 from web_runner import (
     ROOT_DIR,
     approval_summary,
@@ -59,6 +60,23 @@ def api_status() -> JSONResponse:
     )
 
 
+@app.get("/api/llm/providers")
+def api_llm_providers() -> JSONResponse:
+    return JSONResponse({"providers": provider_options()})
+
+
+@app.post("/api/llm/models")
+async def api_llm_models(request: Request) -> JSONResponse:
+    payload = await request.json()
+    result = fetch_provider_models(
+        provider_id=str(payload.get("provider") or "siliconflow"),
+        base_url=str(payload.get("base_url") or ""),
+        api_key=str(payload.get("api_key") or ""),
+        timeout_seconds=20,
+    )
+    return JSONResponse(result)
+
+
 @app.post("/api/settings")
 def api_settings(
     erp_url: Annotated[str, Form()] = "",
@@ -74,6 +92,7 @@ def api_settings(
     llm_provider: Annotated[str, Form()] = "siliconflow",
     llm_base_url: Annotated[str, Form()] = "",
     llm_model: Annotated[str, Form()] = "",
+    llm_api_key: Annotated[str, Form()] = "",
     siliconflow_api_key: Annotated[str, Form()] = "",
     llm_timeout_seconds: Annotated[str, Form()] = "45",
     llm_max_retries: Annotated[str, Form()] = "1",
@@ -95,6 +114,7 @@ def api_settings(
             "llm_provider": llm_provider,
             "llm_base_url": llm_base_url,
             "llm_model": llm_model,
+            "llm_api_key": llm_api_key,
             "siliconflow_api_key": siliconflow_api_key,
             "llm_timeout_seconds": llm_timeout_seconds,
             "llm_max_retries": llm_max_retries,

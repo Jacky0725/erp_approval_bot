@@ -8,6 +8,13 @@ from typing import Any
 
 from openai import OpenAI
 
+from llm_providers import (
+    get_llm_provider,
+    provider_base_url,
+    provider_default_model,
+    resolve_llm_api_key,
+)
+
 
 DEFAULT_RESULT = {
     "name": "",
@@ -68,20 +75,22 @@ class LlmExtractor:
     def __post_init__(self) -> None:
         llm_settings = (self.settings or {}).get("llm", {})
         self.provider = os.getenv("LLM_PROVIDER") or llm_settings.get("provider") or "siliconflow"
+        provider = get_llm_provider(self.provider)
         self.model = (
             self.model
-            or os.getenv("SILICONFLOW_MODEL")
             or os.getenv("LLM_MODEL")
+            or (os.getenv("SILICONFLOW_MODEL") if provider.id == "siliconflow" else "")
             or os.getenv("OPENAI_MODEL")
             or llm_settings.get("model")
+            or provider_default_model(provider.id)
             or "deepseek-ai/DeepSeek-V3.2"
         )
         self.base_url = (
-            os.getenv("SILICONFLOW_BASE_URL")
-            or os.getenv("LLM_BASE_URL")
+            os.getenv("LLM_BASE_URL")
+            or (os.getenv("SILICONFLOW_BASE_URL") if provider.id == "siliconflow" else "")
             or llm_settings.get("base_url")
-            or "https://api.siliconflow.cn/v1"
         )
+        self.base_url = provider_base_url(provider.id, self.base_url)
         self.timeout_seconds = float(
             os.getenv("LLM_TIMEOUT_SECONDS")
             or llm_settings.get("timeout_seconds")
@@ -92,7 +101,7 @@ class LlmExtractor:
             or llm_settings.get("max_retries")
             or 1
         )
-        self.api_key_env = "SILICONFLOW_API_KEY" if self.provider == "siliconflow" else "OPENAI_API_KEY"
+        self.api_key_env = provider.api_key_env
         self.client: OpenAI | None = None
 
     def extract_properties(self, raw_text: str, name: str = "", cas: str = "") -> dict[str, Any]:
@@ -133,11 +142,7 @@ class LlmExtractor:
 
     def _client(self) -> OpenAI:
         if self.client is None:
-            api_key = (
-                os.getenv("SILICONFLOW_API_KEY")
-                or os.getenv("LLM_API_KEY")
-                or os.getenv("OPENAI_API_KEY")
-            )
+            api_key = resolve_llm_api_key(self.provider)
             self.client = OpenAI(
                 api_key=api_key,
                 base_url=self.base_url,

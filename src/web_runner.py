@@ -15,6 +15,13 @@ import yaml
 from dotenv import load_dotenv
 
 from browser_bot import BrowserBot
+from llm_providers import (
+    configured_llm_api_key,
+    get_llm_provider,
+    provider_base_url,
+    provider_default_model,
+    provider_options,
+)
 
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
@@ -700,13 +707,24 @@ def runtime_config_snapshot() -> dict[str, Any]:
     settings = load_settings()
     approval = settings.get("approval", {}) or {}
     llm = settings.get("llm", {}) or {}
+    provider = get_llm_provider(os.getenv("LLM_PROVIDER") or llm.get("provider") or "siliconflow")
+    configured_base_url = os.getenv("LLM_BASE_URL") or (
+        os.getenv("SILICONFLOW_BASE_URL") if provider.id == "siliconflow" else ""
+    ) or llm.get("base_url", "")
+    configured_model = (
+        os.getenv("LLM_MODEL")
+        or (os.getenv("SILICONFLOW_MODEL") if provider.id == "siliconflow" else "")
+        or llm.get("model", "")
+        or provider_default_model(provider.id)
+    )
     return {
         "erp_url_configured": bool(os.getenv("ERP_URL", "").strip()),
         "erp_url": os.getenv("ERP_URL", ""),
         "erp_username_configured": bool(os.getenv("ERP_USERNAME", "").strip()),
         "erp_username": os.getenv("ERP_USERNAME", ""),
         "erp_password_configured": bool(os.getenv("ERP_PASSWORD", "").strip()),
-        "siliconflow_api_key_configured": bool(os.getenv("SILICONFLOW_API_KEY", "").strip()),
+        "llm_api_key_configured": configured_llm_api_key(provider.id),
+        "siliconflow_api_key_configured": configured_llm_api_key(provider.id),
         "auto_pass": os.getenv("AUTO_PASS", "false"),
         "target_list_number": os.getenv("TARGET_LIST_NUMBER", ""),
         "process_all_todos": os.getenv("PROCESS_ALL_TODOS", "false"),
@@ -722,15 +740,21 @@ def runtime_config_snapshot() -> dict[str, Any]:
             "APPROVAL_PARALLEL_WORKERS",
             str(approval.get("parallel_workers", 3)),
         ),
-        "llm_provider": llm.get("provider", ""),
-        "llm_base_url": llm.get("base_url", ""),
-        "llm_model": llm.get("model", ""),
+        "llm_provider": provider.id,
+        "llm_provider_label": provider.label,
+        "llm_provider_options": provider_options(),
+        "llm_base_url": provider_base_url(provider.id, configured_base_url),
+        "llm_model": configured_model,
         "llm_timeout_seconds": llm.get("timeout_seconds", 45),
         "llm_max_retries": llm.get("max_retries", 1),
     }
 
 
 def save_runtime_config(form: dict[str, str]) -> dict[str, Any]:
+    provider_id = form.get("llm_provider", "siliconflow").strip() or "siliconflow"
+    provider = get_llm_provider(provider_id)
+    llm_base_url = provider_base_url(provider.id, form.get("llm_base_url", "").strip())
+    llm_model = form.get("llm_model", "").strip() or provider_default_model(provider.id)
     env_updates = {
         "ERP_URL": form.get("erp_url", "").strip(),
         "ERP_USERNAME": form.get("erp_username", "").strip(),
@@ -740,28 +764,30 @@ def save_runtime_config(form: dict[str, str]) -> dict[str, Any]:
         "PROCESS_ALL_TODOS_MAX": form.get("process_all_todos_max", "50").strip() or "50",
         "APPROVAL_WRITE_MODE": form.get("approval_write_mode", "disabled").strip() or "disabled",
         "APPROVAL_WRITE_MIN_CONFIDENCE": form.get("approval_write_min_confidence", "0.8").strip() or "0.8",
-        "LLM_PROVIDER": form.get("llm_provider", "siliconflow").strip() or "siliconflow",
-        "SILICONFLOW_BASE_URL": form.get("llm_base_url", "").strip(),
-        "SILICONFLOW_MODEL": form.get("llm_model", "").strip(),
+        "LLM_PROVIDER": provider.id,
+        "LLM_BASE_URL": llm_base_url,
+        "LLM_MODEL": llm_model,
     }
+    if provider.id == "siliconflow":
+        env_updates["SILICONFLOW_BASE_URL"] = llm_base_url
+        env_updates["SILICONFLOW_MODEL"] = llm_model
 
     erp_password = form.get("erp_password", "").strip()
     if erp_password:
         env_updates["ERP_PASSWORD"] = erp_password
 
-    api_key = form.get("siliconflow_api_key", "").strip()
+    api_key = (form.get("llm_api_key", "") or form.get("siliconflow_api_key", "")).strip()
     if api_key:
-        env_updates["SILICONFLOW_API_KEY"] = api_key
+        env_updates["LLM_API_KEY"] = api_key
+        env_updates[provider.api_key_env] = api_key
 
     update_env_file(ENV_PATH, env_updates)
 
     settings = load_settings()
     llm = settings.setdefault("llm", {})
-    llm["provider"] = env_updates["LLM_PROVIDER"]
-    if env_updates["SILICONFLOW_BASE_URL"]:
-        llm["base_url"] = env_updates["SILICONFLOW_BASE_URL"]
-    if env_updates["SILICONFLOW_MODEL"]:
-        llm["model"] = env_updates["SILICONFLOW_MODEL"]
+    llm["provider"] = provider.id
+    llm["base_url"] = llm_base_url
+    llm["model"] = llm_model
     llm["timeout_seconds"] = coerce_int(form.get("llm_timeout_seconds", ""), llm.get("timeout_seconds", 45))
     llm["max_retries"] = coerce_int(form.get("llm_max_retries", ""), llm.get("max_retries", 1))
 

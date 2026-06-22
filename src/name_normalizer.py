@@ -11,6 +11,8 @@ from typing import Any
 import yaml
 from openai import OpenAI
 
+from llm_providers import get_llm_provider, provider_base_url, resolve_llm_api_key
+
 
 CAS_PATTERN = re.compile(r"\b\d{2,7}-\d{2}-\d\b")
 CONCENTRATION_PATTERNS = [
@@ -425,21 +427,22 @@ class NameNormalizer:
     def _client(self) -> OpenAI:
         if self.client is None:
             llm_settings = (self.settings or {}).get("llm", {})
+            provider_id = os.getenv("LLM_PROVIDER") or llm_settings.get("provider") or "siliconflow"
+            provider = get_llm_provider(provider_id)
             base_url = (
-                os.getenv("SILICONFLOW_BASE_URL")
-                or os.getenv("LLM_BASE_URL")
+                os.getenv("LLM_BASE_URL")
+                or (os.getenv("SILICONFLOW_BASE_URL") if provider.id == "siliconflow" else "")
                 or llm_settings.get("base_url")
-                or "https://api.siliconflow.cn/v1"
             )
-            self.client = OpenAI(api_key=self._api_key(), base_url=base_url)
+            self.client = OpenAI(api_key=self._api_key(provider.id), base_url=provider_base_url(provider.id, base_url))
         return self.client
 
     def _has_api_key(self) -> bool:
         return bool(self._api_key())
 
     @staticmethod
-    def _api_key() -> str:
-        return os.getenv("SILICONFLOW_API_KEY") or os.getenv("LLM_API_KEY") or os.getenv("OPENAI_API_KEY") or ""
+    def _api_key(provider_id: str | None = None) -> str:
+        return resolve_llm_api_key(provider_id or os.getenv("LLM_PROVIDER") or "siliconflow")
 
     def _clean_name(self, raw_name: str) -> str:
         text = unicodedata.normalize("NFKC", raw_name or "")

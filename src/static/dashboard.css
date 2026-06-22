@@ -416,6 +416,25 @@ select:focus {
   outline: none;
 }
 
+.model-picker {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+}
+
+.model-picker button {
+  min-width: 88px;
+  padding: 0 12px;
+  white-space: nowrap;
+}
+
+.field-note {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.4;
+}
+
 .small-input {
   width: 76px;
 }

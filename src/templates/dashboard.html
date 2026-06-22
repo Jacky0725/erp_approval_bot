@@ -154,7 +154,7 @@
           <div><span>ERP URL</span><strong id="erpUrl">-</strong></div>
           <div><span>ERP 账号</span><strong id="erpUser">-</strong></div>
           <div><span>ERP 密码</span><strong id="erpPassword">-</strong></div>
-          <div><span>SiliconFlow Key</span><strong id="apiKey">-</strong></div>
+          <div><span>LLM API Key</span><strong id="apiKey">-</strong></div>
           <div><span>任务动作</span><strong id="currentAction">-</strong></div>
           <div><span>最近结果</span><strong id="lastRunResult">-</strong></div>
           <div><span>开始时间</span><strong id="startedAt">-</strong></div>
@@ -176,10 +176,20 @@
           <label>ERP 登录地址 <input name="erp_url" value="{{ runtime.erp_url }}" placeholder="https://..."></label>
           <label>ERP 账号 <input name="erp_username" value="{{ runtime.erp_username }}" autocomplete="username"></label>
           <label>ERP 密码 <input name="erp_password" type="password" placeholder="留空则不修改" autocomplete="new-password"></label>
-          <label>SiliconFlow API Key <input name="siliconflow_api_key" type="password" placeholder="留空则不修改"></label>
-          <label>LLM Provider <input name="llm_provider" value="{{ runtime.llm_provider }}"></label>
-          <label>LLM Base URL <input name="llm_base_url" value="{{ runtime.llm_base_url }}"></label>
-          <label>LLM Model <input name="llm_model" value="{{ runtime.llm_model }}"></label>
+          <label>LLM API Key <input name="llm_api_key" type="password" placeholder="留空则不修改"></label>
+          <label>
+            LLM Provider
+            <select name="llm_provider" id="llmProviderSelect"></select>
+          </label>
+          <label>LLM Base URL <input name="llm_base_url" id="llmBaseUrlInput" value="{{ runtime.llm_base_url }}"></label>
+          <label>
+            LLM Model
+            <div class="model-picker">
+              <select name="llm_model" id="llmModelSelect"></select>
+              <button type="button" id="refreshLlmModels">获取模型</button>
+            </div>
+            <span id="llmModelStatus" class="field-note">填入 API Key 后可自动读取该平台模型列表。</span>
+          </label>
           <label>LLM 超时秒数 <input name="llm_timeout_seconds" value="{{ runtime.llm_timeout_seconds }}"></label>
           <label>LLM 重试次数 <input name="llm_max_retries" value="{{ runtime.llm_max_retries }}"></label>
           <label>
@@ -305,6 +315,12 @@
       selected: new Set(),
       tasks: [],
     };
+    const llmProviders = {{ runtime.llm_provider_options | tojson }};
+    const currentLlm = {
+      provider: "{{ runtime.llm_provider }}",
+      baseUrl: "{{ runtime.llm_base_url }}",
+      model: "{{ runtime.llm_model }}",
+    };
 
     function setSelectValue(form, name, value) {
       const field = form.querySelector(`[name="${name}"]`);
@@ -322,6 +338,7 @@
     setCheckbox(runForm, "auto_pass", "{{ runtime.auto_pass }}");
     setCheckbox(settingsForm, "process_all_todos", "{{ runtime.process_all_todos }}");
     setCheckbox(settingsForm, "auto_pass", "{{ runtime.auto_pass }}");
+    initLlmSettings();
 
     document.querySelectorAll("button[data-action]").forEach((button) => {
       button.addEventListener("click", async () => {
@@ -347,6 +364,77 @@
       renderTodoTasks({ tasks: todoState.tasks, exists: todoState.tasks.length > 0 });
     });
 
+    function providerById(providerId) {
+      return llmProviders.find((provider) => provider.id === providerId) || llmProviders[0] || {};
+    }
+
+    function setModelOptions(models, selectedModel) {
+      const modelSelect = document.querySelector("#llmModelSelect");
+      const values = Array.from(new Set([selectedModel, ...(models || [])].filter(Boolean)));
+      modelSelect.innerHTML = "";
+      if (!values.length) {
+        const option = document.createElement("option");
+        option.value = "";
+        option.textContent = "请先获取模型列表";
+        modelSelect.appendChild(option);
+        return;
+      }
+      values.forEach((model) => {
+        const option = document.createElement("option");
+        option.value = model;
+        option.textContent = model;
+        modelSelect.appendChild(option);
+      });
+      modelSelect.value = selectedModel && values.includes(selectedModel) ? selectedModel : values[0];
+    }
+
+    function initLlmSettings() {
+      const providerSelect = document.querySelector("#llmProviderSelect");
+      const baseUrlInput = document.querySelector("#llmBaseUrlInput");
+      if (!providerSelect || !baseUrlInput) return;
+      providerSelect.innerHTML = "";
+      llmProviders.forEach((provider) => {
+        const option = document.createElement("option");
+        option.value = provider.id;
+        option.textContent = provider.label;
+        providerSelect.appendChild(option);
+      });
+      providerSelect.value = currentLlm.provider || "siliconflow";
+      setModelOptions(providerById(providerSelect.value).default_models || [], currentLlm.model);
+
+      providerSelect.addEventListener("change", () => {
+        const provider = providerById(providerSelect.value);
+        if (provider.id !== "openai_compatible") {
+          baseUrlInput.value = provider.base_url || "";
+        }
+        setModelOptions(provider.default_models || [], "");
+        document.querySelector("#llmModelStatus").textContent = provider.notes || "填入 API Key 后可自动读取该平台模型列表。";
+      });
+    }
+
+    document.querySelector("#refreshLlmModels").addEventListener("click", async () => {
+      const providerSelect = document.querySelector("#llmProviderSelect");
+      const baseUrlInput = document.querySelector("#llmBaseUrlInput");
+      const apiKeyInput = settingsForm.querySelector('[name="llm_api_key"]');
+      const status = document.querySelector("#llmModelStatus");
+      status.textContent = "正在读取模型列表...";
+      const response = await fetch("/api/llm/models", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({
+          provider: providerSelect.value,
+          base_url: baseUrlInput.value,
+          api_key: apiKeyInput.value,
+        }),
+      });
+      const payload = await response.json();
+      const currentModel = document.querySelector("#llmModelSelect").value;
+      setModelOptions(payload.models || [], currentModel);
+      status.textContent = payload.ok
+        ? `已读取 ${payload.models.length} 个模型。`
+        : (payload.error || "没有读取到模型列表，已保留默认模型。");
+    });
+
     settingsForm.addEventListener("submit", async (event) => {
       event.preventDefault();
       const state = document.querySelector("#settingsSaveState");
@@ -362,7 +450,7 @@
       state.textContent = "已保存";
       state.className = "save-state saved";
       settingsForm.querySelector('[name="erp_password"]').value = "";
-      settingsForm.querySelector('[name="siliconflow_api_key"]').value = "";
+      settingsForm.querySelector('[name="llm_api_key"]').value = "";
       await refreshStatus();
     });
 
@@ -595,7 +683,7 @@
       document.querySelector("#erpUrl").textContent = runtime.erp_url_configured ? "已配置" : "未配置";
       document.querySelector("#erpUser").textContent = runtime.erp_username_configured ? "已配置" : "未配置";
       document.querySelector("#erpPassword").textContent = runtime.erp_password_configured ? "已配置" : "未配置";
-      document.querySelector("#apiKey").textContent = runtime.siliconflow_api_key_configured ? "已配置" : "未配置";
+      document.querySelector("#apiKey").textContent = runtime.llm_api_key_configured ? "已配置" : "未配置";
       document.querySelector("#currentAction").textContent = safe(status.action);
       document.querySelector("#lastRunResult").textContent = safe(status.result_label);
       document.querySelector("#lastRunResult").className = status.success === true ? "result-ok" : (status.success === false ? "result-failed" : "");
