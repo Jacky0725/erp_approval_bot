@@ -98,6 +98,15 @@ class ErpSessionMixin:
                     return
                 except (Error, RuntimeError) as error:
                     last_error = error
+                    failure_screenshot_path = log_dir / f"browser_failure_attempt_{attempt}.png"
+                    failure_html_path = log_dir / f"browser_failure_attempt_{attempt}.html"
+                    try:
+                        page.screenshot(path=str(failure_screenshot_path), full_page=True)
+                        failure_html_path.write_text(page.content(), encoding="utf-8")
+                        print(f"Saved browser failure screenshot: {failure_screenshot_path}")
+                        print(f"Saved browser failure HTML: {failure_html_path}")
+                    except Error as capture_error:
+                        print(f"Could not capture browser failure page: {capture_error}")
                     print(f"Browser session failed: {error}")
                     browser.close()
 

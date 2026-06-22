@@ -24,6 +24,7 @@ LOG_DIR = ROOT_DIR / "data" / "logs"
 REVIEW_QUEUE_PATH = ROOT_DIR / "data" / "review_queue.xlsx"
 WEB_RUN_STATE_PATH = LOG_DIR / "web_run_state.yaml"
 TODO_TASKS_PATH = LOG_DIR / "todo_tasks.xlsx"
+TODO_TASKS_JSON_PATH = LOG_DIR / "todo_tasks.json"
 
 
 WORKFLOW_STEPS = [
@@ -93,7 +94,6 @@ class LineBufferWriter(io.TextIOBase):
         with self._lock:
             if not self._file.closed:
                 self._file.close()
-        super().close()
 
 
 @dataclass
@@ -160,6 +160,8 @@ class AutomationJobManager:
         writer = LineBufferWriter(self.lines, log_path)
 
         try:
+            if action == "todo_export":
+                clear_todo_task_cache()
             with contextlib.redirect_stdout(writer), contextlib.redirect_stderr(writer):
                 print(f"{datetime.now().isoformat(timespec='seconds')} START {action}")
                 self._run_bot_action(action, options)
@@ -346,7 +348,6 @@ def run_health(lines: list[str], success: bool | None, error: str) -> str:
         "could not open technical judgement",
         "multi-page mode stopped because",
         "pagination check stopped",
-        "browser session failed",
         "traceback",
     )
     if any(token in text for token in warning_tokens):
@@ -560,6 +561,17 @@ def todo_tasks_summary(root_dir: Path = ROOT_DIR) -> dict[str, Any]:
         "tasks": tasks,
         "modified": datetime.fromtimestamp(path.stat().st_mtime).isoformat(timespec="seconds"),
     }
+
+
+def clear_todo_task_cache(root_dir: Path = ROOT_DIR) -> None:
+    for path in (
+        TODO_TASKS_PATH if root_dir == ROOT_DIR else root_dir / "data" / "logs" / "todo_tasks.xlsx",
+        TODO_TASKS_JSON_PATH if root_dir == ROOT_DIR else root_dir / "data" / "logs" / "todo_tasks.json",
+    ):
+        try:
+            path.unlink(missing_ok=True)
+        except OSError as error:
+            print(f"Could not clear old todo cache {path}: {error}")
 
 
 def review_queue_summary(root_dir: Path = ROOT_DIR) -> dict[str, Any]:

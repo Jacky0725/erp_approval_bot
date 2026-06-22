@@ -107,6 +107,7 @@ def api_settings(
 def api_run(
     action: Annotated[str, Form()],
     target_list_number: Annotated[str, Form()] = "",
+    target_list_numbers: Annotated[str, Form()] = "",
     process_all_todos: Annotated[str, Form()] = "",
     process_all_todos_max: Annotated[str, Form()] = "50",
     approval_write_mode: Annotated[str, Form()] = "disabled",

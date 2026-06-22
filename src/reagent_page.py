@@ -30,7 +30,7 @@ class ReagentPageMixin:
     def export_todo_tasks(self, page: Page) -> None:
         self.enter_reagent_judgement_page(page)
 
-        tasks = self.read_todo_tasks(page)
+        tasks = self.read_all_todo_tasks(page)
         output_path = self._log_dir() / "todo_tasks.xlsx"
         json_path = self._log_dir() / "todo_tasks.json"
 
@@ -45,6 +45,39 @@ class ReagentPageMixin:
         json_path.write_text(pd.DataFrame(tasks, columns=self.todo_columns()).to_json(orient="records", force_ascii=False, indent=2), encoding="utf-8")
         print(f"Saved todo tasks: {output_path}")
         print(f"Saved todo tasks JSON: {json_path}")
+
+    def read_all_todo_tasks(self, page: Page) -> list[dict[str, str]]:
+        self.goto_first_todo_page(page)
+        tasks: list[dict[str, str]] = []
+        seen_list_numbers: set[str] = set()
+        visited_pages = 0
+        list_number_key = "\u8bd5\u5242\u6e05\u5355\u53f7"
+
+        while True:
+            visited_pages += 1
+            current_page = self.current_todo_page_number(page) or str(visited_pages)
+            page_tasks = self.read_todo_tasks(page)
+            print(f"Read todo page {current_page}: {len(page_tasks)} task(s).")
+
+            for task in page_tasks:
+                list_number = self.extract_list_number(task.get(list_number_key, ""))
+                if not list_number or list_number in seen_list_numbers:
+                    continue
+                seen_list_numbers.add(list_number)
+                tasks.append(task)
+
+            moved_next, terminal_or_error = self.click_next_todo_page(page)
+            if not moved_next:
+                if terminal_or_error:
+                    print("Reached the last todo page.")
+                else:
+                    print("Todo pagination stopped before confirming the last page.")
+                break
+
+            if visited_pages >= 100:
+                raise RuntimeError("Stopped todo export after 100 pages; todo pagination may be stuck.")
+
+        return tasks
 
     def read_todo_tasks(self, page: Page) -> list[dict[str, str]]:
         return page.evaluate(
@@ -90,6 +123,71 @@ class ReagentPageMixin:
             "\u7533\u8bf7\u4eba",
             "\u8054\u7cfb\u4eba",
         ]
+
+    def goto_first_todo_page(self, page: Page) -> bool:
+        pagination = self.todo_pagination(page)
+        first_page = pagination.locator(".ant-pagination-item-1").first if pagination else page.locator(".ant-pagination-item-1").first
+        try:
+            if first_page.count() and first_page.is_visible():
+                class_name = first_page.get_attribute("class") or ""
+                if "ant-pagination-item-active" not in class_name:
+                    first_page.click()
+                    self.wait_for_table_ready(page)
+                    page.wait_for_timeout(500)
+            return True
+        except Error:
+            print("Could not move to the first todo page; continuing from current page.")
+            return False
+
+    def current_todo_page_number(self, page: Page) -> str:
+        try:
+            pagination = self.todo_pagination(page)
+            active = (
+                pagination.locator(".ant-pagination-item-active").first
+                if pagination
+                else page.locator(".ant-pagination-item-active").first
+            )
+            if active.count():
+                return self.safe_inner_text(active)
+        except Error:
+            return ""
+        return ""
+
+    def click_next_todo_page(self, page: Page) -> tuple[bool, bool]:
+        pagination = self.todo_pagination(page)
+        next_button = pagination.locator(".ant-pagination-next").first if pagination else page.locator(".ant-pagination-next").first
+        try:
+            if not next_button.count() or not next_button.is_visible():
+                return False, True
+
+            class_name = next_button.get_attribute("class") or ""
+            aria_disabled = (next_button.get_attribute("aria-disabled") or "").lower()
+            if "ant-pagination-disabled" in class_name or aria_disabled == "true":
+                return False, True
+
+            before_page = self.current_todo_page_number(page)
+            next_button.click()
+            self.wait_for_table_ready(page)
+            page.wait_for_timeout(600)
+            after_page = self.current_todo_page_number(page)
+            moved = after_page != before_page or not after_page
+            return moved, moved
+        except Error as error:
+            print(f"Could not click next todo page: {error}")
+            return False, False
+
+    def todo_pagination(self, page: Page) -> Locator | None:
+        candidates = [
+            page.locator(".ant-table-wrapper").first.locator(".ant-pagination").first,
+            page.locator(".ant-pagination").first,
+        ]
+        for candidate in candidates:
+            try:
+                if candidate.count() and candidate.is_visible():
+                    return candidate
+            except Error:
+                continue
+        return None
 
     def open_first_task_detail(self, page: Page) -> bool:
         self.enter_reagent_judgement_page(page)
