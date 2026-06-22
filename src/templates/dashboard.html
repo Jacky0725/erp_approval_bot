@@ -93,9 +93,10 @@
             <div class="todo-picker-head">
               <div>
                 <strong>待办清单</strong>
-                <span id="todoMeta">先点击“刷新待办清单”读取 ERP 待审批列表。</span>
+                <span id="todoMeta">点击“获取最新清单号”读取 ERP 待审批列表。</span>
               </div>
               <div class="button-row compact">
+                <button type="button" data-action="todo_export" class="primary todo-fetch-button">获取最新清单号</button>
                 <button type="button" id="selectAllTodos">全选</button>
                 <button type="button" id="clearTodos">清空</button>
               </div>
@@ -128,7 +129,6 @@
           </div>
           <div class="button-row">
             <button type="button" data-action="suggestions" class="primary">生成审批建议</button>
-            <button type="button" data-action="todo_export">刷新待办清单</button>
             <button type="button" data-action="judgement_capture">采集试剂判定页</button>
             <button type="button" data-action="debug_capture">采集首页</button>
           </div>
@@ -467,7 +467,7 @@
       todoState.tasks = tasks;
       meta.textContent = todoTasks.exists
         ? `共 ${safe(todoTasks.rows, tasks.length)} 条；最近刷新：${safe(todoTasks.modified)}`
-        : "先点击“刷新待办清单”读取 ERP 待审批列表。";
+        : "点击“获取最新清单号”读取 ERP 待审批列表。";
       holder.innerHTML = "";
       if (!tasks.length) {
         holder.innerHTML = "<p>暂无待办清单缓存。</p>";

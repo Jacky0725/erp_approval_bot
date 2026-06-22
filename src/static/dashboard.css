@@ -440,6 +440,11 @@ select:focus {
   font-size: 12px;
 }
 
+.button-row.compact .todo-fetch-button {
+  min-width: 126px;
+  padding: 0 13px;
+}
+
 .check,
 .inline-field {
   display: flex;
@@ -471,6 +476,10 @@ select:focus {
   justify-content: space-between;
   align-items: center;
   gap: 12px;
+}
+
+.todo-picker-head .button-row {
+  justify-content: flex-end;
 }
 
 .todo-picker-head strong,
