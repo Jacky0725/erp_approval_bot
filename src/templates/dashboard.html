@@ -64,9 +64,9 @@
       </article>
     </section>
 
-    <section class="timeline panel">
-      <div class="step done">登录 ERP</div>
-      <div class="step done">进入试剂判定</div>
+    <section class="timeline panel" id="workflowSteps">
+      <div class="step">登录 ERP</div>
+      <div class="step">进入试剂判定</div>
       <div class="step">一键匹配</div>
       <div class="step">排序读取 "-"</div>
       <div class="step">网站查询</div>
@@ -498,6 +498,19 @@
       });
     }
 
+    function renderWorkflow(workflow) {
+      const holder = document.querySelector("#workflowSteps");
+      const steps = workflow && workflow.steps ? workflow.steps : [];
+      if (!steps.length) return;
+      holder.innerHTML = "";
+      steps.forEach((step) => {
+        const item = document.createElement("div");
+        item.className = `step ${escapeHtml(step.state || "waiting")}`;
+        item.textContent = step.label || "";
+        holder.appendChild(item);
+      });
+    }
+
     async function refreshStatus() {
       const response = await fetch("/api/status");
       const data = await response.json();
@@ -529,6 +542,7 @@
       renderTags(approval.categories || {});
       renderSuggestions(approval.preview || []);
       renderReviewQueue(reviewQueue);
+      renderWorkflow(status.workflow || {});
       renderArtifacts(data.artifacts || []);
       document.querySelector("#logBox").textContent = (status.log_tail || []).join("\n") || "等待任务输出...";
     }

@@ -307,6 +307,26 @@ h2 {
   background: var(--teal);
 }
 
+.step.active {
+  background: var(--blue-soft);
+  color: #105787;
+  box-shadow: inset 0 0 0 1px rgba(23, 105, 170, 0.16);
+}
+
+.step.active::before {
+  background: var(--blue);
+  box-shadow: 0 0 0 4px rgba(23, 105, 170, 0.12);
+}
+
+.step.failed {
+  background: var(--red-soft);
+  color: var(--red);
+}
+
+.step.failed::before {
+  background: var(--red);
+}
+
 .workspace-grid {
   display: grid;
   grid-template-columns: minmax(420px, 1.05fr) minmax(350px, 0.7fr) minmax(300px, 0.5fr);

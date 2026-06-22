@@ -24,6 +24,18 @@ LOG_DIR = ROOT_DIR / "data" / "logs"
 REVIEW_QUEUE_PATH = ROOT_DIR / "data" / "review_queue.xlsx"
 
 
+WORKFLOW_STEPS = [
+    {"id": "login", "label": "登录 ERP"},
+    {"id": "judgement", "label": "进入试剂判定"},
+    {"id": "auto_match", "label": "一键匹配"},
+    {"id": "sort_read", "label": '排序读取 "-"'},
+    {"id": "search", "label": "网站查询"},
+    {"id": "llm", "label": "大模型整理"},
+    {"id": "rule", "label": "规则判定"},
+    {"id": "write", "label": "网页写入"},
+]
+
+
 BLOCKING_REVIEW_STATUSES = {
     "",
     "pending",
@@ -118,14 +130,19 @@ class AutomationJobManager:
 
     def status(self) -> dict[str, Any]:
         with self._lock:
+            log_tail = self.lines[-160:]
+            running = self.running
+            success = self.success
+            error = self.error
             return {
-                "running": self.running,
+                "running": running,
                 "action": self.action,
                 "started_at": self.started_at,
                 "finished_at": self.finished_at,
-                "success": self.success,
-                "error": self.error,
-                "log_tail": self.lines[-160:],
+                "success": success,
+                "error": error,
+                "log_tail": log_tail,
+                "workflow": workflow_summary(log_tail, running=running, success=success, error=error),
             }
 
     def _run(self, action: str, options: dict[str, str]) -> None:
@@ -203,6 +220,139 @@ def temporary_env(overrides: dict[str, str]) -> Iterator[None]:
                 os.environ.pop(key, None)
             else:
                 os.environ[key] = value
+
+
+def workflow_summary(
+    lines: list[str],
+    *,
+    running: bool,
+    success: bool | None,
+    error: str,
+) -> dict[str, Any]:
+    active_step = active_workflow_step(lines)
+    seen_order = highest_seen_workflow_index(lines)
+    active_index = workflow_step_index(active_step)
+
+    if running and active_index < 0:
+        active_step = "login"
+        active_index = 0
+
+    if running and active_index >= 0:
+        completed_index = active_index - 1
+    elif success:
+        completed_index = seen_order
+    else:
+        completed_index = seen_order
+
+    steps = []
+    for index, step in enumerate(WORKFLOW_STEPS):
+        state = "waiting"
+        if index <= completed_index:
+            state = "done"
+        if running and index == active_index:
+            state = "active"
+        elif error and not running and index == active_index:
+            state = "failed"
+        steps.append({**step, "state": state})
+
+    current = WORKFLOW_STEPS[active_index] if active_index >= 0 else None
+    return {
+        "current_step": current["id"] if current else "",
+        "current_label": current["label"] if current else ("已完成" if success else "未运行"),
+        "steps": steps,
+    }
+
+
+def workflow_step_index(step_id: str) -> int:
+    for index, step in enumerate(WORKFLOW_STEPS):
+        if step["id"] == step_id:
+            return index
+    return -1
+
+
+def active_workflow_step(lines: list[str]) -> str:
+    active_stage = ""
+    for line in lines:
+        stage = parse_flow_stage(line, "START")
+        if stage:
+            active_stage = stage
+            continue
+        stage = parse_flow_stage(line, "END")
+        if stage and stage == active_stage:
+            active_stage = ""
+    if active_stage:
+        return stage_to_workflow_step(active_stage)
+
+    for line in reversed(lines):
+        step = line_to_workflow_step(line)
+        if step:
+            return step
+    return ""
+
+
+def highest_seen_workflow_index(lines: list[str]) -> int:
+    highest = -1
+    for line in lines:
+        step = line_to_workflow_step(line)
+        index = workflow_step_index(step)
+        if index > highest:
+            highest = index
+    return highest
+
+
+def parse_flow_stage(line: str, marker: str) -> str:
+    needle = f"[FLOW] {marker}"
+    if needle not in line:
+        return ""
+    tail = line.split(needle, 1)[1].strip()
+    if not tail:
+        return ""
+    return tail.split(" - ", 1)[0].split(" (", 1)[0].strip()
+
+
+def line_to_workflow_step(line: str) -> str:
+    for marker in ("START", "END"):
+        stage = parse_flow_stage(line, marker)
+        if stage:
+            mapped = stage_to_workflow_step(stage)
+            if mapped:
+                return mapped
+
+    text = line.lower()
+    if "opening menu" in text or "opening page" in text or "opening target task detail" in text or "todo list refresh" in text:
+        return "judgement"
+    if "auto-match" in text or "一键匹配" in line:
+        return "auto_match"
+    if "physicochemical property header" in text or "read_current_page_unmatched" in text or "sorting considered successful" in text:
+        return "sort_read"
+    if "chemsrc" in text or "chemicalbook" in text or "chemical_search" in text:
+        return "search"
+    if "llm_extract" in text or "大模型" in line:
+        return "llm"
+    if "rule_classify" in text or "规则判定" in line:
+        return "rule"
+    if "approval write candidate" in text or "save result for sequence" in text or "apply_approval_write_mode" in text:
+        return "write"
+    if "start " in text:
+        return "login"
+    return ""
+
+
+def stage_to_workflow_step(stage: str) -> str:
+    normalized = stage.strip().lower()
+    if normalized in {"perform_auto_match"}:
+        return "auto_match"
+    if normalized in {"wait_reagent_table_ready", "read_detail_info", "sort_property_column", "read_current_page_unmatched"}:
+        return "sort_read"
+    if normalized in {"chemical_search"}:
+        return "search"
+    if normalized in {"llm_extract"}:
+        return "llm"
+    if normalized in {"rule_classify", "record_rule_candidate", "add_manual_review_item"}:
+        return "rule"
+    if normalized in {"apply_approval_write_mode"}:
+        return "write"
+    return ""
 
 
 def artifact_summary(root_dir: Path = ROOT_DIR) -> list[dict[str, Any]]:
