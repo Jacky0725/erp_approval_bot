@@ -6,6 +6,12 @@ from typing import Any
 from playwright.sync_api import Error, Locator, Page, TimeoutError
 
 
+DEFAULT_PROPERTY_ALIASES = {
+    "\u5f3a\u53cd\u5e94\u6027": ["\u5f3a\u53cd\u5e94"],
+    "\u5f3a\u53cd\u5e94": ["\u5f3a\u53cd\u5e94\u6027"],
+}
+
+
 @dataclass
 class ApprovalWriter:
     settings: dict[str, Any] | None = None
@@ -28,20 +34,49 @@ class ApprovalWriter:
         if not self._open_property_dropdown(page, row):
             return False
 
-        candidates = [
-            page.locator(".ant-select-dropdown:not(.ant-select-dropdown-hidden) .ant-select-item-option")
-            .filter(has_text=property_name)
-            .first,
-            page.get_by_text(property_name, exact=True).first,
-        ]
-        for candidate in candidates:
-            try:
-                if candidate.count() and candidate.is_visible():
-                    candidate.click(timeout=3000)
-                    return True
-            except (Error, TimeoutError):
-                continue
+        for candidate_name in self.property_name_candidates(property_name):
+            candidates = [
+                page.locator(".ant-select-dropdown:not(.ant-select-dropdown-hidden) .ant-select-item-option")
+                .filter(has_text=candidate_name)
+                .first,
+                page.get_by_text(candidate_name, exact=True).first,
+            ]
+            for candidate in candidates:
+                try:
+                    if candidate.count() and candidate.is_visible():
+                        candidate.click(timeout=3000)
+                        return True
+                except (Error, TimeoutError):
+                    continue
         return False
+
+    def property_name_candidates(self, property_name: str) -> list[str]:
+        property_name = str(property_name or "").strip()
+        if not property_name:
+            return []
+
+        aliases = dict(DEFAULT_PROPERTY_ALIASES)
+        configured_aliases = (
+            (self.settings or {})
+            .get("reagent", {})
+            .get("physicochemical_property_aliases", {})
+        )
+        if isinstance(configured_aliases, dict):
+            for key, values in configured_aliases.items():
+                key_text = str(key or "").strip()
+                if not key_text:
+                    continue
+                if isinstance(values, str):
+                    value_list = [values]
+                elif isinstance(values, list):
+                    value_list = values
+                else:
+                    value_list = []
+                aliases.setdefault(key_text, [])
+                aliases[key_text].extend(str(value or "").strip() for value in value_list if str(value or "").strip())
+
+        candidates = [property_name, *aliases.get(property_name, [])]
+        return list(dict.fromkeys(candidate for candidate in candidates if candidate))
 
     def save(self, row: Locator) -> bool:
         return self._click_row_action(row, "\u4fdd\u5b58")
