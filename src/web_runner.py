@@ -22,6 +22,7 @@ CONFIG_PATH = ROOT_DIR / "config" / "settings.yaml"
 ENV_PATH = ROOT_DIR / ".env"
 LOG_DIR = ROOT_DIR / "data" / "logs"
 REVIEW_QUEUE_PATH = ROOT_DIR / "data" / "review_queue.xlsx"
+WEB_RUN_STATE_PATH = LOG_DIR / "web_run_state.yaml"
 
 
 WORKFLOW_STEPS = [
@@ -119,6 +120,7 @@ class AutomationJobManager:
             self.success = None
             self.error = ""
             self.lines = []
+            self._persist_state()
             self._thread = threading.Thread(
                 target=self._run,
                 args=(action, options),
@@ -130,6 +132,8 @@ class AutomationJobManager:
 
     def status(self) -> dict[str, Any]:
         with self._lock:
+            if not self.running and not self.action:
+                return self._status_from_persisted_state()
             log_tail = self.lines[-160:]
             running = self.running
             success = self.success
@@ -141,6 +145,7 @@ class AutomationJobManager:
                 "finished_at": self.finished_at,
                 "success": success,
                 "error": error,
+                "result_label": result_label(running, success, error),
                 "log_tail": log_tail,
                 "workflow": workflow_summary(log_tail, running=running, success=success, error=error),
             }
@@ -168,6 +173,54 @@ class AutomationJobManager:
                 self.finished_at = datetime.now().isoformat(timespec="seconds")
                 self.success = success
                 self.error = error
+                self._persist_state()
+
+    def _persist_state(self) -> None:
+        WEB_RUN_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "running": self.running,
+            "action": self.action,
+            "started_at": self.started_at,
+            "finished_at": self.finished_at,
+            "success": self.success,
+            "error": self.error,
+            "log_tail": self.lines[-160:],
+        }
+        with WEB_RUN_STATE_PATH.open("w", encoding="utf-8") as file:
+            yaml.safe_dump(payload, file, allow_unicode=True, sort_keys=False)
+
+    def _status_from_persisted_state(self) -> dict[str, Any]:
+        if not WEB_RUN_STATE_PATH.exists():
+            return {
+                "running": False,
+                "action": "",
+                "started_at": "",
+                "finished_at": "",
+                "success": None,
+                "error": "",
+                "result_label": "未运行",
+                "log_tail": [],
+                "workflow": workflow_summary([], running=False, success=None, error=""),
+            }
+        try:
+            with WEB_RUN_STATE_PATH.open("r", encoding="utf-8") as file:
+                payload = yaml.safe_load(file) or {}
+        except Exception:
+            payload = {}
+        log_tail = payload.get("log_tail") or []
+        success = payload.get("success")
+        error = str(payload.get("error") or "")
+        return {
+            "running": False,
+            "action": str(payload.get("action") or ""),
+            "started_at": str(payload.get("started_at") or ""),
+            "finished_at": str(payload.get("finished_at") or ""),
+            "success": success,
+            "error": error,
+            "result_label": result_label(False, success, error),
+            "log_tail": log_tail,
+            "workflow": workflow_summary(log_tail, running=False, success=success, error=error),
+        }
 
     def _run_bot_action(self, action: str, options: dict[str, str]) -> None:
         load_dotenv(self.root_dir / ".env")
@@ -261,6 +314,16 @@ def workflow_summary(
         "current_label": current["label"] if current else ("已完成" if success else "未运行"),
         "steps": steps,
     }
+
+
+def result_label(running: bool, success: bool | None, error: str) -> str:
+    if running:
+        return "运行中"
+    if success is True:
+        return "成功"
+    if success is False or error:
+        return "失败"
+    return "未运行"
 
 
 def workflow_step_index(step_id: str) -> int:

@@ -103,6 +103,7 @@ class ApprovalFlowMixin:
             self.wait_for_reagent_table_ready(page)
         with stage_logger.stage("read_detail_info"):
             self._current_detail_info = self.read_detail_info(page)
+        self.clear_manual_review_items_for_list(self._current_detail_info.get("\u5f53\u524d\u6e05\u5355\u53f7", ""))
 
         with stage_logger.stage("sort_property_column"):
             sort_succeeded = self.sort_property_column_until_unmatched_visible(page)

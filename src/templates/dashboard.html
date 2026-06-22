@@ -144,6 +144,7 @@
           <div><span>ERP 密码</span><strong id="erpPassword">-</strong></div>
           <div><span>SiliconFlow Key</span><strong id="apiKey">-</strong></div>
           <div><span>任务动作</span><strong id="currentAction">-</strong></div>
+          <div><span>最近结果</span><strong id="lastRunResult">-</strong></div>
           <div><span>开始时间</span><strong id="startedAt">-</strong></div>
           <div><span>结束时间</span><strong id="finishedAt">-</strong></div>
         </div>
@@ -519,14 +520,16 @@
       const approval = data.approval || {};
       const reviewQueue = data.review_queue || {};
 
-      document.querySelector("#runBadge").textContent = status.running ? "运行中" : (status.success === false ? "失败" : "空闲");
-      document.querySelector("#runBadge").className = status.running ? "badge running" : (status.success === false ? "badge failed" : "badge");
+      document.querySelector("#runBadge").textContent = status.running ? "运行中" : (status.success === false ? "失败" : (status.success === true ? "成功" : "空闲"));
+      document.querySelector("#runBadge").className = status.running ? "badge running" : (status.success === false ? "badge failed" : (status.success === true ? "badge succeeded" : "badge"));
       document.querySelector("#statusLine").textContent = status.running ? "任务执行中，请保持 Playwright 浏览器可见。" : safe(status.error, "当前没有运行中的任务。");
       document.querySelector("#erpUrl").textContent = runtime.erp_url_configured ? "已配置" : "未配置";
       document.querySelector("#erpUser").textContent = runtime.erp_username_configured ? "已配置" : "未配置";
       document.querySelector("#erpPassword").textContent = runtime.erp_password_configured ? "已配置" : "未配置";
       document.querySelector("#apiKey").textContent = runtime.siliconflow_api_key_configured ? "已配置" : "未配置";
       document.querySelector("#currentAction").textContent = safe(status.action);
+      document.querySelector("#lastRunResult").textContent = safe(status.result_label);
+      document.querySelector("#lastRunResult").className = status.success === true ? "result-ok" : (status.success === false ? "result-failed" : "");
       document.querySelector("#startedAt").textContent = safe(status.started_at);
       document.querySelector("#finishedAt").textContent = safe(status.finished_at);
       document.querySelector("#autoPassText").textContent = safe(runtime.auto_pass);

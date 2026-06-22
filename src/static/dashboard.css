@@ -201,6 +201,11 @@ h2 {
   color: #08746a;
 }
 
+.badge.succeeded {
+  background: var(--green-soft);
+  color: var(--green);
+}
+
 .badge.failed,
 .warn,
 .save-state.failed {
@@ -500,6 +505,14 @@ button.primary:hover {
 
 .status-list strong {
   text-align: right;
+}
+
+.result-ok {
+  color: var(--green);
+}
+
+.result-failed {
+  color: var(--red);
 }
 
 .evidence-box {

@@ -19,6 +19,49 @@ BLOCKING_REVIEW_STATUSES = {
 
 
 class ReviewQueueMixin:
+    def clear_manual_review_items_for_list(self, list_number: str) -> None:
+        list_number = str(list_number or "").strip()
+        if not list_number:
+            return
+
+        paths = self.settings.get("paths", {})
+        review_queue_path = self.root_dir / paths.get("review_queue_excel", "data/review_queue.xlsx")
+        if not review_queue_path.exists():
+            return
+
+        try:
+            queue = pd.read_excel(review_queue_path, dtype=str).fillna("")
+        except Exception as error:
+            print(f"Could not clear old manual review items for {list_number}: {error}")
+            return
+
+        if queue.empty:
+            return
+
+        list_columns = [
+            "\u8bd5\u5242\u6e05\u5355\u53f7",
+            "\u5f53\u524d\u6e05\u5355\u53f7",
+            "\u6e05\u5355\u53f7",
+            "list_number",
+            "reagent_list_no",
+            "reagent_list_number",
+            "order_no",
+        ]
+        present_list_columns = [column for column in list_columns if column in queue.columns]
+        if not present_list_columns:
+            return
+
+        matched = pd.Series(False, index=queue.index)
+        for column in present_list_columns:
+            matched = matched | (queue[column].astype(str).str.strip() == list_number)
+
+        removed_count = int(matched.sum())
+        if not removed_count:
+            return
+
+        queue = queue[~matched].copy()
+        self.write_excel_with_fallback(queue, review_queue_path)
+        print(f"Cleared {removed_count} old manual review item(s) for list {list_number}.")
 
     def current_list_has_manual_review_item(self, list_number: str) -> tuple[bool, str]:
         if not list_number:

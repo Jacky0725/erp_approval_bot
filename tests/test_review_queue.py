@@ -63,6 +63,23 @@ class ReviewQueueTest(unittest.TestCase):
         self.assertTrue(blocked)
         self.assertIn("pending manual review", reason)
 
+    def test_clear_manual_review_items_for_list_removes_only_target_list(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            pd.DataFrame(
+                [
+                    {"试剂清单号": "SJ1", "试剂名称": "A", "status": "pending"},
+                    {"试剂清单号": "SJ1", "试剂名称": "B", "status": "pending"},
+                    {"试剂清单号": "SJ2", "试剂名称": "C", "status": "pending"},
+                ]
+            ).to_excel(root / "review_queue.xlsx", index=False)
+
+            ReviewQueueBot(root).clear_manual_review_items_for_list("SJ1")
+
+            remaining = pd.read_excel(root / "review_queue.xlsx", dtype=str).fillna("")
+            self.assertEqual(remaining["试剂清单号"].tolist(), ["SJ2"])
+            self.assertEqual(remaining["试剂名称"].tolist(), ["C"])
+
 
 if __name__ == "__main__":
     unittest.main()

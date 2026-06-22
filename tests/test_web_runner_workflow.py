@@ -1,6 +1,11 @@
+from pathlib import Path
+from tempfile import TemporaryDirectory
+import sys
 import unittest
 
-from web_runner import workflow_summary
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+
+from web_runner import AutomationJobManager, workflow_summary
 
 
 class WorkflowSummaryTest(unittest.TestCase):
@@ -23,6 +28,20 @@ class WorkflowSummaryTest(unittest.TestCase):
         self.assertEqual(states["llm"], "waiting")
         self.assertEqual(states["rule"], "waiting")
         self.assertEqual(states["write"], "waiting")
+
+    def test_manager_status_reports_finished_result(self) -> None:
+        with TemporaryDirectory() as tmp:
+            manager = AutomationJobManager(root_dir=Path(tmp))
+            manager.action = "suggestions"
+            manager.started_at = "2026-06-22T12:00:00"
+            manager.finished_at = "2026-06-22T12:02:00"
+            manager.success = True
+            manager.error = ""
+
+            status = manager.status()
+
+            self.assertEqual(status["result_label"], "成功")
+            self.assertEqual(status["action"], "suggestions")
 
 
 if __name__ == "__main__":
