@@ -74,16 +74,29 @@ class ApprovalFlowMixin:
         )
 
     def run_semi_auto_approval_suggestions(self) -> None:
-        after_login = (
-            self.generate_all_todo_approval_suggestions
-            if self.process_all_todos_enabled()
-            else self.generate_approval_suggestions
-        )
+        if self.selected_todo_list_numbers():
+            after_login = self.generate_selected_todo_approval_suggestions
+        elif self.process_all_todos_enabled():
+            after_login = self.generate_all_todo_approval_suggestions
+        else:
+            after_login = self.generate_approval_suggestions
         self.run_after_login_capture(
             screenshot_name="after_auto_match.png",
             html_name="after_auto_match.html",
             after_login=after_login,
         )
+
+    def selected_todo_list_numbers(self) -> list[str]:
+        configured = getattr(self, "target_list_numbers", None)
+        if configured:
+            return [str(item).strip() for item in configured if str(item).strip()]
+        value = os.getenv("TARGET_LIST_NUMBERS", "")
+        result = []
+        for part in str(value or "").replace("\n", ",").replace(";", ",").split(","):
+            item = part.strip()
+            if item and item not in result:
+                result.append(item)
+        return result
 
     def process_all_todos_enabled(self) -> bool:
         value = os.getenv("PROCESS_ALL_TODOS", "")
@@ -179,6 +192,34 @@ class ApprovalFlowMixin:
 
             if len(processed_list_numbers) >= max_todos:
                 print(f"Stopped all-todo processing after PROCESS_ALL_TODOS_MAX={max_todos}.")
+        finally:
+            self.target_list_number = original_target
+
+    def generate_selected_todo_approval_suggestions(self, page: Page) -> None:
+        original_target = getattr(self, "target_list_number", "")
+        selected = self.selected_todo_list_numbers()
+        max_todos = self.max_process_all_todos_count()
+        processed_count = 0
+
+        try:
+            self.enter_reagent_judgement_page(page)
+            visible_tasks = set(self.todo_list_numbers(self.read_todo_tasks(page)))
+            print(f"Selected todo list number(s): {', '.join(selected)}")
+            print(f"Current visible todo list number(s): {', '.join(sorted(visible_tasks)) if visible_tasks else '<none>'}")
+
+            for list_number in selected:
+                if processed_count >= max_todos:
+                    print(f"Stopped selected-todo processing after PROCESS_ALL_TODOS_MAX={max_todos}.")
+                    break
+                if visible_tasks and list_number not in visible_tasks:
+                    print(f"Selected list is not visible in current todo page and will be skipped: {list_number}")
+                    continue
+
+                processed_count += 1
+                print(f"Processing selected todo detail {processed_count}: {list_number}")
+                self.target_list_number = list_number
+                self.generate_approval_suggestions(page)
+                self.enter_reagent_judgement_page(page)
         finally:
             self.target_list_number = original_target
 

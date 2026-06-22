@@ -84,10 +84,26 @@
           </div>
         </div>
         <form id="runForm">
+          <input type="hidden" name="target_list_numbers" value="">
           <label>
-            目标清单号
-            <input name="target_list_number" value="{{ runtime.target_list_number }}" placeholder="例如 SJ202606170001">
+            手动清单号
+            <input name="target_list_number" value="{{ runtime.target_list_number }}" placeholder="未勾选下方清单时使用，例如 SJ202606170001">
           </label>
+          <div class="todo-picker">
+            <div class="todo-picker-head">
+              <div>
+                <strong>待办清单</strong>
+                <span id="todoMeta">先点击“刷新待办清单”读取 ERP 待审批列表。</span>
+              </div>
+              <div class="button-row compact">
+                <button type="button" id="selectAllTodos">全选</button>
+                <button type="button" id="clearTodos">清空</button>
+              </div>
+            </div>
+            <div id="todoListPicker" class="todo-list-picker">
+              <p>暂无待办清单缓存。</p>
+            </div>
+          </div>
           <div class="form-row">
             <label>
               写入模式
@@ -106,13 +122,13 @@
             </label>
           </div>
           <div class="switches">
-            <label class="check"><input type="checkbox" name="process_all_todos" value="true"> 处理全部待办</label>
+            <label class="check"><input type="checkbox" name="process_all_todos" value="true"> 未勾选清单时处理全部待办</label>
             <label class="inline-field">最多处理 <input class="small-input" name="process_all_todos_max" value="50"></label>
             <label class="check danger-check"><input type="checkbox" name="auto_pass" value="true"> AUTO_PASS</label>
           </div>
           <div class="button-row">
             <button type="button" data-action="suggestions" class="primary">生成审批建议</button>
-            <button type="button" data-action="todo_export">导出待办</button>
+            <button type="button" data-action="todo_export">刷新待办清单</button>
             <button type="button" data-action="judgement_capture">采集试剂判定页</button>
             <button type="button" data-action="debug_capture">采集首页</button>
           </div>
@@ -289,6 +305,10 @@
       listNumber: "",
       sortDirection: "desc",
     };
+    const todoState = {
+      selected: new Set(),
+      tasks: [],
+    };
 
     function setSelectValue(form, name, value) {
       const field = form.querySelector(`[name="${name}"]`);
@@ -311,6 +331,7 @@
       button.addEventListener("click", async () => {
         const data = new FormData(runForm);
         data.set("action", button.dataset.action);
+        data.set("target_list_numbers", selectedTodoNumbers().join(","));
         const response = await fetch("/api/run", { method: "POST", body: data });
         const payload = await response.json();
         await refreshStatus();
@@ -318,6 +339,16 @@
           alert(payload.message || payload.detail || "任务未启动");
         }
       });
+    });
+
+    document.querySelector("#selectAllTodos").addEventListener("click", () => {
+      todoState.selected = new Set(todoState.tasks.map((task) => task.list_number).filter(Boolean));
+      renderTodoTasks({ tasks: todoState.tasks, exists: todoState.tasks.length > 0 });
+    });
+
+    document.querySelector("#clearTodos").addEventListener("click", () => {
+      todoState.selected.clear();
+      renderTodoTasks({ tasks: todoState.tasks, exists: todoState.tasks.length > 0 });
     });
 
     settingsForm.addEventListener("submit", async (event) => {
@@ -423,6 +454,47 @@
       renderReviewRows();
     }
 
+    function selectedTodoNumbers() {
+      return Array.from(document.querySelectorAll('input[name="todo_list_number"]:checked'))
+        .map((input) => input.value)
+        .filter(Boolean);
+    }
+
+    function renderTodoTasks(todoTasks) {
+      const holder = document.querySelector("#todoListPicker");
+      const meta = document.querySelector("#todoMeta");
+      const tasks = todoTasks.tasks || [];
+      todoState.tasks = tasks;
+      meta.textContent = todoTasks.exists
+        ? `共 ${safe(todoTasks.rows, tasks.length)} 条；最近刷新：${safe(todoTasks.modified)}`
+        : "先点击“刷新待办清单”读取 ERP 待审批列表。";
+      holder.innerHTML = "";
+      if (!tasks.length) {
+        holder.innerHTML = "<p>暂无待办清单缓存。</p>";
+        return;
+      }
+      tasks.forEach((task) => {
+        const listNumber = task.list_number || "";
+        const label = document.createElement("label");
+        label.className = "todo-option";
+        label.innerHTML = `
+          <input type="checkbox" name="todo_list_number" value="${escapeHtml(listNumber)}" ${todoState.selected.has(listNumber) ? "checked" : ""}>
+          <span>
+            <strong>${escapeHtml(listNumber)}</strong>
+            <em>${escapeHtml(task.customer_name)} ${escapeHtml(task.applicant)}</em>
+          </span>
+        `;
+        label.querySelector("input").addEventListener("change", (event) => {
+          if (event.target.checked) {
+            todoState.selected.add(listNumber);
+          } else {
+            todoState.selected.delete(listNumber);
+          }
+        });
+        holder.appendChild(label);
+      });
+    }
+
     function updateReviewListFilter(listNumbers) {
       const filter = document.querySelector("#reviewListFilter");
       const current = reviewState.listNumber;
@@ -519,6 +591,7 @@
       const runtime = data.runtime || {};
       const approval = data.approval || {};
       const reviewQueue = data.review_queue || {};
+      const todoTasks = data.todo_tasks || {};
 
       document.querySelector("#runBadge").textContent = status.running ? "运行中" : (status.success === false ? "失败" : (status.success === true ? "成功" : "空闲"));
       document.querySelector("#runBadge").className = status.running ? "badge running" : (status.success === false ? "badge failed" : (status.success === true ? "badge succeeded" : "badge"));
@@ -535,7 +608,8 @@
       document.querySelector("#autoPassText").textContent = safe(runtime.auto_pass);
       document.querySelector("#writeModeText").textContent = safe(runtime.approval_write_mode);
       document.querySelector("#processScopeText").textContent = runtime.process_all_todos === "true" ? "全部待办" : "指定/首条";
-      document.querySelector("#targetList").textContent = safe(runtime.target_list_number);
+      const selectedLists = selectedTodoNumbers();
+      document.querySelector("#targetList").textContent = selectedLists.length ? `${selectedLists.length} 个清单` : safe(runtime.target_list_number);
       document.querySelector("#llmModel").textContent = safe(runtime.llm_model);
       document.querySelector("#suggestionRows").textContent = safe(approval.rows, "0");
       document.querySelector("#manualReview").textContent = safe(reviewQueue.pending, "0");
@@ -545,6 +619,7 @@
       renderTags(approval.categories || {});
       renderSuggestions(approval.preview || []);
       renderReviewQueue(reviewQueue);
+      renderTodoTasks(todoTasks);
       renderWorkflow(status.workflow || {});
       renderArtifacts(data.artifacts || []);
       document.querySelector("#logBox").textContent = (status.log_tail || []).join("\n") || "等待任务输出...";

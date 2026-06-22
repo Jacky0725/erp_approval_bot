@@ -32,6 +32,7 @@ class ReagentPageMixin:
 
         tasks = self.read_todo_tasks(page)
         output_path = self._log_dir() / "todo_tasks.xlsx"
+        json_path = self._log_dir() / "todo_tasks.json"
 
         if tasks:
             print(f"Found {len(tasks)} todo task(s):")
@@ -41,7 +42,9 @@ class ReagentPageMixin:
             print("No todo tasks found.")
 
         output_path = self.write_excel_with_fallback(pd.DataFrame(tasks, columns=self.todo_columns()), output_path)
+        json_path.write_text(pd.DataFrame(tasks, columns=self.todo_columns()).to_json(orient="records", force_ascii=False, indent=2), encoding="utf-8")
         print(f"Saved todo tasks: {output_path}")
+        print(f"Saved todo tasks JSON: {json_path}")
 
     def read_todo_tasks(self, page: Page) -> list[dict[str, str]]:
         return page.evaluate(

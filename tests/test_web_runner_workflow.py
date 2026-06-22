@@ -5,7 +5,7 @@ import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from web_runner import AutomationJobManager, workflow_summary
+from web_runner import AutomationJobManager, parse_target_list_numbers, run_health, workflow_summary
 
 
 class WorkflowSummaryTest(unittest.TestCase):
@@ -42,6 +42,16 @@ class WorkflowSummaryTest(unittest.TestCase):
 
             self.assertEqual(status["result_label"], "成功")
             self.assertEqual(status["action"], "suggestions")
+
+    def test_parse_target_list_numbers_deduplicates_values(self) -> None:
+        result = parse_target_list_numbers("SJ1, SJ2;SJ1\nSJ3")
+
+        self.assertEqual(result, ["SJ1", "SJ2", "SJ3"])
+
+    def test_run_health_warns_on_business_failures(self) -> None:
+        health = run_health(["Failed save operation(s): reagent_save_1"], True, "")
+
+        self.assertEqual(health, "warning")
 
 
 if __name__ == "__main__":

@@ -430,6 +430,16 @@ select:focus {
   gap: 10px;
 }
 
+.button-row.compact {
+  gap: 6px;
+}
+
+.button-row.compact button {
+  height: 32px;
+  padding: 0 10px;
+  font-size: 12px;
+}
+
 .check,
 .inline-field {
   display: flex;
@@ -445,6 +455,84 @@ select:focus {
 
 .danger-check {
   color: var(--red);
+}
+
+.todo-picker {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel-soft);
+}
+
+.todo-picker-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+}
+
+.todo-picker-head strong,
+.todo-picker-head span {
+  display: block;
+}
+
+.todo-picker-head span {
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.todo-list-picker {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  max-height: 180px;
+  overflow: auto;
+}
+
+.todo-list-picker p {
+  grid-column: 1 / -1;
+  color: var(--muted);
+}
+
+.todo-option {
+  display: flex;
+  grid-template-columns: none;
+  align-items: flex-start;
+  gap: 9px;
+  min-height: 48px;
+  padding: 9px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+}
+
+.todo-option input {
+  width: 16px;
+  height: 16px;
+  margin-top: 3px;
+}
+
+.todo-option span,
+.todo-option strong,
+.todo-option em {
+  display: block;
+  min-width: 0;
+}
+
+.todo-option strong {
+  color: var(--ink);
+  font-size: 13px;
+}
+
+.todo-option em {
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 12px;
+  font-style: normal;
+  overflow-wrap: anywhere;
 }
 
 .review-tools {
@@ -696,5 +784,9 @@ pre {
 
   .timeline {
     grid-template-columns: 1fr 1fr;
+  }
+
+  .todo-list-picker {
+    grid-template-columns: 1fr;
   }
 }

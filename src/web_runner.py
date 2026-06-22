@@ -23,6 +23,7 @@ ENV_PATH = ROOT_DIR / ".env"
 LOG_DIR = ROOT_DIR / "data" / "logs"
 REVIEW_QUEUE_PATH = ROOT_DIR / "data" / "review_queue.xlsx"
 WEB_RUN_STATE_PATH = LOG_DIR / "web_run_state.yaml"
+TODO_TASKS_PATH = LOG_DIR / "todo_tasks.xlsx"
 
 
 WORKFLOW_STEPS = [
@@ -65,7 +66,7 @@ class LineBufferWriter(io.TextIOBase):
         self.lines = lines
         self.path = path
         self.limit = limit
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._file = path.open("a", encoding="utf-8")
 
     def writable(self) -> bool:
@@ -90,7 +91,8 @@ class LineBufferWriter(io.TextIOBase):
 
     def close(self) -> None:
         with self._lock:
-            self._file.close()
+            if not self._file.closed:
+                self._file.close()
         super().close()
 
 
@@ -138,6 +140,7 @@ class AutomationJobManager:
             running = self.running
             success = self.success
             error = self.error
+            health = run_health(log_tail, success, error)
             return {
                 "running": running,
                 "action": self.action,
@@ -145,7 +148,8 @@ class AutomationJobManager:
                 "finished_at": self.finished_at,
                 "success": success,
                 "error": error,
-                "result_label": result_label(running, success, error),
+                "result_label": result_label(running, success, error, health),
+                "result_health": health,
                 "log_tail": log_tail,
                 "workflow": workflow_summary(log_tail, running=running, success=success, error=error),
             }
@@ -210,6 +214,7 @@ class AutomationJobManager:
         log_tail = payload.get("log_tail") or []
         success = payload.get("success")
         error = str(payload.get("error") or "")
+        health = run_health(log_tail, success, error)
         return {
             "running": False,
             "action": str(payload.get("action") or ""),
@@ -217,7 +222,8 @@ class AutomationJobManager:
             "finished_at": str(payload.get("finished_at") or ""),
             "success": success,
             "error": error,
-            "result_label": result_label(False, success, error),
+            "result_label": result_label(False, success, error, health),
+            "result_health": health,
             "log_tail": log_tail,
             "workflow": workflow_summary(log_tail, running=False, success=success, error=error),
         }
@@ -229,6 +235,7 @@ class AutomationJobManager:
 
         with temporary_env(self._env_overrides(options)):
             bot.target_list_number = os.getenv("TARGET_LIST_NUMBER", "").strip()
+            bot.target_list_numbers = parse_target_list_numbers(os.getenv("TARGET_LIST_NUMBERS", ""))
 
             if action == "debug_capture":
                 bot.run_debug_capture()
@@ -246,6 +253,7 @@ class AutomationJobManager:
             "TARGET_LIST_NUMBER",
             "PROCESS_ALL_TODOS",
             "PROCESS_ALL_TODOS_MAX",
+            "TARGET_LIST_NUMBERS",
             "APPROVAL_WRITE_MODE",
             "APPROVAL_WRITE_MIN_CONFIDENCE",
             "AUTO_PASS",
@@ -316,14 +324,45 @@ def workflow_summary(
     }
 
 
-def result_label(running: bool, success: bool | None, error: str) -> str:
+def result_label(running: bool, success: bool | None, error: str, health: str = "") -> str:
     if running:
         return "运行中"
     if success is True:
+        if health == "warning":
+            return "需检查"
         return "成功"
     if success is False or error:
         return "失败"
     return "未运行"
+
+
+def run_health(lines: list[str], success: bool | None, error: str) -> str:
+    if success is False or error:
+        return "failed"
+    text = "\n".join(str(line) for line in lines).lower()
+    warning_tokens = (
+        "failed save operation",
+        "could not select",
+        "could not open technical judgement",
+        "multi-page mode stopped because",
+        "pagination check stopped",
+        "browser session failed",
+        "traceback",
+    )
+    if any(token in text for token in warning_tokens):
+        return "warning"
+    if success is True:
+        return "ok"
+    return "unknown"
+
+
+def parse_target_list_numbers(value: str) -> list[str]:
+    numbers = []
+    for part in str(value or "").replace("\n", ",").replace(";", ",").split(","):
+        item = part.strip()
+        if item and item not in numbers:
+            numbers.append(item)
+    return numbers
 
 
 def workflow_step_index(step_id: str) -> int:
@@ -475,6 +514,50 @@ def approval_summary(root_dir: Path = ROOT_DIR) -> dict[str, Any]:
         "categories": categories,
         "manual_review": manual_review,
         "preview": preview,
+        "modified": datetime.fromtimestamp(path.stat().st_mtime).isoformat(timespec="seconds"),
+    }
+
+
+def todo_tasks_summary(root_dir: Path = ROOT_DIR) -> dict[str, Any]:
+    path = root_dir / "data" / "logs" / "todo_tasks.xlsx"
+    if not path.exists():
+        return {"exists": False, "rows": 0, "tasks": [], "modified": ""}
+
+    try:
+        frame = pd.read_excel(path, dtype=str).fillna("")
+    except Exception as exc:  # noqa: BLE001
+        return {"exists": True, "error": str(exc), "rows": 0, "tasks": [], "modified": ""}
+
+    def first_existing(row: pd.Series, columns: list[str]) -> str:
+        for column in columns:
+            if column in row.index:
+                value = str(row.get(column, "")).strip()
+                if value:
+                    return value
+        return ""
+
+    tasks = []
+    for _, row in frame.iterrows():
+        list_number = first_existing(row, ["试剂清单号", "清单号", "list_number"])
+        if not list_number:
+            continue
+        tasks.append(
+            {
+                "list_number": list_number,
+                "customer_id": first_existing(row, ["客户编号"]),
+                "customer_name": first_existing(row, ["客户名称"]),
+                "progress": first_existing(row, ["技术审批进度"]),
+                "status": first_existing(row, ["技术审批状态", "状态"]),
+                "salesman": first_existing(row, ["业务员"]),
+                "applicant": first_existing(row, ["申请人"]),
+                "contact": first_existing(row, ["联系人"]),
+            }
+        )
+
+    return {
+        "exists": True,
+        "rows": int(len(tasks)),
+        "tasks": tasks,
         "modified": datetime.fromtimestamp(path.stat().st_mtime).isoformat(timespec="seconds"),
     }
 

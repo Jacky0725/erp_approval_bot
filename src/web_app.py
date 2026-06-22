@@ -16,6 +16,7 @@ from web_runner import (
     review_queue_summary,
     runtime_config_snapshot,
     save_runtime_config,
+    todo_tasks_summary,
 )
 
 
@@ -39,6 +40,7 @@ def dashboard(request: Request) -> HTMLResponse:
             "approval": approval_summary(),
             "artifacts": artifact_summary(),
             "review_queue": review_queue_summary(),
+            "todo_tasks": todo_tasks_summary(),
         },
     )
 
@@ -52,6 +54,7 @@ def api_status() -> JSONResponse:
             "approval": approval_summary(),
             "artifacts": artifact_summary(),
             "review_queue": review_queue_summary(),
+            "todo_tasks": todo_tasks_summary(),
         }
     )
 
@@ -62,6 +65,7 @@ def api_settings(
     erp_username: Annotated[str, Form()] = "",
     erp_password: Annotated[str, Form()] = "",
     target_list_number: Annotated[str, Form()] = "",
+    target_list_numbers: Annotated[str, Form()] = "",
     process_all_todos: Annotated[str, Form()] = "",
     process_all_todos_max: Annotated[str, Form()] = "50",
     approval_write_mode: Annotated[str, Form()] = "disabled",
@@ -115,6 +119,7 @@ def api_run(
 
     options = {
         "TARGET_LIST_NUMBER": target_list_number.strip(),
+        "TARGET_LIST_NUMBERS": target_list_numbers.strip(),
         "PROCESS_ALL_TODOS": normalize_checkbox(process_all_todos),
         "PROCESS_ALL_TODOS_MAX": process_all_todos_max.strip() or "50",
         "APPROVAL_WRITE_MODE": approval_write_mode.strip() or "disabled",
