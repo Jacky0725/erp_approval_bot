@@ -186,6 +186,10 @@ class ErpSessionMixin:
     def login(self, page: Page, username: str, password: str, log_dir: Path) -> None:
         selectors = self.settings.get("selectors", {})
 
+        if self.is_logged_in(page):
+            print("ERP session already appears logged in; skipping login form fill.")
+            return
+
         login_scope = self.find_login_scope(page, selectors)
 
         if not login_scope:
@@ -208,23 +212,121 @@ class ErpSessionMixin:
         print(f"Using password selector: {password_selector}")
         print(f"Using login selector: {login_selector}")
 
-        scope.fill(username_selector, username)
-        scope.fill(password_selector, password)
+        self.fill_login_field(scope, username_selector, username, "username", log_dir)
+        self.fill_login_field(scope, password_selector, password, "password", log_dir)
 
-        scope.click(login_selector)
+        self.click_login_button(scope, login_selector, log_dir)
 
     def find_login_scope(self, page: Page, selectors: dict[str, str]) -> tuple[Any, str, str, str] | None:
         scopes = [page, *page.frames]
 
         for scope in scopes:
-            username_selector = selectors.get("username_input") or self.first_visible(scope, USERNAME_SELECTORS)
-            password_selector = selectors.get("password_input") or self.first_visible(scope, PASSWORD_SELECTORS)
-            login_selector = selectors.get("login_button") or self.first_visible(scope, LOGIN_BUTTON_SELECTORS)
+            username_selector = self.first_usable_selector(
+                scope,
+                [selectors.get("username_input", ""), *USERNAME_SELECTORS],
+                needs_editable=True,
+            )
+            password_selector = self.first_usable_selector(
+                scope,
+                [selectors.get("password_input", ""), *PASSWORD_SELECTORS],
+                needs_editable=True,
+            )
+            login_selector = self.first_usable_selector(
+                scope,
+                [selectors.get("login_button", ""), *LOGIN_BUTTON_SELECTORS],
+                needs_editable=False,
+            )
 
             if username_selector and password_selector and login_selector:
                 return scope, username_selector, password_selector, login_selector
 
         return None
+
+    def fill_login_field(self, scope: Any, selector: str, value: str, field_name: str, log_dir: Path) -> None:
+        last_error: Exception | None = None
+        field = scope.locator(selector).first
+        for attempt in range(1, 4):
+            try:
+                field.wait_for(state="visible", timeout=10000)
+                field.scroll_into_view_if_needed(timeout=5000)
+                if not field.is_enabled(timeout=3000):
+                    raise RuntimeError(f"{field_name} input is not enabled")
+                if not field.is_editable(timeout=3000):
+                    raise RuntimeError(f"{field_name} input is not editable")
+
+                field.click(timeout=5000)
+                field.fill("", timeout=5000)
+                field.fill(value, timeout=5000)
+                written = self.input_value(field)
+                if written == value:
+                    return
+
+                field.click(timeout=5000)
+                field.press("Control+A")
+                field.type(value, delay=35, timeout=15000)
+                written = self.input_value(field)
+                if written == value:
+                    return
+
+                raise RuntimeError(
+                    f"{field_name} input value verification failed after fill/type; "
+                    f"read back {written!r}"
+                )
+            except (Error, TimeoutError, RuntimeError) as error:
+                last_error = error
+                self.capture_login_failure(scope, log_dir, f"login_fill_{field_name}_failed_{attempt}")
+                print(f"Login {field_name} fill attempt {attempt}/3 failed: {error}")
+                try:
+                    page = scope.page if hasattr(scope, "page") else scope
+                    page.wait_for_timeout(500)
+                except Error:
+                    pass
+
+        raise RuntimeError(f"Could not fill ERP login {field_name} field using selector {selector}: {last_error}")
+
+    def click_login_button(self, scope: Any, selector: str, log_dir: Path) -> None:
+        button = scope.locator(selector).first
+        try:
+            button.wait_for(state="visible", timeout=10000)
+            button.scroll_into_view_if_needed(timeout=5000)
+            if not button.is_enabled(timeout=3000):
+                raise RuntimeError("login button is not enabled")
+            button.click(timeout=10000)
+        except (Error, TimeoutError, RuntimeError) as error:
+            self.capture_login_failure(scope, log_dir, "login_button_failed")
+            raise RuntimeError(f"Could not click ERP login button using selector {selector}: {error}") from error
+
+    @staticmethod
+    def input_value(locator: Locator) -> str:
+        try:
+            return str(locator.input_value(timeout=3000))
+        except Error:
+            try:
+                return str(locator.evaluate("(node) => node.value || ''"))
+            except Error:
+                return ""
+
+    def capture_login_failure(self, scope: Any, log_dir: Path, stem: str) -> None:
+        screenshot_path = log_dir / f"{stem}.png"
+        html_path = log_dir / f"{stem}.html"
+        try:
+            page = scope.page if hasattr(scope, "page") else scope
+            page.screenshot(path=str(screenshot_path), full_page=True)
+            html_path.write_text(page.content(), encoding="utf-8")
+            print(f"Saved login failure screenshot: {screenshot_path}")
+            print(f"Saved login failure HTML: {html_path}")
+        except Error as error:
+            print(f"Could not capture login failure page: {error}")
+
+    def is_logged_in(self, page: Page) -> bool:
+        for text in ("\u8bd5\u5242\u7ba1\u7406", "\u5e02\u573a\u7ba1\u7406"):
+            try:
+                locator = page.get_by_text(text, exact=True).first
+                if locator.count() and locator.is_visible():
+                    return True
+            except Error:
+                continue
+        return False
 
     def open_login_page(self, page: Page, erp_url: str) -> None:
         last_error: Exception | None = None
@@ -325,6 +427,21 @@ class ErpSessionMixin:
                 element = page.locator(selector).first
                 if element.count() and element.is_visible():
                     return selector
+            except Exception:
+                continue
+        return None
+
+    def first_usable_selector(self, page: Page, selectors: list[str], needs_editable: bool = False) -> str | None:
+        for selector in dict.fromkeys(str(item or "").strip() for item in selectors if str(item or "").strip()):
+            try:
+                element = page.locator(selector).first
+                if not element.count() or not element.is_visible():
+                    continue
+                if not element.is_enabled(timeout=1000):
+                    continue
+                if needs_editable and not element.is_editable(timeout=1000):
+                    continue
+                return selector
             except Exception:
                 continue
         return None

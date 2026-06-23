@@ -508,13 +508,14 @@ class ReagentPageMixin:
         if size <= 0:
             return False
 
+        print(f"Ensuring reagent page size: {size}.")
         pagination = self.reagent_pagination(page)
-        if not pagination:
-            print("Reagent pagination was not found; page size was not changed.")
-            return False
-
         try:
-            changer = pagination.locator(".ant-pagination-options-size-changer").first
+            changer = (
+                pagination.locator(".ant-pagination-options-size-changer").first
+                if pagination
+                else page.locator(".ant-pagination-options-size-changer").last
+            )
             if not changer.count() or not changer.is_visible():
                 print("Reagent page-size selector was not visible; page size was not changed.")
                 return False
@@ -541,21 +542,59 @@ class ReagentPageMixin:
             for option in options:
                 if option.count() and option.is_visible():
                     option.click(timeout=5000)
-                    self.wait_for_reagent_table_ready(page)
-                    page.wait_for_timeout(800)
-                    after_text = self.safe_inner_text(changer)
-                    if str(size) in after_text:
-                        print(f"Reagent page size changed to {size}.")
-                        return True
-                    after_page = self.current_reagent_page_number(page)
-                    if before_page != after_page or self.read_current_page_reagents(page):
-                        print(f"Clicked reagent page-size option {size}; continuing with current table.")
-                        return True
+                    return self.confirm_reagent_page_size_change(page, changer, size, before_page)
 
+            if self.click_page_size_option_by_text(page, str(size)):
+                return self.confirm_reagent_page_size_change(page, changer, size, before_page)
             print(f"Could not find reagent page-size option: {size}.")
             return False
         except Error as error:
             print(f"Could not change reagent page size to {size}: {error}")
+            return False
+
+    def confirm_reagent_page_size_change(self, page: Page, changer: Locator, size: int, before_page: str) -> bool:
+        self.wait_for_reagent_table_ready(page)
+        page.wait_for_timeout(1000)
+        after_text = self.safe_inner_text(changer)
+        if str(size) in after_text:
+            print(f"Reagent page size changed to {size}.")
+            return True
+        row_count = len(self.read_current_page_reagents(page))
+        after_page = self.current_reagent_page_number(page)
+        if row_count > 20 or before_page != after_page:
+            print(f"Clicked reagent page-size option {size}; current visible reagent rows: {row_count}.")
+            return True
+        print(f"Clicked reagent page-size option {size}, but current visible reagent rows remain {row_count}.")
+        return False
+
+    @staticmethod
+    def click_page_size_option_by_text(page: Page, size_text: str) -> bool:
+        try:
+            return bool(
+                page.evaluate(
+                    """
+                    (sizeText) => {
+                      const visible = (node) => {
+                        const rect = node.getBoundingClientRect();
+                        const style = window.getComputedStyle(node);
+                        return rect.width > 0 && rect.height > 0
+                          && style.visibility !== 'hidden'
+                          && style.display !== 'none';
+                      };
+                      const text = (node) => (node.innerText || node.textContent || '').replace(/\\s+/g, ' ').trim();
+                      const options = Array.from(document.querySelectorAll(
+                        '.ant-select-dropdown:not(.ant-select-dropdown-hidden) .ant-select-item-option, .ant-select-item-option'
+                      ));
+                      const option = options.find((node) => visible(node) && text(node).includes(sizeText));
+                      if (!option) return false;
+                      option.click();
+                      return true;
+                    }
+                    """,
+                    size_text,
+                )
+            )
+        except Error:
             return False
 
     def preferred_reagent_page_size(self) -> int:
@@ -859,11 +898,29 @@ class ReagentPageMixin:
         page.mouse.wheel(0, 260)
 
     def click_reagent_property_header(self, page: Page) -> None:
+        self.dismiss_open_overlays(page)
         header = page.locator("thead th").filter(has_text="\u7269\u5316\u7279\u6027").first
         if not header.count():
             raise RuntimeError("Could not find the physicochemical property header.")
 
-        header.click()
+        try:
+            header.click(timeout=5000)
+            return
+        except Error as error:
+            print(f"Normal physicochemical property header click failed; retrying by coordinates: {error}")
+
+        box = header.bounding_box()
+        if not box:
+            raise RuntimeError("Could not get physicochemical property header bounding box.")
+        page.mouse.click(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+
+    @staticmethod
+    def dismiss_open_overlays(page: Page) -> None:
+        try:
+            page.keyboard.press("Escape")
+            page.wait_for_timeout(200)
+        except Error:
+            return
 
     def wait_for_reagent_table_ready(self, page: Page) -> None:
         try:

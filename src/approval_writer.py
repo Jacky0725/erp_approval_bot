@@ -39,6 +39,7 @@ class ApprovalWriter:
         for candidate_name in self.property_name_candidates(property_name):
             if self._click_property_option(page, candidate_name):
                 return True
+        self.dismiss_open_dropdown(page)
         return False
 
     def property_name_candidates(self, property_name: str) -> list[str]:
@@ -140,6 +141,14 @@ class ApprovalWriter:
             return True
         except (Error, TimeoutError):
             return False
+
+    @staticmethod
+    def dismiss_open_dropdown(page: Page) -> None:
+        try:
+            page.keyboard.press("Escape")
+            page.wait_for_timeout(150)
+        except (Error, TimeoutError):
+            return
 
     @staticmethod
     def _click_row_action(page: Page, row: Locator, action_text: str) -> bool:
