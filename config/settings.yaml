@@ -46,6 +46,8 @@ reagent:
   physicochemical_property_aliases:
     "\u5f3a\u53cd\u5e94\u6027":
       - "\u5f3a\u53cd\u5e94"
+    "\u6613\u71c3\u6db2\u4f53":
+      - "\u6613\u71c3\u7c7b"
 
 selectors:
   username_input: "#userName"

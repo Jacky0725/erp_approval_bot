@@ -16,6 +16,7 @@ class ApprovalWriterTest(unittest.TestCase):
         writer = ApprovalWriter()
 
         self.assertEqual(writer.property_name_candidates("强反应性"), ["强反应性", "强反应"])
+        self.assertEqual(writer.property_name_candidates("易燃液体"), ["易燃液体", "易燃类"])
 
     def test_configured_property_aliases_are_used(self) -> None:
         writer = ApprovalWriter(

@@ -765,13 +765,13 @@ class ApprovalFlowMixin:
                 print("Test write mode: selected value for inspection only; not saving.")
                 return
 
-            saved = writer.save(row)
+            saved = writer.save(page, row)
             self.record_save_result(f"reagent_save_{sequence}", saved, category)
             print(f"Save result for sequence {sequence}: {saved}")
             page.wait_for_timeout(800)
 
             if mode == "generate_library" and saved:
-                generated = writer.generate_reagent_library(row)
+                generated = writer.generate_reagent_library(page, row)
                 self.record_save_result(f"reagent_library_{sequence}", generated, category)
                 print(f"Generate reagent library result for sequence {sequence}: {generated}")
 
