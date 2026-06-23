@@ -253,6 +253,7 @@ class ApprovalFlowMixin:
 
         all_suggestions: list[dict[str, Any]] = []
         handled_reagent_keys: set[str] = set()
+        write_attempts_by_key: dict[str, int] = {}
         visited_steps = 0
         refresh_sorted_first_page = True
 
@@ -269,11 +270,12 @@ class ApprovalFlowMixin:
                 reagent
                 for reagent in current_unmatched
                 if self.reagent_work_key(reagent) not in handled_reagent_keys
+                and write_attempts_by_key.get(self.reagent_work_key(reagent), 0) < self.max_reagent_write_attempts()
             ]
             if current_unmatched and not unhandled_unmatched:
                 print(
                     f"Reagent page {current_page} still has {len(current_unmatched)} '-' row(s), "
-                    "but all were already processed or queued; moving to the next sorted page."
+                    "but all were already processed, queued, or reached the write retry limit; moving to the next sorted page."
                 )
                 moved_next, terminal_or_error = self.click_next_reagent_page(page)
                 if not moved_next:
@@ -302,9 +304,23 @@ class ApprovalFlowMixin:
 
             if page_suggestions:
                 with self.stage_logger.stage("apply_approval_write_mode", f"page {current_page}"):
-                    self.apply_approval_write_mode(page, page_suggestions)
+                    write_result = self.apply_approval_write_mode(page, page_suggestions) or {
+                        "attempted": set(),
+                        "handled": set(),
+                        "failed": set(),
+                    }
+                for key in write_result.get("attempted", set()):
+                    write_attempts_by_key[key] = write_attempts_by_key.get(key, 0) + 1
+                handled_reagent_keys.update(write_result.get("handled", set()))
+                for key in write_result.get("failed", set()):
+                    if write_attempts_by_key.get(key, 0) >= self.max_reagent_write_attempts():
+                        handled_reagent_keys.add(key)
+                        print(f"Write retry limit reached for reagent key: {key}")
+            else:
+                write_result = {"attempted": set(), "handled": set(), "failed": set()}
 
-            handled_reagent_keys.update(self.reagent_work_key(reagent) for reagent in current_unmatched)
+            if self.approval_write_mode() in {"disabled", "test_one"}:
+                handled_reagent_keys.update(self.reagent_work_key(reagent) for reagent in current_unmatched)
             if page_suggestions:
                 refresh_sorted_first_page = True
                 continue
@@ -331,6 +347,15 @@ class ApprovalFlowMixin:
             output_path,
         )
         print(f"Saved partial approval suggestions: {output_path}")
+
+    def max_reagent_write_attempts(self) -> int:
+        approval_settings = getattr(self, "settings", {}).get("approval", {}) or {}
+        value = os.getenv("APPROVAL_WRITE_MAX_ATTEMPTS") or approval_settings.get("write_max_attempts", 2)
+        try:
+            attempts = int(value)
+        except (TypeError, ValueError):
+            return 2
+        return max(1, min(5, attempts))
 
     def process_current_unmatched_reagent_page(
         self,
@@ -710,16 +735,24 @@ class ApprovalFlowMixin:
         }
         return self._approval_suggestion_row(reagent, name_result, search_result, extracted, classification)
 
-    def apply_approval_write_mode(self, page: Page, suggestions: list[dict[str, Any]]) -> None:
+    def apply_approval_write_mode(self, page: Page, suggestions: list[dict[str, Any]]) -> dict[str, set[str]]:
+        result: dict[str, set[str]] = {"attempted": set(), "handled": set(), "failed": set()}
         mode = self.approval_write_mode()
         if mode == "disabled":
             print("Approval write mode is disabled; no webpage fields will be changed.")
-            return
+            result["handled"].update(self.suggestion_work_key(suggestion) for suggestion in suggestions)
+            return result
 
         candidates = self.high_confidence_write_candidates(suggestions)
+        candidate_keys = {self.suggestion_work_key(suggestion) for suggestion in candidates}
+        result["handled"].update(
+            self.suggestion_work_key(suggestion)
+            for suggestion in suggestions
+            if self.suggestion_work_key(suggestion) not in candidate_keys
+        )
         if not candidates:
             print("No high-confidence approval suggestion is eligible for webpage writing.")
-            return
+            return result
 
         if mode in {"test_one", "save_one"}:
             candidates = candidates[:1]
@@ -729,24 +762,28 @@ class ApprovalFlowMixin:
             pass
         else:
             print(f"Unknown APPROVAL_WRITE_MODE={mode}; no webpage fields will be changed.")
-            return
+            return result
 
         writer = ApprovalWriter(settings=self.settings)
         for row_index, suggestion in enumerate(candidates, start=1):
             sequence = str(suggestion.get("\u5e8f\u53f7") or "").strip()
             category = str(suggestion.get("\u6700\u7ec8\u5efa\u8bae\u7c7b\u522b") or "").strip()
             reagent_name = str(suggestion.get("\u8bd5\u5242\u540d\u79f0") or "").strip()
+            work_key = self.suggestion_work_key(suggestion)
+            result["attempted"].add(work_key)
             print(f"Approval write candidate {row_index}/{len(candidates)}: {sequence} {reagent_name} -> {category}")
 
             row = self.find_reagent_row_by_sequence(page, sequence)
             if row is None:
                 self.record_save_result(f"reagent_save_{sequence}", False, "row not found")
+                result["failed"].add(work_key)
                 print(f"Could not find current-page row for sequence: {sequence}")
                 continue
 
             opened = writer.open_technical_judgement(row)
             if not opened:
                 self.record_save_result(f"reagent_save_{sequence}", False, "technical judgement button not found")
+                result["failed"].add(work_key)
                 print(f"Could not open technical judgement for sequence: {sequence}")
                 continue
 
@@ -754,7 +791,22 @@ class ApprovalFlowMixin:
             selected = writer.choose_property(page, category, row)
             if not selected:
                 self.record_save_result(f"reagent_save_{sequence}", False, f"could not select {category}")
+                result["failed"].add(work_key)
                 print(f"Could not select physicochemical property {category} for sequence: {sequence}")
+                continue
+
+            selected_value = self.read_reagent_property_by_sequence(page, sequence)
+            if selected_value and selected_value != "-" and not self.property_value_matches(selected_value, category, writer):
+                self.record_save_result(
+                    f"reagent_save_{sequence}",
+                    False,
+                    f"selected {category}, but row still shows {selected_value or '<empty>'}",
+                )
+                result["failed"].add(work_key)
+                print(
+                    f"Property selection verification failed for sequence {sequence}: "
+                    f"expected {category}, got {selected_value or '<empty>'}."
+                )
                 continue
 
             screenshot_path = self._log_dir() / f"write_mode_{mode}_{sequence}.png"
@@ -763,27 +815,62 @@ class ApprovalFlowMixin:
 
             if mode == "test_one":
                 print("Test write mode: selected value for inspection only; not saving.")
-                return
+                result["handled"].add(work_key)
+                return result
 
             saved = writer.save(page, row)
-            self.record_save_result(f"reagent_save_{sequence}", saved, category)
-            print(f"Save result for sequence {sequence}: {saved}")
             page.wait_for_timeout(800)
+            saved_value = self.read_reagent_property_by_sequence(page, sequence)
+            verified = saved and self.property_value_matches(saved_value, category, writer)
+            self.record_save_result(
+                f"reagent_save_{sequence}",
+                verified,
+                category if verified else f"saved={saved}, row shows {saved_value or '<empty>'}",
+            )
+            print(f"Save result for sequence {sequence}: {saved}")
+            if verified:
+                result["handled"].add(work_key)
+            else:
+                result["failed"].add(work_key)
+                print(
+                    f"Save verification failed for sequence {sequence}: "
+                    f"expected {category}, got {saved_value or '<empty>'}."
+                )
 
-            if mode == "generate_library" and saved:
+            if mode == "generate_library" and verified:
                 generated = writer.generate_reagent_library(page, row)
                 self.record_save_result(f"reagent_library_{sequence}", generated, category)
                 print(f"Generate reagent library result for sequence {sequence}: {generated}")
 
             if mode == "save_one":
-                return
+                return result
+
+        return result
+
+    def suggestion_work_key(self, suggestion: dict[str, Any]) -> str:
+        return self.reagent_work_key(
+            {
+                "\u5e8f\u53f7": suggestion.get("\u5e8f\u53f7", ""),
+                "\u8bd5\u5242\u540d\u79f0": suggestion.get("\u8bd5\u5242\u540d\u79f0", ""),
+                "CAS\u53f7": suggestion.get("CAS\u53f7", ""),
+                "\u89c4\u683c": suggestion.get("\u89c4\u683c", ""),
+                "\u89c4\u683c\u5355\u4f4d": suggestion.get("\u89c4\u683c\u5355\u4f4d", ""),
+            }
+        )
+
+    @staticmethod
+    def property_value_matches(value: str, expected: str, writer: ApprovalWriter) -> bool:
+        normalized = str(value or "").strip()
+        if not normalized:
+            return False
+        return normalized in writer.property_name_candidates(expected)
 
     def approval_write_mode(self) -> str:
-        configured = (self.settings.get("approval", {}) or {}).get("write_mode", "disabled")
+        configured = (getattr(self, "settings", {}).get("approval", {}) or {}).get("write_mode", "disabled")
         return str(os.getenv("APPROVAL_WRITE_MODE") or configured or "disabled").strip().lower()
 
     def high_confidence_write_candidates(self, suggestions: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        threshold = float(os.getenv("APPROVAL_WRITE_MIN_CONFIDENCE") or self.settings.get("approval", {}).get("write_min_confidence", 0.8))
+        threshold = float(os.getenv("APPROVAL_WRITE_MIN_CONFIDENCE") or getattr(self, "settings", {}).get("approval", {}).get("write_min_confidence", 0.8))
         output: list[dict[str, Any]] = []
         for suggestion in suggestions:
             category = str(suggestion.get("\u6700\u7ec8\u5efa\u8bae\u7c7b\u522b") or "").strip()

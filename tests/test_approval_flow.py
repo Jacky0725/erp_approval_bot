@@ -280,6 +280,65 @@ class ApprovalFlowTodoLoopTest(unittest.TestCase):
         self.assertEqual(len(bot.applied_pages), 2)
         self.assertEqual(bot.partial_lengths, [1, 2])
 
+    def test_multi_page_mode_retries_failed_web_write_before_marking_handled(self) -> None:
+        class RetryBot(Bot):
+            def __init__(self) -> None:
+                self.settings = {"approval": {"write_mode": "multi_page", "write_max_attempts": 2}}
+                self.stage_logger = StageLogger()
+                self.apply_calls = 0
+
+            def goto_first_reagent_page(self, page: object) -> bool:
+                return True
+
+            def sort_property_column_until_unmatched_visible(self, page: object) -> bool:
+                return True
+
+            def current_reagent_page_number(self, page: object) -> str:
+                return "1"
+
+            def current_page_unmatched_reagents(self, page: object) -> list[dict[str, str]]:
+                if self.apply_calls >= 2:
+                    return []
+                return [
+                    {
+                        "\u5e8f\u53f7": "1",
+                        "\u8bd5\u5242\u540d\u79f0": "retry-me",
+                        "CAS\u53f7": "-",
+                        "\u89c4\u683c": "",
+                        "\u89c4\u683c\u5355\u4f4d": "",
+                        "\u7269\u5316\u7279\u6027": "-",
+                    }
+                ]
+
+            def process_current_unmatched_reagent_page(self, *args: object, **kwargs: object) -> list[dict[str, object]]:
+                return [
+                    {
+                        "\u5e8f\u53f7": "1",
+                        "\u8bd5\u5242\u540d\u79f0": "retry-me",
+                        "CAS\u53f7": "-",
+                        "\u89c4\u683c": "",
+                        "\u89c4\u683c\u5355\u4f4d": "",
+                        "\u6700\u7ec8\u5efa\u8bae\u7c7b\u522b": "\u666e\u901a\u7c7b",
+                    }
+                ]
+
+            def apply_approval_write_mode(self, page: object, suggestions: list[dict[str, object]]) -> dict[str, set[str]]:
+                self.apply_calls += 1
+                key = self.suggestion_work_key(suggestions[0])
+                if self.apply_calls == 1:
+                    return {"attempted": {key}, "handled": set(), "failed": {key}}
+                return {"attempted": {key}, "handled": {key}, "failed": set()}
+
+            def write_partial_approval_suggestions(self, suggestions: list[dict[str, object]]) -> None:
+                return None
+
+        bot = RetryBot()
+
+        result = bot.process_unmatched_reagent_pages(object(), None, None, {})
+
+        self.assertEqual(bot.apply_calls, 2)
+        self.assertEqual([row["\u5e8f\u53f7"] for row in result], ["1", "1"])
+
 
 if __name__ == "__main__":
     unittest.main()

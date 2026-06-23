@@ -37,19 +37,8 @@ class ApprovalWriter:
             return False
 
         for candidate_name in self.property_name_candidates(property_name):
-            candidates = [
-                page.locator(".ant-select-dropdown:not(.ant-select-dropdown-hidden) .ant-select-item-option")
-                .filter(has_text=candidate_name)
-                .first,
-                page.get_by_text(candidate_name, exact=True).first,
-            ]
-            for candidate in candidates:
-                try:
-                    if candidate.count() and candidate.is_visible():
-                        candidate.click(timeout=3000)
-                        return True
-                except (Error, TimeoutError):
-                    continue
+            if self._click_property_option(page, candidate_name):
+                return True
         return False
 
     def property_name_candidates(self, property_name: str) -> list[str]:
@@ -114,6 +103,43 @@ class ApprovalWriter:
             except (Error, TimeoutError):
                 continue
         return self._click_row_peer_select(page, row)
+
+    @staticmethod
+    def _click_property_option(page: Page, candidate_name: str) -> bool:
+        for _ in range(8):
+            candidates = [
+                page.locator(".ant-select-dropdown:not(.ant-select-dropdown-hidden) .ant-select-item-option")
+                .filter(has_text=candidate_name)
+                .first,
+                page.get_by_text(candidate_name, exact=True).first,
+            ]
+            for candidate in candidates:
+                try:
+                    if candidate.count() and candidate.is_visible():
+                        candidate.click(timeout=3000)
+                        return True
+                except (Error, TimeoutError):
+                    continue
+
+            if not ApprovalWriter._scroll_open_dropdown(page):
+                break
+        return False
+
+    @staticmethod
+    def _scroll_open_dropdown(page: Page) -> bool:
+        try:
+            dropdown = page.locator(".ant-select-dropdown:not(.ant-select-dropdown-hidden)").first
+            if not dropdown.count() or not dropdown.is_visible():
+                return False
+            box = dropdown.bounding_box()
+            if not box:
+                return False
+            page.mouse.move(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+            page.mouse.wheel(0, 220)
+            page.wait_for_timeout(120)
+            return True
+        except (Error, TimeoutError):
+            return False
 
     @staticmethod
     def _click_row_action(page: Page, row: Locator, action_text: str) -> bool:

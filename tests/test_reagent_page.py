@@ -115,6 +115,18 @@ class ReagentPageAutoMatchTest(unittest.TestCase):
     def test_extract_list_number_ignores_urgent_suffix(self) -> None:
         self.assertEqual(ReagentPageMixin.extract_list_number("SJ202606170003 \u52a0\u6025"), "SJ202606170003")
 
+    def test_preferred_reagent_page_size_defaults_to_100(self) -> None:
+        class Bot(ReagentPageMixin):
+            settings = {}
+
+        self.assertEqual(Bot().preferred_reagent_page_size(), 100)
+
+    def test_preferred_reagent_page_size_reads_settings(self) -> None:
+        class Bot(ReagentPageMixin):
+            settings = {"approval": {"reagent_page_size": 50}}
+
+        self.assertEqual(Bot().preferred_reagent_page_size(), 50)
+
 
 if __name__ == "__main__":
     unittest.main()

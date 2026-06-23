@@ -298,6 +298,7 @@ class ReagentPageMixin:
             return False
 
         self.wait_for_reagent_table_ready(page)
+        self.ensure_reagent_page_size(page)
         before_snapshot = self._auto_match_snapshot(page)
 
         auto_match_button = page.get_by_role("button", name="\u4e00\u952e\u5339\u914d").first
@@ -502,6 +503,69 @@ class ReagentPageMixin:
             print("Could not move to the first reagent page; continuing from current page.")
             return False
 
+    def ensure_reagent_page_size(self, page: Page, preferred_size: int | None = None) -> bool:
+        size = preferred_size or self.preferred_reagent_page_size()
+        if size <= 0:
+            return False
+
+        pagination = self.reagent_pagination(page)
+        if not pagination:
+            print("Reagent pagination was not found; page size was not changed.")
+            return False
+
+        try:
+            changer = pagination.locator(".ant-pagination-options-size-changer").first
+            if not changer.count() or not changer.is_visible():
+                print("Reagent page-size selector was not visible; page size was not changed.")
+                return False
+
+            current_text = self.safe_inner_text(changer)
+            if str(size) in current_text:
+                print(f"Reagent page size is already {size}.")
+                return True
+
+            before_page = self.current_reagent_page_number(page)
+            changer.click(timeout=5000)
+            page.wait_for_timeout(300)
+
+            option_text = f"{size} 条/页"
+            options = [
+                page.locator(".ant-select-dropdown:not(.ant-select-dropdown-hidden) .ant-select-item-option")
+                .filter(has_text=option_text)
+                .first,
+                page.locator(".ant-select-dropdown:not(.ant-select-dropdown-hidden) .ant-select-item-option")
+                .filter(has_text=str(size))
+                .first,
+                page.get_by_text(option_text, exact=True).first,
+            ]
+            for option in options:
+                if option.count() and option.is_visible():
+                    option.click(timeout=5000)
+                    self.wait_for_reagent_table_ready(page)
+                    page.wait_for_timeout(800)
+                    after_text = self.safe_inner_text(changer)
+                    if str(size) in after_text:
+                        print(f"Reagent page size changed to {size}.")
+                        return True
+                    after_page = self.current_reagent_page_number(page)
+                    if before_page != after_page or self.read_current_page_reagents(page):
+                        print(f"Clicked reagent page-size option {size}; continuing with current table.")
+                        return True
+
+            print(f"Could not find reagent page-size option: {size}.")
+            return False
+        except Error as error:
+            print(f"Could not change reagent page size to {size}: {error}")
+            return False
+
+    def preferred_reagent_page_size(self) -> int:
+        approval_settings = getattr(self, "settings", {}).get("approval", {}) or {}
+        value = approval_settings.get("reagent_page_size", 100)
+        try:
+            return max(0, int(value))
+        except (TypeError, ValueError):
+            return 100
+
     def current_reagent_page_number(self, page: Page) -> str:
         try:
             pagination = self.reagent_pagination(page)
@@ -685,6 +749,15 @@ class ReagentPageMixin:
             except Error:
                 continue
         return None
+
+    def read_reagent_property_by_sequence(self, page: Page, sequence: str) -> str:
+        sequence = str(sequence or "").strip()
+        if not sequence:
+            return ""
+        for record in self.read_current_page_reagents(page):
+            if str(record.get("\u5e8f\u53f7", "")).strip() == sequence:
+                return str(record.get("\u7269\u5316\u7279\u6027", "")).strip()
+        return ""
 
     def wait_for_property_editor_ready(self, page: Page) -> None:
         try:
