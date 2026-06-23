@@ -255,14 +255,10 @@ class ApprovalFlowMixin:
         handled_reagent_keys: set[str] = set()
         write_attempts_by_key: dict[str, int] = {}
         visited_steps = 0
-        refresh_sorted_first_page = True
+        self.sort_property_column_until_unmatched_visible(page)
 
         while True:
             visited_steps += 1
-            if refresh_sorted_first_page:
-                self.goto_first_reagent_page(page)
-                self.sort_property_column_until_unmatched_visible(page)
-                refresh_sorted_first_page = False
 
             current_page = self.current_reagent_page_number(page) or str(visited_steps)
             current_unmatched = self.current_page_unmatched_reagents(page)
@@ -275,15 +271,16 @@ class ApprovalFlowMixin:
             if current_unmatched and not unhandled_unmatched:
                 print(
                     f"Reagent page {current_page} still has {len(current_unmatched)} '-' row(s), "
-                    "but all were already processed, queued, or reached the write retry limit; moving to the next sorted page."
+                    "but all were already processed, queued, or reached the write retry limit; moving to the next page."
                 )
                 moved_next, terminal_or_error = self.click_next_reagent_page(page)
                 if not moved_next:
                     if terminal_or_error:
-                        print("Multi-page mode reached the last sorted reagent page.")
+                        print("Multi-page mode reached the last reagent page.")
                     else:
                         print("Multi-page mode stopped because next-page navigation could not be verified.")
                     break
+                self.sort_property_column_until_unmatched_visible(page)
                 continue
 
             if not current_unmatched:
@@ -304,9 +301,10 @@ class ApprovalFlowMixin:
 
             if page_suggestions:
                 with self.stage_logger.stage("apply_approval_write_mode", f"page {current_page}"):
-                    write_result = self.apply_approval_write_mode(page, page_suggestions) or {
+                    raw_write_result = self.apply_approval_write_mode(page, page_suggestions)
+                    write_result = raw_write_result or {
                         "attempted": set(),
-                        "handled": set(),
+                        "handled": {self.suggestion_work_key(suggestion) for suggestion in page_suggestions},
                         "failed": set(),
                     }
                 for key in write_result.get("attempted", set()):
@@ -322,7 +320,7 @@ class ApprovalFlowMixin:
             if self.approval_write_mode() in {"disabled", "test_one"}:
                 handled_reagent_keys.update(self.reagent_work_key(reagent) for reagent in current_unmatched)
             if page_suggestions:
-                refresh_sorted_first_page = True
+                self.sort_property_column_until_unmatched_visible(page)
                 continue
 
             moved_next, terminal_or_error = self.click_next_reagent_page(page)
@@ -332,6 +330,7 @@ class ApprovalFlowMixin:
                 else:
                     print("Multi-page mode stopped because next-page navigation could not be verified.")
                 break
+            self.sort_property_column_until_unmatched_visible(page)
 
             if visited_steps >= 200:
                 raise RuntimeError("Stopped multi-page approval after 200 pages; page navigation may be stuck.")

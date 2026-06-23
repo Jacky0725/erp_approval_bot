@@ -529,15 +529,11 @@ class ReagentPageMixin:
             changer.click(timeout=5000)
             page.wait_for_timeout(300)
 
-            option_text = f"{size} 条/页"
             options = [
-                page.locator(".ant-select-dropdown:not(.ant-select-dropdown-hidden) .ant-select-item-option")
-                .filter(has_text=option_text)
-                .first,
                 page.locator(".ant-select-dropdown:not(.ant-select-dropdown-hidden) .ant-select-item-option")
                 .filter(has_text=str(size))
                 .first,
-                page.get_by_text(option_text, exact=True).first,
+                page.get_by_text(str(size), exact=False).first,
             ]
             for option in options:
                 if option.count() and option.is_visible():
