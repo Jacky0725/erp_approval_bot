@@ -727,6 +727,8 @@ class RuleEngine:
             "重金属": "重金属类",
             "易燃": "易燃液体",
             "普通": "普通类",
+            "拒收": "不建议接收类",
+            "拒收类": "不建议接收类",
         }
         if text in aliases:
             return aliases[text]

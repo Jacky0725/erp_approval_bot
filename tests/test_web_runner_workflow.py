@@ -53,6 +53,26 @@ class WorkflowSummaryTest(unittest.TestCase):
 
         self.assertEqual(health, "warning")
 
+    def test_stop_reports_not_stopped_when_idle(self) -> None:
+        with TemporaryDirectory() as tmp:
+            manager = AutomationJobManager(root_dir=Path(tmp))
+
+            result = manager.stop()
+
+            self.assertFalse(result["stopped"])
+
+    def test_worker_process_not_started_after_stop_requested(self) -> None:
+        with TemporaryDirectory() as tmp:
+            src_dir = Path(tmp) / "src"
+            src_dir.mkdir(parents=True)
+            manager = AutomationJobManager(root_dir=Path(tmp), running=True)
+            manager._stop_requested = True
+
+            result = manager._run_worker_process("suggestions", {}, writer=None)  # type: ignore[arg-type]
+
+            self.assertEqual(result, 130)
+            self.assertIsNone(manager._process)
+
 
 if __name__ == "__main__":
     unittest.main()

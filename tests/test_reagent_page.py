@@ -106,8 +106,17 @@ class ReagentPageAutoMatchTest(unittest.TestCase):
             def enter_reagent_judgement_page(self, page: FakePage) -> None:
                 return None
 
+            def goto_first_todo_page(self, page: FakePage) -> bool:
+                return True
+
+            def current_todo_page_number(self, page: FakePage) -> str:
+                return "1"
+
             def read_todo_tasks(self, page: FakePage) -> list[dict[str, str]]:
                 return [{"\u8bd5\u5242\u6e05\u5355\u53f7": "SJ0001"}]
+
+            def click_next_todo_page(self, page: FakePage) -> tuple[bool, bool]:
+                return False, True
 
         bot = Bot()
         self.assertFalse(bot.open_task_detail_by_list_number(FakePage(), "SJ9999"))
@@ -115,11 +124,11 @@ class ReagentPageAutoMatchTest(unittest.TestCase):
     def test_extract_list_number_ignores_urgent_suffix(self) -> None:
         self.assertEqual(ReagentPageMixin.extract_list_number("SJ202606170003 \u52a0\u6025"), "SJ202606170003")
 
-    def test_preferred_reagent_page_size_defaults_to_100(self) -> None:
+    def test_preferred_reagent_page_size_defaults_to_20(self) -> None:
         class Bot(ReagentPageMixin):
             settings = {}
 
-        self.assertEqual(Bot().preferred_reagent_page_size(), 100)
+        self.assertEqual(Bot().preferred_reagent_page_size(), 20)
 
     def test_preferred_reagent_page_size_reads_settings(self) -> None:
         class Bot(ReagentPageMixin):

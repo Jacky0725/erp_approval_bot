@@ -9,8 +9,11 @@ from playwright.sync_api import Error, Locator, Page
 import pandas as pd
 
 from approval_writer import ApprovalWriter
+from category_mapper import to_erp_property
 from chemical_searcher import ChemicalSearcher
 from llm_extractor import LlmExtractor
+from name_normalizer import NameNormalizer
+from reagent_memory import ReagentMemory
 from rule_engine import RuleEngine
 from rule_maintainer import RuleMaintainer
 from stage_logger import StageLogger
@@ -163,21 +166,17 @@ class ApprovalFlowMixin:
         max_todos = self.max_process_all_todos_count()
 
         try:
-            while len(processed_list_numbers) < max_todos:
-                self.enter_reagent_judgement_page(page)
-                tasks = self.read_todo_tasks(page)
-                list_numbers = self.todo_list_numbers(tasks)
-                next_list_number = self.next_unprocessed_list_number(tasks, processed_list_numbers)
+            self.enter_reagent_judgement_page(page)
+            tasks = self.read_all_todo_tasks(page)
+            list_numbers = self.todo_list_numbers(tasks)
+            print(f"Todo list refresh: {len(list_numbers)} total task(s) across all visible todo pages.")
 
-                print(
-                    f"Todo list refresh: {len(list_numbers)} visible task(s), "
-                    f"{len(processed_list_numbers)} already processed in this run."
-                )
-                if not next_list_number:
-                    print("No unprocessed todo task remains on the current todo page.")
+            for list_number in list_numbers:
+                if len(processed_list_numbers) >= max_todos:
                     break
+                if list_number in processed_list_numbers:
+                    continue
 
-                list_number = next_list_number
                 print(f"Processing todo detail {len(processed_list_numbers) + 1}: {list_number}")
                 self.target_list_number = list_number
                 try:
@@ -187,6 +186,8 @@ class ApprovalFlowMixin:
 
             if len(processed_list_numbers) >= max_todos:
                 print(f"Stopped all-todo processing after PROCESS_ALL_TODOS_MAX={max_todos}.")
+            elif not processed_list_numbers:
+                print("No unprocessed todo task remains across todo pages.")
         finally:
             self.target_list_number = original_target
 
@@ -198,17 +199,12 @@ class ApprovalFlowMixin:
 
         try:
             self.enter_reagent_judgement_page(page)
-            visible_tasks = set(self.todo_list_numbers(self.read_todo_tasks(page)))
             print(f"Selected todo list number(s): {', '.join(selected)}")
-            print(f"Current visible todo list number(s): {', '.join(sorted(visible_tasks)) if visible_tasks else '<none>'}")
 
             for list_number in selected:
                 if processed_count >= max_todos:
                     print(f"Stopped selected-todo processing after PROCESS_ALL_TODOS_MAX={max_todos}.")
                     break
-                if visible_tasks and list_number not in visible_tasks:
-                    print(f"Selected list is not visible in current todo page and will be skipped: {list_number}")
-                    continue
 
                 processed_count += 1
                 print(f"Processing selected todo detail {processed_count}: {list_number}")
@@ -284,7 +280,10 @@ class ApprovalFlowMixin:
                 continue
 
             if not current_unmatched:
-                print("Current sorted reagent page has no '-' rows; multi-page mode considers this list complete.")
+                print(
+                    "Current sorted reagent page has no '-' rows; "
+                    "multi-page mode considers this reagent list complete."
+                )
                 break
 
             page_suggestions = self.process_current_unmatched_reagent_page(
@@ -319,9 +318,6 @@ class ApprovalFlowMixin:
 
             if self.approval_write_mode() in {"disabled", "test_one"}:
                 handled_reagent_keys.update(self.reagent_work_key(reagent) for reagent in current_unmatched)
-            if page_suggestions:
-                self.sort_property_column_until_unmatched_visible(page)
-                continue
 
             moved_next, terminal_or_error = self.click_next_reagent_page(page)
             if not moved_next:
@@ -391,6 +387,8 @@ class ApprovalFlowMixin:
 
         suggestions_by_index: dict[int, dict[str, Any]] = {}
         pending_reagents: list[dict[str, Any]] = []
+        memory = ReagentMemory.from_settings(self.settings, self.root_dir)
+        normalizer = NameNormalizer(settings=self.settings, root_dir=self.root_dir)
         for index, reagent in enumerate(unmatched_reagents, start=1):
             reagent_name = reagent.get(name_key, "").strip()
             cas = reagent.get(cas_key, "").strip()
@@ -399,14 +397,58 @@ class ApprovalFlowMixin:
                 progress = f"page {page_label} {progress}"
             stage_logger.event(f"Processing reagent {progress}: {reagent_name} / {cas}")
 
+            memory_match = memory.lookup(cas=cas, raw_name=reagent_name)
+            if memory_match:
+                suggestion = self.reagent_memory_suggestion(reagent, memory_match)
+                suggestions_by_index[index] = suggestion
+                print(
+                    "Reagent memory suggestion: "
+                    f"{reagent.get('\u5e8f\u53f7', '')} {reagent_name} -> {memory_match.get('final_category', '')}"
+                )
+                continue
+
             direct_suggestion = self.direct_business_rule_suggestion(reagent, rule_engine)
             if direct_suggestion:
                 suggestions_by_index[index] = direct_suggestion
+                self.remember_erp_suggestion(memory, direct_suggestion)
                 sequence = reagent.get("\u5e8f\u53f7", "")
                 category = direct_suggestion.get("\u6700\u7ec8\u5efa\u8bae\u7c7b\u522b", "")
                 print(
                     "Direct business rule suggestion: "
                     f"{sequence} {reagent_name} -> {category}"
+                )
+                continue
+
+            try:
+                name_result = normalizer.normalize(
+                    reagent_name,
+                    cas=cas,
+                    specification=reagent.get("\u89c4\u683c", ""),
+                    unit=reagent.get("\u89c4\u683c\u5355\u4f4d", ""),
+                )
+            except Exception as error:
+                name_result = {
+                    "raw_name": reagent_name,
+                    "cleaned_name": reagent_name,
+                    "standard_name": reagent_name,
+                    "cas": cas,
+                    "confidence": 0.0,
+                    "need_manual_review": True,
+                    "reason": f"name normalization failed before memory lookup: {error}",
+                }
+
+            memory_match = memory.lookup(
+                cas=name_result.get("cas") or cas,
+                standard_name=name_result.get("standard_name", ""),
+                cleaned_name=name_result.get("cleaned_name", ""),
+                raw_name=reagent_name,
+            )
+            if memory_match:
+                suggestion = self.reagent_memory_suggestion(reagent, memory_match, name_result)
+                suggestions_by_index[index] = suggestion
+                print(
+                    "Reagent memory suggestion after normalization: "
+                    f"{reagent.get('\u5e8f\u53f7', '')} {reagent_name} -> {memory_match.get('final_category', '')}"
                 )
                 continue
 
@@ -468,8 +510,18 @@ class ApprovalFlowMixin:
                 extracted,
                 classification,
             )
+            self.remember_erp_suggestion(memory, suggestions_by_index[item["index"]])
 
         return [suggestions_by_index[index] for index in sorted(suggestions_by_index)]
+
+    def remember_erp_suggestion(self, memory: ReagentMemory, suggestion: dict[str, Any]) -> bool:
+        final_category = str(suggestion.get("最终建议类别") or "").strip()
+        erp_category = to_erp_property(final_category, self.settings)
+        if not erp_category:
+            return False
+        normalized = dict(suggestion)
+        normalized["最终建议类别"] = erp_category
+        return memory.remember_suggestion(normalized)
 
     def search_reagents_parallel(self, items: list[dict[str, Any]]) -> dict[int, dict[str, Any]]:
         worker_count = self.parallel_worker_count()
@@ -734,6 +786,56 @@ class ApprovalFlowMixin:
         }
         return self._approval_suggestion_row(reagent, name_result, search_result, extracted, classification)
 
+    def reagent_memory_suggestion(
+        self,
+        reagent: dict[str, str],
+        memory_row: dict[str, Any],
+        name_result: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        confidence = float(memory_row.get("confidence") or 0.0)
+        final_category = str(memory_row.get("final_category") or "").strip()
+        name_result = dict(name_result or {})
+        name_result.setdefault("raw_name", reagent.get("\u8bd5\u5242\u540d\u79f0", ""))
+        name_result.setdefault("cleaned_name", memory_row.get("cleaned_name") or reagent.get("\u8bd5\u5242\u540d\u79f0", ""))
+        name_result.setdefault("standard_name", memory_row.get("standard_name") or reagent.get("\u8bd5\u5242\u540d\u79f0", ""))
+        name_result.setdefault("cas", memory_row.get("cas") or reagent.get("CAS\u53f7", ""))
+        name_result.setdefault("confidence", confidence)
+        name_result.setdefault("need_manual_review", False)
+        name_result.setdefault(
+            "reason",
+            "Matched a reusable local reagent memory record before chemical website lookup.",
+        )
+
+        reason = str(memory_row.get("reason") or "Matched reusable local reagent memory.").strip()
+        search_result = {
+            "name": memory_row.get("standard_name") or reagent.get("\u8bd5\u5242\u540d\u79f0", ""),
+            "cas": memory_row.get("cas") or reagent.get("CAS\u53f7", ""),
+            "source": "reagent_memory",
+            "url": memory_row.get("url") or "",
+            "raw_text": reason,
+            "hazard_keywords": [],
+            "need_manual_review": False,
+            "relevance_passed": True,
+            "source_confidence": confidence,
+            "evidence_quality": "local_memory",
+            "name_normalization": name_result,
+            "matched_site_name": memory_row.get("standard_name") or memory_row.get("raw_name") or "",
+            "name_similarity": 1.0,
+        }
+        extracted = {
+            "suggested_categories": [final_category] if final_category else [],
+            "evidence": [reason],
+            "confidence": confidence,
+        }
+        classification = {
+            "final_category": final_category,
+            "matched_categories": [final_category] if final_category else [],
+            "reason": f"本地高可信试剂记忆库命中：{reason}",
+            "confidence": confidence,
+            "need_manual_review": False,
+        }
+        return self._approval_suggestion_row(reagent, name_result, search_result, extracted, classification)
+
     def apply_approval_write_mode(self, page: Page, suggestions: list[dict[str, Any]]) -> dict[str, set[str]]:
         result: dict[str, set[str]] = {"attempted": set(), "handled": set(), "failed": set()}
         mode = self.approval_write_mode()
@@ -758,85 +860,108 @@ class ApprovalFlowMixin:
         elif mode in {"single_page", "generate_library"}:
             pass
         elif mode == "multi_page":
-            pass
+            print(f"Multi-page write mode will process all {len(candidates)} writable candidate(s) on this page.")
         else:
             print(f"Unknown APPROVAL_WRITE_MODE={mode}; no webpage fields will be changed.")
             return result
 
         writer = ApprovalWriter(settings=self.settings)
+        consecutive_failures = 0
         for row_index, suggestion in enumerate(candidates, start=1):
             sequence = str(suggestion.get("\u5e8f\u53f7") or "").strip()
             category = str(suggestion.get("\u6700\u7ec8\u5efa\u8bae\u7c7b\u522b") or "").strip()
             reagent_name = str(suggestion.get("\u8bd5\u5242\u540d\u79f0") or "").strip()
+            cas = str(suggestion.get("CAS\u53f7") or "").strip()
             work_key = self.suggestion_work_key(suggestion)
             result["attempted"].add(work_key)
             print(f"Approval write candidate {row_index}/{len(candidates)}: {sequence} {reagent_name} -> {category}")
 
-            row = self.find_reagent_row_by_sequence(page, sequence)
-            if row is None:
-                self.record_save_result(f"reagent_save_{sequence}", False, "row not found")
-                result["failed"].add(work_key)
-                print(f"Could not find current-page row for sequence: {sequence}")
-                continue
+            write_attempt_limit = 2 if mode == "multi_page" else 1
+            last_failure_detail = ""
+            verified = False
+            saved = False
+            row = None
 
-            opened = writer.open_technical_judgement(row)
-            if not opened:
-                self.record_save_result(f"reagent_save_{sequence}", False, "technical judgement button not found")
-                result["failed"].add(work_key)
-                print(f"Could not open technical judgement for sequence: {sequence}")
-                continue
+            for write_attempt in range(1, write_attempt_limit + 1):
+                if write_attempt > 1:
+                    print(f"Retrying approval write for sequence {sequence}, attempt {write_attempt}/{write_attempt_limit}.")
+                writer.dismiss_open_dropdown(page)
+                row = self.find_reagent_row_by_sequence(page, sequence, reagent_name, cas)
+                if row is None:
+                    last_failure_detail = "row not found"
+                    print(f"Could not find current-page row for sequence: {sequence}")
+                    break
 
-            page.wait_for_timeout(500)
-            selected = writer.choose_property(page, category, row)
-            if not selected:
-                self.record_save_result(f"reagent_save_{sequence}", False, f"could not select {category}")
-                result["failed"].add(work_key)
-                print(f"Could not select physicochemical property {category} for sequence: {sequence}")
-                continue
+                self.prepare_reagent_row_for_write(page, row)
+                already_editing = writer.row_is_editing(page, row)
+                if already_editing:
+                    print(f"Sequence {sequence} is already in edit mode; continuing property selection.")
+                    opened = True
+                else:
+                    opened = writer.open_technical_judgement(row, page)
+                if not opened:
+                    last_failure_detail = "technical judgement button not found"
+                    print(f"Could not open technical judgement for sequence: {sequence}")
+                    self.capture_write_failure(page, sequence, write_attempt, last_failure_detail)
+                    continue
 
-            selected_value = self.read_reagent_property_by_sequence(page, sequence)
-            if selected_value and selected_value != "-" and not self.property_value_matches(selected_value, category, writer):
-                self.record_save_result(
-                    f"reagent_save_{sequence}",
-                    False,
-                    f"selected {category}, but row still shows {selected_value or '<empty>'}",
-                )
-                result["failed"].add(work_key)
-                print(
-                    f"Property selection verification failed for sequence {sequence}: "
-                    f"expected {category}, got {selected_value or '<empty>'}."
-                )
-                continue
+                page.wait_for_timeout(500)
+                selected = writer.choose_property(page, category, row)
+                if not selected:
+                    last_failure_detail = f"could not select {category}"
+                    print(f"Could not select physicochemical property {category} for sequence: {sequence}")
+                    self.capture_write_failure(page, sequence, write_attempt, last_failure_detail)
+                    continue
 
-            screenshot_path = self._log_dir() / f"write_mode_{mode}_{sequence}.png"
-            page.screenshot(path=str(screenshot_path), full_page=True)
-            print(f"Saved approval write screenshot before save: {screenshot_path}")
+                selected_value = self.read_reagent_property_by_sequence(page, sequence)
+                if selected_value and selected_value != "-" and not self.property_value_matches(selected_value, category, writer):
+                    last_failure_detail = f"selected {category}, but row still shows {selected_value or '<empty>'}"
+                    print(
+                        f"Property selection verification failed for sequence {sequence}: "
+                        f"expected {category}, got {selected_value or '<empty>'}."
+                    )
+                    self.capture_write_failure(page, sequence, write_attempt, last_failure_detail)
+                    continue
 
-            if mode == "test_one":
-                print("Test write mode: selected value for inspection only; not saving.")
-                result["handled"].add(work_key)
-                return result
+                screenshot_path = self._log_dir() / f"write_mode_{mode}_{sequence}.png"
+                page.screenshot(path=str(screenshot_path), full_page=True)
+                print(f"Saved approval write screenshot before save: {screenshot_path}")
 
-            saved = writer.save(page, row)
-            page.wait_for_timeout(800)
-            saved_value = self.read_reagent_property_by_sequence(page, sequence)
-            verified = saved and self.property_value_matches(saved_value, category, writer)
-            self.record_save_result(
-                f"reagent_save_{sequence}",
-                verified,
-                category if verified else f"saved={saved}, row shows {saved_value or '<empty>'}",
-            )
-            print(f"Save result for sequence {sequence}: {saved}")
-            if verified:
-                result["handled"].add(work_key)
-            else:
-                result["failed"].add(work_key)
+                if mode == "test_one":
+                    print("Test write mode: selected value for inspection only; not saving.")
+                    result["handled"].add(work_key)
+                    return result
+
+                saved = writer.save(page, row)
+                page.wait_for_timeout(800)
+                saved_value = self.read_reagent_property_by_sequence(page, sequence)
+                verified = saved and self.property_value_matches(saved_value, category, writer)
+                print(f"Save verified for sequence {sequence}: {verified} (clicked_save={saved})")
+                if verified:
+                    break
+                last_failure_detail = f"saved={saved}, row shows {saved_value or '<empty>'}"
                 print(
                     f"Save verification failed for sequence {sequence}: "
                     f"expected {category}, got {saved_value or '<empty>'}."
                 )
+                self.capture_write_failure(page, sequence, write_attempt, last_failure_detail)
 
-            if mode == "generate_library" and verified:
+            self.record_save_result(
+                f"reagent_save_{sequence}",
+                verified,
+                category if verified else last_failure_detail or f"could not select {category}",
+            )
+            if verified:
+                result["handled"].add(work_key)
+                consecutive_failures = 0
+            else:
+                result["failed"].add(work_key)
+                consecutive_failures += 1
+                if mode != "multi_page" and consecutive_failures >= self.approval_write_failure_break_limit():
+                    print("Stopping this write round after repeated save failures; the page will be re-read.")
+                    break
+
+            if mode == "generate_library" and verified and row is not None:
                 generated = writer.generate_reagent_library(page, row)
                 self.record_save_result(f"reagent_library_{sequence}", generated, category)
                 print(f"Generate reagent library result for sequence {sequence}: {generated}")
@@ -845,6 +970,55 @@ class ApprovalFlowMixin:
                 return result
 
         return result
+
+    def capture_write_failure(self, page: Page, sequence: str, attempt: int, reason: str) -> None:
+        safe_sequence = "".join(ch for ch in str(sequence or "unknown") if ch.isalnum() or ch in {"-", "_"})
+        safe_reason = "".join(ch if ch.isalnum() else "_" for ch in str(reason or "failure"))[:60].strip("_")
+        prefix = f"write_fail_{safe_sequence}_attempt{attempt}_{safe_reason or 'failure'}"
+        try:
+            screenshot_path = self._log_dir() / f"{prefix}.png"
+            page.screenshot(path=str(screenshot_path), full_page=True)
+            print(f"Saved write failure screenshot: {screenshot_path}")
+        except Exception as error:
+            print(f"Could not save write failure screenshot for sequence {sequence}: {error}")
+        try:
+            html_path = self._log_dir() / f"{prefix}.html"
+            html_path.write_text(page.content(), encoding="utf-8")
+            print(f"Saved write failure HTML: {html_path}")
+        except Exception as error:
+            print(f"Could not save write failure HTML for sequence {sequence}: {error}")
+
+    def approval_write_failure_break_limit(self) -> int:
+        approval_settings = getattr(self, "settings", {}).get("approval", {}) or {}
+        value = os.getenv("APPROVAL_WRITE_FAILURE_BREAK_LIMIT") or approval_settings.get("write_failure_break_limit", 2)
+        try:
+            return max(1, int(value))
+        except (TypeError, ValueError):
+            return 2
+
+    @staticmethod
+    def prepare_reagent_row_for_write(page: Page, row: Any) -> None:
+        try:
+            row.scroll_into_view_if_needed(timeout=5000)
+        except Exception:
+            pass
+        try:
+            row.evaluate(
+                """
+                (node) => {
+                  const rect = node.getBoundingClientRect();
+                  const targetY = window.scrollY + rect.top - Math.max(80, window.innerHeight * 0.35);
+                  window.scrollTo({ top: Math.max(0, targetY), behavior: 'instant' });
+                  node.scrollIntoView({ block: 'center', inline: 'nearest' });
+                }
+                """
+            )
+        except Exception:
+            pass
+        try:
+            page.wait_for_timeout(250)
+        except Exception:
+            pass
 
     def suggestion_work_key(self, suggestion: dict[str, Any]) -> str:
         return self.reagent_work_key(
@@ -859,10 +1033,18 @@ class ApprovalFlowMixin:
 
     @staticmethod
     def property_value_matches(value: str, expected: str, writer: ApprovalWriter) -> bool:
-        normalized = str(value or "").strip()
+        normalized = " ".join(str(value or "").split())
         if not normalized:
             return False
-        return normalized in writer.property_name_candidates(expected)
+        candidates = set(writer.property_name_candidates(expected))
+        if normalized in candidates:
+            return True
+
+        # Ant Design fixed columns can duplicate the same cell text when the
+        # table is read from both the main body and the fixed action/body panes.
+        # Treat repeated equivalent labels such as "普通类 普通类" as a match.
+        parts = [part for part in normalized.split(" ") if part]
+        return bool(parts) and all(part in candidates for part in parts)
 
     def approval_write_mode(self) -> str:
         configured = (getattr(self, "settings", {}).get("approval", {}) or {}).get("write_mode", "disabled")

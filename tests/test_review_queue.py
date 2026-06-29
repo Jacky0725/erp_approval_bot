@@ -80,6 +80,41 @@ class ReviewQueueTest(unittest.TestCase):
             self.assertEqual(remaining["试剂清单号"].tolist(), ["SJ2"])
             self.assertEqual(remaining["试剂名称"].tolist(), ["C"])
 
+    def test_manual_review_dedup_keeps_same_name_with_different_cas(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bot = ReviewQueueBot(root)
+            bot._current_detail_info = {"当前清单号": "SJ1", "申请人": "tester"}
+
+            base_reagent = {
+                "序号": "1",
+                "试剂名称": "同名试剂",
+                "CAS号": "111-11-1",
+                "规格": "10",
+                "规格单位": "g",
+                "试剂数量": "1",
+            }
+            bot.add_manual_review_item_from_search_failure(
+                base_reagent,
+                {"standard_name": "同名试剂"},
+                {"raw_text": "lookup failed"},
+            )
+            bot.add_manual_review_item_from_search_failure(
+                {**base_reagent, "序号": "2", "CAS号": "222-22-2"},
+                {"standard_name": "同名试剂"},
+                {"raw_text": "lookup failed"},
+            )
+            bot.add_manual_review_item_from_search_failure(
+                base_reagent,
+                {"standard_name": "同名试剂"},
+                {"raw_text": "lookup failed"},
+            )
+
+            queue = pd.read_excel(root / "review_queue.xlsx", dtype=str).fillna("")
+
+        self.assertEqual(len(queue), 2)
+        self.assertEqual(queue["cas"].tolist(), ["111-11-1", "222-22-2"])
+
 
 if __name__ == "__main__":
     unittest.main()

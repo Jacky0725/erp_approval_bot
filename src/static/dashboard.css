@@ -442,7 +442,8 @@ select:focus {
 .switches,
 .button-row,
 .tag-row,
-.review-tools {
+.review-tools,
+.memory-tools {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
@@ -583,6 +584,19 @@ select:focus {
   white-space: nowrap;
 }
 
+.memory-tools {
+  justify-content: flex-end;
+  max-width: 920px;
+}
+
+.memory-tools input {
+  width: 260px;
+}
+
+.memory-tools select {
+  width: 150px;
+}
+
 button {
   padding: 0 14px;
   background: #fff;
@@ -596,6 +610,11 @@ button:hover {
   color: var(--blue);
 }
 
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.48;
+}
+
 button.primary {
   border-color: var(--blue);
   background: var(--blue);
@@ -604,6 +623,17 @@ button.primary {
 
 button.primary:hover {
   background: #105f9d;
+  color: #fff;
+}
+
+button.danger-button {
+  border-color: var(--red);
+  background: var(--red);
+  color: #fff;
+}
+
+button.danger-button:hover {
+  background: #941b15;
   color: #fff;
 }
 
@@ -670,6 +700,10 @@ table {
   min-width: 980px;
 }
 
+.memory-table {
+  min-width: 1460px;
+}
+
 th,
 td {
   padding: 10px 12px;
@@ -725,6 +759,50 @@ tr:last-child td {
   max-width: 620px;
   color: #33485b;
   line-height: 1.45;
+}
+
+.memory-table input,
+.memory-table select {
+  min-width: 120px;
+  height: 32px;
+  padding: 0 8px;
+  font-size: 12px;
+}
+
+.memory-table textarea {
+  width: 260px;
+  min-height: 62px;
+  padding: 8px;
+  resize: vertical;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--ink);
+  font: inherit;
+  font-size: 12px;
+}
+
+.memory-table textarea:focus {
+  border-color: var(--blue);
+  box-shadow: 0 0 0 3px rgba(23, 105, 170, 0.13);
+  outline: none;
+}
+
+.mini-check {
+  display: flex;
+  grid-template-columns: none;
+  align-items: center;
+  gap: 5px;
+  margin-bottom: 4px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.mini-check input {
+  width: 14px;
+  height: 14px;
+  min-width: 14px;
 }
 
 .artifact-list {

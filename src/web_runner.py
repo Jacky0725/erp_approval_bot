@@ -3,6 +3,8 @@ from __future__ import annotations
 import contextlib
 import io
 import os
+import subprocess
+import sys
 import threading
 import traceback
 from dataclasses import dataclass, field
@@ -14,7 +16,6 @@ import pandas as pd
 import yaml
 from dotenv import load_dotenv
 
-from browser_bot import BrowserBot
 from llm_providers import (
     configured_llm_api_key,
     get_llm_provider,
@@ -22,6 +23,12 @@ from llm_providers import (
     provider_default_model,
     provider_options,
 )
+from category_mapper import (
+    category_mapping_summary,
+    erp_property_options,
+    to_erp_property,
+)
+from reagent_memory import ReagentMemory
 
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
@@ -114,7 +121,11 @@ class AutomationJobManager:
     error: str = ""
     lines: list[str] = field(default_factory=list)
     _thread: threading.Thread | None = None
-    _lock: threading.Lock = field(default_factory=threading.Lock)
+    _process: subprocess.Popen[str] | None = None
+    _stop_requested: bool = False
+    _last_action: str = ""
+    _last_options: dict[str, str] = field(default_factory=dict)
+    _lock: threading.RLock = field(default_factory=threading.RLock)
 
     def start(self, action: str, options: dict[str, str] | None = None) -> dict[str, Any]:
         options = options or {}
@@ -129,6 +140,9 @@ class AutomationJobManager:
             self.success = None
             self.error = ""
             self.lines = []
+            self._stop_requested = False
+            self._last_action = action
+            self._last_options = dict(options)
             self._persist_state()
             self._thread = threading.Thread(
                 target=self._run,
@@ -138,6 +152,24 @@ class AutomationJobManager:
             )
             self._thread.start()
             return {"started": True, "message": f"已启动任务：{action}"}
+
+    def stop(self) -> dict[str, Any]:
+        with self._lock:
+            if not self.running:
+                return {"stopped": False, "message": "No automation task is running."}
+            self._stop_requested = True
+            process = self._process
+
+        self._terminate_process_tree(process)
+
+        thread = self._thread
+        if thread and thread.is_alive():
+            thread.join(timeout=10)
+        stopped = not (thread and thread.is_alive())
+        return {
+            "stopped": stopped,
+            "message": "Current automation task stopped." if stopped else "Stop requested; waiting for task cleanup.",
+        }
 
     def status(self) -> dict[str, Any]:
         with self._lock:
@@ -169,12 +201,19 @@ class AutomationJobManager:
         try:
             if action == "todo_export":
                 clear_todo_task_cache()
-            with contextlib.redirect_stdout(writer), contextlib.redirect_stderr(writer):
-                print(f"{datetime.now().isoformat(timespec='seconds')} START {action}")
-                self._run_bot_action(action, options)
-                print(f"{datetime.now().isoformat(timespec='seconds')} END {action}")
-            success = True
-            error = ""
+            writer.write(f"{datetime.now().isoformat(timespec='seconds')} START {action}\n")
+            return_code = self._run_worker_process(action, options, writer)
+            if self._stop_requested:
+                success = False
+                error = "用户停止运行"
+                writer.write(f"{datetime.now().isoformat(timespec='seconds')} STOPPED {action}\n")
+            elif return_code == 0:
+                success = True
+                error = ""
+                writer.write(f"{datetime.now().isoformat(timespec='seconds')} END {action}\n")
+            else:
+                success = False
+                error = f"Automation worker exited with code {return_code}"
         except Exception as exc:  # noqa: BLE001 - surfaced in web UI for local operator diagnosis
             success = False
             error = str(exc)
@@ -237,25 +276,69 @@ class AutomationJobManager:
             "workflow": workflow_summary(log_tail, running=False, success=success, error=error),
         }
 
-    def _run_bot_action(self, action: str, options: dict[str, str]) -> None:
-        load_dotenv(self.root_dir / ".env")
-        settings = load_settings()
-        bot = BrowserBot(settings=settings, root_dir=self.root_dir)
-
-        with temporary_env(self._env_overrides(options)):
-            bot.target_list_number = os.getenv("TARGET_LIST_NUMBER", "").strip()
-            bot.target_list_numbers = parse_target_list_numbers(os.getenv("TARGET_LIST_NUMBERS", ""))
-
-            if action == "debug_capture":
-                bot.run_debug_capture()
-            elif action == "judgement_capture":
-                bot.run_reagent_judgement_capture()
-            elif action == "todo_export":
-                bot.run_todo_tasks_export()
-            elif action == "suggestions":
-                bot.run_semi_auto_approval_suggestions()
+    def _run_worker_process(self, action: str, options: dict[str, str], writer: LineBufferWriter) -> int:
+        env = os.environ.copy()
+        overrides = self._env_overrides(options)
+        for key, value in overrides.items():
+            if value == "":
+                env.pop(key, None)
             else:
-                raise ValueError(f"Unknown automation action: {action}")
+                env[key] = value
+        env.setdefault("PYTHONIOENCODING", "utf-8")
+
+        with self._lock:
+            if self._stop_requested:
+                return 130
+            popen_kwargs: dict[str, Any] = {}
+            if os.name == "nt":
+                startupinfo = subprocess.STARTUPINFO()
+                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                startupinfo.wShowWindow = 0
+                popen_kwargs["startupinfo"] = startupinfo
+                popen_kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+            process = subprocess.Popen(
+                [sys.executable, "-u", "-m", "automation_worker", action],
+                cwd=str(self.root_dir / "src"),
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                bufsize=1,
+                **popen_kwargs,
+            )
+            self._process = process
+            if self._stop_requested:
+                self._terminate_process_tree(process)
+        try:
+            assert process.stdout is not None
+            for line in process.stdout:
+                writer.write(line)
+            return process.wait()
+        finally:
+            with self._lock:
+                self._process = None
+
+    @staticmethod
+    def _terminate_process_tree(process: subprocess.Popen[str] | None) -> None:
+        if process is None or process.poll() is not None:
+            return
+        if os.name == "nt":
+            subprocess.run(
+                ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            )
+        else:
+            process.terminate()
+        try:
+            process.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=3)
 
     def _env_overrides(self, options: dict[str, str]) -> dict[str, str]:
         allowed_keys = {
@@ -441,7 +524,12 @@ def line_to_workflow_step(line: str) -> str:
         return "llm"
     if "rule_classify" in text or "规则判定" in line:
         return "rule"
-    if "approval write candidate" in text or "save result for sequence" in text or "apply_approval_write_mode" in text:
+    if (
+        "approval write candidate" in text
+        or "save result for sequence" in text
+        or "save verified for sequence" in text
+        or "apply_approval_write_mode" in text
+    ):
         return "write"
     if "start " in text:
         return "login"
@@ -681,11 +769,16 @@ def review_queue_summary(root_dir: Path = ROOT_DIR) -> dict[str, Any]:
         reason = first_existing(row, ["reason", "原因", "复核原因", "manual_review_reason"])
         preview.append(
             {
+                "review_key": first_existing(row, ["_review_key"]),
                 "timestamp": first_existing(row, ["timestamp", "时间"]),
                 "list_number": first_existing(row, ["试剂清单号", "当前清单号", "清单号", "list_number"]),
+                "sequence": first_existing(row, ["序号", "sequence", "index"]),
                 "reagent_name": first_existing(row, ["试剂名称", "chemical_name", "reagent_name"]),
                 "cas": first_existing(row, ["cas", "CAS号"]),
                 "standard_name": first_existing(row, ["standard_name", "标准化名称"]),
+                "cleaned_name": first_existing(row, ["cleaned_name", "清洗后名称"]),
+                "specification": first_existing(row, ["specification", "规格"]),
+                "unit": first_existing(row, ["unit", "规格单位"]),
                 "reason": natural_reason(reason),
                 "reason_full": reason,
                 "status": first_existing(row, ["status", "状态", "处理状态"]) or "pending",
@@ -702,11 +795,318 @@ def review_queue_summary(root_dir: Path = ROOT_DIR) -> dict[str, Any]:
     }
 
 
+def confirm_review_item(payload: dict[str, Any], root_dir: Path = ROOT_DIR) -> dict[str, Any]:
+    path = root_dir / "data" / "review_queue.xlsx"
+    if not path.exists():
+        return {"confirmed": False, "message": "review_queue.xlsx does not exist."}
+
+    frame = pd.read_excel(path, dtype=str).fillna("")
+    if frame.empty:
+        return {"confirmed": False, "message": "review_queue.xlsx is empty."}
+
+    final_category = str(payload.get("final_category") or "").strip()
+    if not final_category:
+        return {"confirmed": False, "message": "请先选择人工确认后的物化特性。"}
+    settings = load_settings()
+    options = erp_property_options(settings)
+    if final_category not in options:
+        mapped_category = to_erp_property(final_category, settings)
+        if not mapped_category:
+            return {
+                "confirmed": False,
+                "message": f"物化特性类别未映射到 ERP 下拉选项：{final_category}",
+            }
+        final_category = mapped_category
+
+    if "_review_key" not in frame.columns:
+        frame["_review_key"] = frame.apply(review_queue_row_key, axis=1)
+
+    review_key = str(payload.get("review_key") or "").strip()
+    matched_index: int | None = None
+    if review_key:
+        matches = frame.index[frame["_review_key"].astype(str) == review_key].tolist()
+        if matches:
+            matched_index = matches[-1]
+
+    if matched_index is None:
+        matched_index = match_review_item_by_fields(frame, payload)
+
+    if matched_index is None:
+        return {"confirmed": False, "message": "没有找到对应的人工复核记录，可能已被处理或文件已刷新。"}
+
+    row = frame.loc[matched_index]
+    memory = ReagentMemory.from_settings(settings, root_dir)
+    memory_added = memory.add_record(
+        raw_name=first_existing_value(row, ["试剂名称", "chemical_name", "reagent_name"])
+        or str(payload.get("reagent_name") or ""),
+        cleaned_name=first_existing_value(row, ["cleaned_name", "清洗后名称"])
+        or str(payload.get("cleaned_name") or ""),
+        standard_name=first_existing_value(row, ["standard_name", "标准化名称"])
+        or str(payload.get("standard_name") or ""),
+        cas=first_existing_value(row, ["cas", "CAS号"]) or str(payload.get("cas") or ""),
+        final_category=final_category,
+        confidence=1.0,
+        reason=str(payload.get("reason") or "人工复核确认后加入高可信试剂记忆库。"),
+        source="manual_review_web_ui",
+        specification=first_existing_value(row, ["specification", "规格"]) or str(payload.get("specification") or ""),
+        unit=first_existing_value(row, ["unit", "规格单位"]) or str(payload.get("unit") or ""),
+        need_manual_review=False,
+        manual_verified=True,
+    )
+
+    now = datetime.now().isoformat(timespec="seconds")
+    for column, value in {
+        "status": "confirmed",
+        "manual_result": final_category,
+        "confirmed_at": now,
+        "confirmed_by": "web_ui",
+        "memory_added": str(bool(memory_added)),
+    }.items():
+        if column not in frame.columns:
+            frame[column] = ""
+        frame.at[matched_index, column] = value
+
+    frame = frame.drop(columns=["_review_key"], errors="ignore")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    frame.to_excel(path, index=False)
+    return {
+        "confirmed": True,
+        "memory_added": bool(memory_added),
+        "message": "已确认人工复核项，并写入高可信试剂记忆库。"
+        if memory_added
+        else "已确认人工复核项；存在冲突或限制，未设为可自动复用。",
+    }
+
+
+def match_review_item_by_fields(frame: pd.DataFrame, payload: dict[str, Any]) -> int | None:
+    list_number = str(payload.get("list_number") or "").strip()
+    reagent_name = str(payload.get("reagent_name") or "").strip()
+    cas = str(payload.get("cas") or "").strip()
+    sequence = str(payload.get("sequence") or "").strip()
+    matches: list[int] = []
+    for index, row in frame.iterrows():
+        if list_number and first_existing_value(row, ["试剂清单号", "当前清单号", "清单号", "list_number"]) != list_number:
+            continue
+        if reagent_name and first_existing_value(row, ["试剂名称", "chemical_name", "reagent_name"]) != reagent_name:
+            continue
+        if cas and first_existing_value(row, ["cas", "CAS号"]) != cas:
+            continue
+        if sequence and first_existing_value(row, ["序号", "sequence", "index"]) != sequence:
+            continue
+        matches.append(index)
+    return matches[-1] if matches else None
+
+
+def review_queue_row_key(row: pd.Series) -> str:
+    return "|".join(
+        [
+            first_existing_value(row, ["试剂清单号", "当前清单号", "清单号", "list_number"]),
+            first_existing_value(row, ["cas", "CAS号"]),
+            first_existing_value(row, ["试剂名称", "chemical_name", "reagent_name"]),
+            first_existing_value(row, ["standard_name", "标准化名称"]),
+        ]
+    )
+
+
+def first_existing_value(row: pd.Series, columns: list[str]) -> str:
+    for column in columns:
+        if column in row.index:
+            value = str(row.get(column, "")).strip()
+            if value:
+                return value
+    return ""
+
+
+def memory_summary(
+    *,
+    query: str = "",
+    category: str = "",
+    reusable: str = "",
+    conflict: str = "",
+    limit: int = 200,
+    root_dir: Path = ROOT_DIR,
+) -> dict[str, Any]:
+    settings = load_settings()
+    memory = ReagentMemory.from_settings(settings, root_dir)
+    mapping = category_mapping_summary(settings, root_dir)
+    rows = memory.list_records(
+        query=query,
+        category=category,
+        reusable=reusable,
+        conflict=conflict,
+        limit=limit,
+    )
+    categories = sorted({str(row.get("final_category") or "") for row in rows if str(row.get("final_category") or "")})
+    return {
+        "exists": memory.path.exists(),
+        "path": str(memory.path),
+        "rows": len(rows),
+        "categories": categories,
+        "erp_property_options": mapping["erp_property_options"],
+        "category_mappings": mapping["mappings"],
+        "unmapped_rule_categories": mapping["unmapped_rule_categories"],
+        "non_writable_rule_categories": mapping["non_writable_rule_categories"],
+        "preview": rows,
+    }
+
+
+def update_memory_record(record_id: int, payload: dict[str, Any], root_dir: Path = ROOT_DIR) -> dict[str, Any]:
+    settings = load_settings()
+    final_category = str(payload.get("final_category") or "").strip()
+    if final_category:
+        options = erp_property_options(settings)
+        if final_category not in options:
+            mapped_category = to_erp_property(final_category, settings)
+            if not mapped_category:
+                raise ValueError(f"物化特性类别未映射到 ERP 下拉选项：{final_category}")
+            payload = dict(payload)
+            payload["final_category"] = mapped_category
+    memory = ReagentMemory.from_settings(settings, root_dir)
+    updated = memory.update_record(record_id, payload)
+    return {"updated": True, "record": updated}
+
+
+def delete_memory_record(record_id: int, root_dir: Path = ROOT_DIR) -> dict[str, Any]:
+    settings = load_settings()
+    memory = ReagentMemory.from_settings(settings, root_dir)
+    deleted = memory.delete_record(record_id)
+    return {"deleted": deleted}
+
+
+def import_approval_suggestions_to_memory(root_dir: Path = ROOT_DIR) -> dict[str, Any]:
+    settings = load_settings()
+    memory = ReagentMemory.from_settings(settings, root_dir)
+    log_dir = root_dir / "data" / "logs"
+    paths = sorted(
+        log_dir.glob("approval_suggestions*.xlsx"),
+        key=lambda item: item.stat().st_mtime,
+        reverse=True,
+    )
+    stats: dict[str, Any] = {
+        "imported": 0,
+        "existing": 0,
+        "conflicts": 0,
+        "skipped_manual_review": 0,
+        "skipped_low_confidence": 0,
+        "candidate_manual_review": 0,
+        "candidate_low_confidence": 0,
+        "skipped_missing_category": 0,
+        "candidate_unmapped_category": 0,
+        "skipped_missing_identity": 0,
+        "skipped_duplicate_source_row": 0,
+        "errors": [],
+        "files": [],
+        "scanned": 0,
+    }
+    seen_source_rows: set[tuple[str, str, str, str, str]] = set()
+    for path in paths:
+        if not path.exists():
+            continue
+        stats["files"].append(str(path))
+        try:
+            frame = pd.read_excel(path, dtype=str).fillna("")
+        except Exception as error:  # noqa: BLE001
+            stats["errors"].append(f"{path.name}: {error}")
+            continue
+
+        for _, row in frame.iterrows():
+            stats["scanned"] += 1
+            suggestion = row.to_dict()
+            final_category = str(suggestion.get("最终建议类别") or "").strip()
+            confidence = parse_float(suggestion.get("置信度"), 0.0)
+            manual_review = truthy_value(suggestion.get("需人工复核"))
+            raw_name = str(suggestion.get("试剂名称") or "").strip()
+            cleaned_name = str(suggestion.get("清洗后名称") or "").strip()
+            standard_name = str(suggestion.get("标准化名称") or "").strip()
+            cas = str(suggestion.get("CAS号") or "").strip()
+            source_key = (cas.lower(), standard_name.lower(), cleaned_name.lower(), raw_name.lower(), final_category)
+
+            if source_key in seen_source_rows:
+                stats["skipped_duplicate_source_row"] += 1
+                continue
+            seen_source_rows.add(source_key)
+
+            if not final_category:
+                stats["skipped_missing_category"] += 1
+                continue
+            if not any((cas, standard_name, cleaned_name, raw_name)):
+                stats["skipped_missing_identity"] += 1
+                continue
+            erp_category = to_erp_property(final_category, settings) or final_category
+            category_mapped = erp_category in erp_property_options(settings)
+
+            existing = memory.find_any(
+                cas=cas,
+                standard_name=standard_name,
+                cleaned_name=cleaned_name,
+                raw_name=raw_name,
+                final_category=erp_category,
+            )
+            if existing:
+                stats["existing"] += 1
+                continue
+
+            if manual_review or confidence < memory.min_confidence or not category_mapped:
+                memory.add_record(
+                    raw_name=raw_name,
+                    cleaned_name=cleaned_name,
+                    standard_name=standard_name,
+                    cas=cas,
+                    final_category=erp_category,
+                    confidence=confidence,
+                    reason=str(suggestion.get("规则原因") or suggestion.get("证据") or "").strip()
+                    or (
+                        f"规则类别 {final_category} 未映射到 ERP 下拉选项"
+                        if not category_mapped
+                        else "人工复核历史候选"
+                        if manual_review
+                        else "低置信度历史候选"
+                    ),
+                    source="approval_suggestions_candidate",
+                    url=str(suggestion.get("查询URL") or "").strip(),
+                    specification=str(suggestion.get("规格") or "").strip(),
+                    unit=str(suggestion.get("规格单位") or "").strip(),
+                    need_manual_review=True,
+                    manual_verified=False,
+                    track_conflicts=False,
+                )
+                if manual_review:
+                    stats["candidate_manual_review"] += 1
+                    stats["skipped_manual_review"] += 1
+                elif not category_mapped:
+                    stats["candidate_unmapped_category"] += 1
+                else:
+                    stats["candidate_low_confidence"] += 1
+                    stats["skipped_low_confidence"] += 1
+                continue
+
+            suggestion = dict(suggestion)
+            suggestion["最终建议类别"] = erp_category
+            imported = memory.remember_suggestion(suggestion)
+            if imported:
+                stats["imported"] += 1
+            else:
+                stats["conflicts"] += 1
+    return stats
+
+
+def truthy_value(value: Any) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes", "y", "on", "是", "需人工复核"}
+
+
+def parse_float(value: Any, default: float) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def runtime_config_snapshot() -> dict[str, Any]:
     load_dotenv(ENV_PATH)
     settings = load_settings()
     approval = settings.get("approval", {}) or {}
     llm = settings.get("llm", {}) or {}
+    mapping = category_mapping_summary(settings, ROOT_DIR)
     provider = get_llm_provider(os.getenv("LLM_PROVIDER") or llm.get("provider") or "siliconflow")
     configured_base_url = os.getenv("LLM_BASE_URL") or (
         os.getenv("SILICONFLOW_BASE_URL") if provider.id == "siliconflow" else ""
@@ -747,6 +1147,10 @@ def runtime_config_snapshot() -> dict[str, Any]:
         "llm_model": configured_model,
         "llm_timeout_seconds": llm.get("timeout_seconds", 45),
         "llm_max_retries": llm.get("max_retries", 1),
+        "erp_property_options": mapping["erp_property_options"],
+        "category_mappings": mapping["mappings"],
+        "unmapped_rule_categories": mapping["unmapped_rule_categories"],
+        "non_writable_rule_categories": mapping["non_writable_rule_categories"],
     }
 
 

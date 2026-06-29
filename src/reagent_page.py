@@ -232,54 +232,75 @@ class ReagentPageMixin:
         if not target_list_number:
             raise RuntimeError("Target reagent list number is empty.")
 
-        tasks = self.read_todo_tasks(page)
-        if not tasks:
-            print("No todo tasks found; target detail page was not opened.")
-            return False
-
         list_number_key = "\u8bd5\u5242\u6e05\u5355\u53f7"
         customer_name_key = "\u5ba2\u6237\u540d\u79f0"
         approval_state_key = "\u6280\u672f\u5ba1\u6279\u72b6\u6001"
         applicant_key = "\u7533\u8bf7\u4eba"
 
-        matched_index = next(
-            (
-                index
-                for index, task in enumerate(tasks)
-                if self.extract_list_number(task.get(list_number_key, "")) == target_list_number
-            ),
-            None,
-        )
-        if matched_index is None:
-            print(f"Target task was not found in current todo page: {target_list_number}")
-            print("Current todo task list numbers:")
-            for task in tasks:
-                print(f"- {task.get(list_number_key, '')}")
-            return False
+        self.goto_first_todo_page(page)
+        visited_pages = 0
+        seen_list_numbers: list[str] = []
 
-        target_task = tasks[matched_index]
-        target_row = page.locator("tbody tr.ant-table-row").nth(matched_index)
-        detail_button = target_row.locator("button").filter(has_text="\u8be6\u60c5").first
+        while True:
+            visited_pages += 1
+            current_page = self.current_todo_page_number(page) or str(visited_pages)
+            tasks = self.read_todo_tasks(page)
+            if not tasks and visited_pages == 1:
+                print("No todo tasks found; target detail page was not opened.")
+                return False
 
-        if not detail_button.count():
-            raise RuntimeError(f"Could not find detail button for target task: {target_list_number}")
+            matched_index = next(
+                (
+                    index
+                    for index, task in enumerate(tasks)
+                    if self.extract_list_number(task.get(list_number_key, "")) == target_list_number
+                ),
+                None,
+            )
+            if matched_index is not None:
+                target_task = tasks[matched_index]
+                target_row = page.locator("tbody tr.ant-table-row").nth(matched_index)
+                detail_button = target_row.locator("button").filter(has_text="\u8be6\u60c5").first
 
-        print(f"Opening target task detail: {target_list_number}")
-        detail_button.click()
-        self.wait_for_detail_ready(page, target_task)
+                if not detail_button.count():
+                    raise RuntimeError(f"Could not find detail button for target task: {target_list_number}")
 
-        detail_info = self.read_detail_info(page)
-        merged_info = {
-            "\u5f53\u524d\u6e05\u5355\u53f7": detail_info.get("\u5f53\u524d\u6e05\u5355\u53f7") or target_task.get(list_number_key, ""),
-            customer_name_key: detail_info.get(customer_name_key) or target_task.get(customer_name_key, ""),
-            "\u72b6\u6001": detail_info.get("\u72b6\u6001") or target_task.get(approval_state_key, ""),
-            applicant_key: detail_info.get(applicant_key) or target_task.get(applicant_key, ""),
-        }
+                print(f"Opening target task detail from todo page {current_page}: {target_list_number}")
+                detail_button.click()
+                self.wait_for_detail_ready(page, target_task)
 
-        print("Task detail:")
-        for key, value in merged_info.items():
-            print(f"{key}: {value}")
-        return True
+                detail_info = self.read_detail_info(page)
+                merged_info = {
+                    "\u5f53\u524d\u6e05\u5355\u53f7": detail_info.get("\u5f53\u524d\u6e05\u5355\u53f7") or target_task.get(list_number_key, ""),
+                    customer_name_key: detail_info.get(customer_name_key) or target_task.get(customer_name_key, ""),
+                    "\u72b6\u6001": detail_info.get("\u72b6\u6001") or target_task.get(approval_state_key, ""),
+                    applicant_key: detail_info.get(applicant_key) or target_task.get(applicant_key, ""),
+                }
+
+                print("Task detail:")
+                for key, value in merged_info.items():
+                    print(f"{key}: {value}")
+                return True
+
+            seen_list_numbers.extend(
+                self.extract_list_number(task.get(list_number_key, ""))
+                for task in tasks
+                if self.extract_list_number(task.get(list_number_key, ""))
+            )
+            moved_next, terminal_or_error = self.click_next_todo_page(page)
+            if not moved_next:
+                if terminal_or_error:
+                    print(f"Target task was not found across todo pages: {target_list_number}")
+                else:
+                    print(f"Todo pagination stopped before target task was found: {target_list_number}")
+                if seen_list_numbers:
+                    print("Scanned todo task list numbers:")
+                    for list_number in seen_list_numbers:
+                        print(f"- {list_number}")
+                return False
+
+            if visited_pages >= 100:
+                raise RuntimeError(f"Stopped target todo search after 100 pages: {target_list_number}")
 
     @staticmethod
     def extract_list_number(value: str) -> str:
@@ -526,26 +547,72 @@ class ReagentPageMixin:
                 return True
 
             before_page = self.current_reagent_page_number(page)
-            changer.click(timeout=5000)
+            try:
+                changer.click(timeout=5000)
+            except Error as error:
+                print(f"Normal page-size selector click failed; retrying with DOM click: {error}")
+                if not self.click_page_size_changer_by_dom(page, str(size)):
+                    raise
             page.wait_for_timeout(300)
 
             options = [
                 page.locator(".ant-select-dropdown:not(.ant-select-dropdown-hidden) .ant-select-item-option")
                 .filter(has_text=str(size))
                 .first,
-                page.get_by_text(str(size), exact=False).first,
             ]
             for option in options:
                 if option.count() and option.is_visible():
-                    option.click(timeout=5000)
-                    return self.confirm_reagent_page_size_change(page, changer, size, before_page)
+                    try:
+                        option.click(timeout=5000)
+                        return self.confirm_reagent_page_size_change(page, changer, size, before_page)
+                    except Error as error:
+                        print(f"Normal page-size option click failed; retrying with DOM click: {error}")
+                        if self.click_page_size_option_by_text(page, str(size)):
+                            return self.confirm_reagent_page_size_change(page, changer, size, before_page)
 
             if self.click_page_size_option_by_text(page, str(size)):
                 return self.confirm_reagent_page_size_change(page, changer, size, before_page)
-            print(f"Could not find reagent page-size option: {size}.")
+            print(f"Could not find reagent page-size option: {size}. Current changer text: {current_text or '<empty>'}")
             return False
         except Error as error:
             print(f"Could not change reagent page size to {size}: {error}")
+            return False
+
+    @staticmethod
+    def click_page_size_changer_by_dom(page: Page, size_text: str) -> bool:
+        try:
+            return bool(
+                page.evaluate(
+                    """
+                    (sizeText) => {
+                      const visible = (node) => {
+                        const rect = node.getBoundingClientRect();
+                        const style = window.getComputedStyle(node);
+                        return rect.width > 0 && rect.height > 0
+                          && style.visibility !== 'hidden'
+                          && style.display !== 'none';
+                      };
+                      const text = (node) => (node.innerText || node.textContent || '').replace(/\\s+/g, ' ').trim();
+                      const changers = Array.from(document.querySelectorAll('.ant-pagination-options-size-changer'))
+                        .filter(visible);
+                      const changer = changers.find((node) => !text(node).includes(sizeText)) || changers[changers.length - 1];
+                      if (!changer) return false;
+                      changer.scrollIntoView({ block: 'center', inline: 'center' });
+                      const target = changer.querySelector('.ant-select-selector') || changer;
+                      for (const type of ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click']) {
+                        target.dispatchEvent(new MouseEvent(type, {
+                          bubbles: true,
+                          cancelable: true,
+                          view: window,
+                        }));
+                      }
+                      return true;
+                    }
+                    """,
+                    size_text,
+                )
+            )
+        except Error:
             return False
 
     def confirm_reagent_page_size_change(self, page: Page, changer: Locator, size: int, before_page: str) -> bool:
@@ -556,11 +623,14 @@ class ReagentPageMixin:
             print(f"Reagent page size changed to {size}.")
             return True
         row_count = len(self.read_current_page_reagents(page))
-        after_page = self.current_reagent_page_number(page)
-        if row_count > 20 or before_page != after_page:
+        if row_count > 20 and size > 20:
             print(f"Clicked reagent page-size option {size}; current visible reagent rows: {row_count}.")
             return True
-        print(f"Clicked reagent page-size option {size}, but current visible reagent rows remain {row_count}.")
+        pagination_text = self.safe_inner_text(self.reagent_pagination(page)) if self.reagent_pagination(page) else ""
+        print(
+            f"Clicked reagent page-size option {size}, but current visible reagent rows remain {row_count}. "
+            f"Pagination text: {pagination_text or '<empty>'}"
+        )
         return False
 
     @staticmethod
@@ -579,11 +649,27 @@ class ReagentPageMixin:
                       };
                       const text = (node) => (node.innerText || node.textContent || '').replace(/\\s+/g, ' ').trim();
                       const options = Array.from(document.querySelectorAll(
-                        '.ant-select-dropdown:not(.ant-select-dropdown-hidden) .ant-select-item-option, .ant-select-item-option'
+                        '.ant-select-dropdown:not(.ant-select-dropdown-hidden) .ant-select-item-option'
                       ));
-                      const option = options.find((node) => visible(node) && text(node).includes(sizeText));
+                      const option = options.find((node) => {
+                        if (!visible(node)) return false;
+                        const value = text(node);
+                        const title = (node.getAttribute('title') || '').trim();
+                        return value === sizeText
+                          || value.startsWith(sizeText + ' ')
+                          || title === sizeText
+                          || title.startsWith(sizeText + ' ');
+                      });
                       if (!option) return false;
-                      option.click();
+                      option.scrollIntoView({ block: 'center', inline: 'center' });
+                      const target = option.querySelector('.ant-select-item-option-content') || option;
+                      for (const type of ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click']) {
+                        target.dispatchEvent(new MouseEvent(type, {
+                          bubbles: true,
+                          cancelable: true,
+                          view: window,
+                        }));
+                      }
                       return true;
                     }
                     """,
@@ -595,11 +681,11 @@ class ReagentPageMixin:
 
     def preferred_reagent_page_size(self) -> int:
         approval_settings = getattr(self, "settings", {}).get("approval", {}) or {}
-        value = approval_settings.get("reagent_page_size", 100)
+        value = approval_settings.get("reagent_page_size", 20)
         try:
             return max(0, int(value))
         except (TypeError, ValueError):
-            return 100
+            return 20
 
     def current_reagent_page_number(self, page: Page) -> str:
         try:
@@ -768,18 +854,93 @@ class ReagentPageMixin:
 
         return None
 
-    def find_reagent_row_by_sequence(self, page: Page, sequence: str) -> Locator | None:
+    def find_reagent_row_by_sequence(
+        self,
+        page: Page,
+        sequence: str,
+        reagent_name: str = "",
+        cas: str = "",
+    ) -> Locator | None:
         sequence = str(sequence or "").strip()
         if not sequence:
             return None
+
+        try:
+            match = page.evaluate(
+                """
+                ({ sequence, reagentName, cas }) => {
+                  const normalize = (text) => (text || '').replace(/\\s+/g, ' ').trim();
+                  const keyOf = (row) => {
+                    const rowKey = row.getAttribute('data-row-key') || '';
+                    if (rowKey) return `key:${rowKey}`;
+                    const rect = row.getBoundingClientRect();
+                    return `top:${Math.round(rect.top)}`;
+                  };
+                  const visible = (node) => {
+                    const rect = node.getBoundingClientRect();
+                    const style = window.getComputedStyle(node);
+                    return rect.width > 0 && rect.height > 0
+                      && style.visibility !== 'hidden'
+                      && style.display !== 'none';
+                  };
+                  const groups = new Map();
+                  for (const row of Array.from(document.querySelectorAll('tbody tr.ant-table-row')).filter(visible)) {
+                    const key = keyOf(row);
+                    if (!groups.has(key)) groups.set(key, []);
+                    groups.get(key).push(row);
+                  }
+                  const scoreGroup = (rows) => {
+                    const text = normalize(rows.map((row) => row.innerText).join(' '));
+                    const tokens = text.split(' ').filter(Boolean);
+                    let score = 0;
+                    if (tokens.includes(sequence) || text.includes(sequence)) score += 10;
+                    if (reagentName && text.includes(reagentName)) score += 3;
+                    if (cas && cas !== '-' && text.includes(cas)) score += 3;
+                    return score;
+                  };
+                  const scored = Array.from(groups.entries())
+                    .map(([key, rows]) => ({ key, rows, score: scoreGroup(rows) }))
+                    .filter((item) => item.score >= 10)
+                    .sort((a, b) => b.score - a.score);
+                  if (!scored.length) return null;
+                  const best = scored[0];
+                  const actionRow = best.rows.find((row) => normalize(row.innerText).includes('\\u6280\\u672f\\u5224\\u5b9a'));
+                  const dataRowKey = best.key.startsWith('key:') ? best.key.slice(4) : '';
+                  const targetRow = actionRow || best.rows[0];
+                  const allRows = Array.from(document.querySelectorAll('tbody tr.ant-table-row'));
+                  return {
+                    index: allRows.indexOf(targetRow),
+                    dataRowKey,
+                    text: normalize(best.rows.map((row) => row.innerText).join(' ')).slice(0, 260),
+                  };
+                }
+                """,
+                {"sequence": sequence, "reagentName": str(reagent_name or "").strip(), "cas": str(cas or "").strip()},
+            )
+        except Error:
+            match = None
+
+        if isinstance(match, dict):
+            index = match.get("index")
+            if isinstance(index, int) and index >= 0:
+                try:
+                    row = page.locator("tbody tr.ant-table-row").nth(index)
+                    print(f"Matched reagent row for sequence {sequence}: {match.get('text', '')}")
+                    return row
+                except Error:
+                    pass
 
         rows = page.locator("tbody tr.ant-table-row")
         count = rows.count()
         for index in range(count):
             row = rows.nth(index)
-            cells = row.locator("td")
             try:
-                if cells.count() > 1 and self.safe_inner_text(cells.nth(1)).strip() == sequence:
+                row_text = self.safe_inner_text(row)
+                if sequence in row_text:
+                    if reagent_name and reagent_name not in row_text:
+                        continue
+                    if cas and cas != "-" and cas not in row_text:
+                        continue
                     return row
             except Error:
                 continue
@@ -905,10 +1066,53 @@ class ReagentPageMixin:
         except Error as error:
             print(f"Normal physicochemical property header click failed; retrying by coordinates: {error}")
 
+        if self.click_reagent_property_header_by_dom(page):
+            return
+
         box = header.bounding_box()
         if not box:
             raise RuntimeError("Could not get physicochemical property header bounding box.")
         page.mouse.click(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+
+    @staticmethod
+    def click_reagent_property_header_by_dom(page: Page) -> bool:
+        try:
+            return bool(
+                page.evaluate(
+                    """
+                    () => {
+                      const wanted = '\\u7269\\u5316\\u7279\\u6027';
+                      const visible = (node) => {
+                        const rect = node.getBoundingClientRect();
+                        const style = window.getComputedStyle(node);
+                        return rect.width > 0 && rect.height > 0
+                          && style.visibility !== 'hidden'
+                          && style.display !== 'none';
+                      };
+                      const text = (node) => (node.innerText || node.textContent || '').replace(/\\s+/g, '').trim();
+                      const headers = Array.from(document.querySelectorAll('thead th'))
+                        .filter((node) => visible(node) && text(node).includes(wanted));
+                      const header = headers.find((node) => node.classList.contains('ant-table-column-has-sorters'))
+                        || headers[0];
+                      if (!header) return false;
+                      header.scrollIntoView({ block: 'center', inline: 'center' });
+                      const target = header.querySelector('.ant-table-column-sorters')
+                        || header.querySelector('.ant-table-filter-column-title')
+                        || header;
+                      for (const type of ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click']) {
+                        target.dispatchEvent(new MouseEvent(type, {
+                          bubbles: true,
+                          cancelable: true,
+                          view: window,
+                        }));
+                      }
+                      return true;
+                    }
+                    """
+                )
+            )
+        except Error:
+            return False
 
     @staticmethod
     def dismiss_open_overlays(page: Page) -> None:

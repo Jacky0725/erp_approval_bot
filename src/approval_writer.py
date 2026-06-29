@@ -5,20 +5,26 @@ from typing import Any
 
 from playwright.sync_api import Error, Locator, Page, TimeoutError
 
-
-DEFAULT_PROPERTY_ALIASES = {
-    "\u5f3a\u53cd\u5e94\u6027": ["\u5f3a\u53cd\u5e94"],
-    "\u5f3a\u53cd\u5e94": ["\u5f3a\u53cd\u5e94\u6027"],
-    "\u6613\u71c3\u6db2\u4f53": ["\u6613\u71c3\u7c7b"],
-    "\u6613\u71c3\u7c7b": ["\u6613\u71c3\u6db2\u4f53"],
-}
+from category_mapper import erp_candidates_for_rule_category
 
 
 @dataclass
 class ApprovalWriter:
     settings: dict[str, Any] | None = None
 
-    def open_technical_judgement(self, row: Locator) -> bool:
+    def row_is_editing(self, page: Page, row: Locator) -> bool:
+        try:
+            if row.locator(".ant-select, input[role='combobox']").count():
+                return True
+            if row.locator("button, a").filter(has_text="\u4fdd\u5b58").count():
+                return True
+        except (Error, TimeoutError):
+            pass
+        return self._row_peer_is_editing(page, row)
+
+    def open_technical_judgement(self, row: Locator, page: Page | None = None) -> bool:
+        if page is not None and self.row_is_editing(page, row):
+            return True
         try:
             row.get_by_role("button", name="\u6280\u672f\u5224\u5b9a").first.click(timeout=3000)
             return True
@@ -27,17 +33,19 @@ class ApprovalWriter:
                 row.locator("button, a").filter(has_text="\u6280\u672f\u5224\u5b9a").first.click(timeout=3000)
                 return True
             except (Error, TimeoutError):
+                if page is not None:
+                    return self._click_row_peer_action(page, row, "\u6280\u672f\u5224\u5b9a")
                 return False
 
     def choose_property(self, page: Page, property_name: str, row: Locator | None = None) -> bool:
         if not property_name.strip():
             return False
 
-        if not self._open_property_dropdown(page, row):
-            return False
-
         for candidate_name in self.property_name_candidates(property_name):
-            if self._click_property_option(page, candidate_name):
+            self.dismiss_open_dropdown(page)
+            if not self._open_property_dropdown(page, row):
+                continue
+            if self._select_property_option(page, candidate_name):
                 return True
         self.dismiss_open_dropdown(page)
         return False
@@ -46,29 +54,7 @@ class ApprovalWriter:
         property_name = str(property_name or "").strip()
         if not property_name:
             return []
-
-        aliases = dict(DEFAULT_PROPERTY_ALIASES)
-        configured_aliases = (
-            (self.settings or {})
-            .get("reagent", {})
-            .get("physicochemical_property_aliases", {})
-        )
-        if isinstance(configured_aliases, dict):
-            for key, values in configured_aliases.items():
-                key_text = str(key or "").strip()
-                if not key_text:
-                    continue
-                if isinstance(values, str):
-                    value_list = [values]
-                elif isinstance(values, list):
-                    value_list = values
-                else:
-                    value_list = []
-                aliases.setdefault(key_text, [])
-                aliases[key_text].extend(str(value or "").strip() for value in value_list if str(value or "").strip())
-
-        candidates = [property_name, *aliases.get(property_name, [])]
-        return list(dict.fromkeys(candidate for candidate in candidates if candidate))
+        return erp_candidates_for_rule_category(property_name, self.settings or {})
 
     def save(self, page: Page, row: Locator) -> bool:
         return self._click_row_action(page, row, "\u4fdd\u5b58")
@@ -83,27 +69,48 @@ class ApprovalWriter:
         if row is not None:
             candidates.extend(
                 [
-                    row.locator(".ant-select").first,
-                    row.locator("input[role='combobox']").first,
+                    row.locator("td").filter(has_text="\u9009\u62e9\u641c\u7d22").locator(".ant-select").first,
+                    row.locator("td").filter(has_text="\u9009\u62e9\u641c\u7d22").locator("input[role='combobox']").first,
                 ]
             )
         if configured:
             candidates.append(page.locator(configured).first)
-        candidates.extend(
-            [
-                page.locator(".ant-drawer .ant-select").first,
-                page.locator(".ant-table-row .ant-select").first,
-                page.locator("input[role='combobox']").first,
-            ]
-        )
+        if row is None:
+            candidates.extend(
+                [
+                    page.locator(".ant-drawer .ant-select").first,
+                    page.locator(".ant-table-row .ant-select").first,
+                    page.locator("input[role='combobox']").first,
+                ]
+            )
         for candidate in candidates:
             try:
                 if candidate.count() and candidate.is_visible():
                     candidate.click(timeout=3000)
-                    return True
+                    page.wait_for_timeout(200)
+                    if self._visible_property_dropdown(page):
+                        return True
             except (Error, TimeoutError):
                 continue
-        return self._click_row_peer_select(page, row)
+        if self._click_row_property_select(page, row):
+            page.wait_for_timeout(200)
+            return self._visible_property_dropdown(page)
+        if self._click_row_peer_select(page, row):
+            page.wait_for_timeout(200)
+            return self._visible_property_dropdown(page)
+        return False
+
+    @staticmethod
+    def _select_property_option(page: Page, candidate_name: str) -> bool:
+        if ApprovalWriter._click_property_option(page, candidate_name):
+            return True
+        if ApprovalWriter._type_property_search_text(page, candidate_name):
+            page.wait_for_timeout(250)
+            if ApprovalWriter._click_property_option(page, candidate_name):
+                return True
+            if ApprovalWriter._confirm_property_option_by_keyboard(page, candidate_name):
+                return True
+        return False
 
     @staticmethod
     def _click_property_option(page: Page, candidate_name: str) -> bool:
@@ -122,9 +129,149 @@ class ApprovalWriter:
                 except (Error, TimeoutError):
                     continue
 
+            if ApprovalWriter._click_property_option_by_dom(page, candidate_name):
+                return True
+
             if not ApprovalWriter._scroll_open_dropdown(page):
                 break
         return False
+
+    @staticmethod
+    def _type_property_search_text(page: Page, candidate_name: str) -> bool:
+        try:
+            return bool(
+                page.evaluate(
+                    """
+                    (candidateName) => {
+                      const visible = (node) => {
+                        const rect = node.getBoundingClientRect();
+                        const style = window.getComputedStyle(node);
+                        return rect.width > 0 && rect.height > 0
+                          && style.visibility !== 'hidden'
+                          && style.display !== 'none';
+                      };
+                      const dropdowns = Array.from(document.querySelectorAll(
+                        '.ant-select-dropdown:not(.ant-select-dropdown-hidden)'
+                      )).filter(visible);
+                      const inputs = Array.from(document.querySelectorAll(
+                        'input[role="combobox"], .ant-select-selection-search-input'
+                      )).filter(visible);
+                      const active = document.activeElement;
+                      const input = inputs.find((node) => node === active)
+                        || inputs.find((node) => dropdowns.some((dropdown) => dropdown.id && node.getAttribute('aria-controls') === dropdown.id))
+                        || inputs[inputs.length - 1];
+                      if (!input) return false;
+                      input.focus();
+                      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
+                      if (setter) {
+                        setter.call(input, '');
+                      } else {
+                        input.value = '';
+                      }
+                      input.dispatchEvent(new Event('input', { bubbles: true }));
+                      if (setter) {
+                        setter.call(input, candidateName);
+                      } else {
+                        input.value = candidateName;
+                      }
+                      input.dispatchEvent(new Event('input', { bubbles: true }));
+                      input.dispatchEvent(new Event('change', { bubbles: true }));
+                      input.dispatchEvent(new KeyboardEvent('keydown', {
+                        key: candidateName.slice(-1) || ' ',
+                        bubbles: true,
+                        cancelable: true,
+                      }));
+                      return true;
+                    }
+                    """,
+                    candidate_name,
+                )
+            )
+        except (Error, TimeoutError):
+            try:
+                page.keyboard.press("Control+A")
+                page.keyboard.type(candidate_name, delay=20)
+                return True
+            except (Error, TimeoutError):
+                return False
+
+    @staticmethod
+    def _confirm_property_option_by_keyboard(page: Page, candidate_name: str) -> bool:
+        try:
+            before_text = ApprovalWriter._selected_option_text(page)
+            page.keyboard.press("ArrowDown")
+            page.wait_for_timeout(80)
+            page.keyboard.press("Enter")
+            page.wait_for_timeout(250)
+            after_text = ApprovalWriter._selected_option_text(page)
+            return bool(after_text and after_text != before_text and candidate_name in after_text)
+        except (Error, TimeoutError):
+            return False
+
+    @staticmethod
+    def _selected_option_text(page: Page) -> str:
+        try:
+            return str(
+                page.evaluate(
+                    """
+                    () => {
+                      const active = document.activeElement;
+                      const select = active?.closest?.('.ant-select') || document.querySelector('.ant-select-focused');
+                      return (select?.innerText || '').replace(/\\s+/g, ' ').trim();
+                    }
+                    """
+                )
+                or ""
+            )
+        except (Error, TimeoutError):
+            return ""
+
+    @staticmethod
+    def _click_property_option_by_dom(page: Page, candidate_name: str) -> bool:
+        try:
+            return bool(
+                page.evaluate(
+                    """
+                    (candidateName) => {
+                      const visible = (node) => {
+                        const rect = node.getBoundingClientRect();
+                        const style = window.getComputedStyle(node);
+                        return rect.width > 0 && rect.height > 0
+                          && style.visibility !== 'hidden'
+                          && style.display !== 'none';
+                      };
+                      const text = (node) => (node.innerText || node.textContent || '').replace(/\\s+/g, ' ').trim();
+                      const options = Array.from(document.querySelectorAll(
+                        '.ant-select-dropdown:not(.ant-select-dropdown-hidden) .ant-select-item-option'
+                      )).filter(visible);
+                      const option = options.find((node) => text(node) === candidateName)
+                        || options.find((node) => text(node).includes(candidateName));
+                      if (!option) return false;
+                      option.scrollIntoView({ block: 'center', inline: 'center' });
+                      const target = option.querySelector('.ant-select-item-option-content') || option;
+                      for (const type of ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click']) {
+                        target.dispatchEvent(new MouseEvent(type, {
+                          bubbles: true,
+                          cancelable: true,
+                          view: window,
+                        }));
+                      }
+                      return true;
+                    }
+                    """,
+                    candidate_name,
+                )
+            )
+        except (Error, TimeoutError):
+            return False
+
+    @staticmethod
+    def _visible_property_dropdown(page: Page) -> bool:
+        try:
+            dropdown = page.locator(".ant-select-dropdown:not(.ant-select-dropdown-hidden)").first
+            return bool(dropdown.count() and dropdown.is_visible())
+        except (Error, TimeoutError):
+            return False
 
     @staticmethod
     def _scroll_open_dropdown(page: Page) -> bool:
@@ -214,11 +361,137 @@ class ApprovalWriter:
                         const select = Array.from(tr.querySelectorAll('.ant-select, input[role="combobox"]')).find(visible);
                         if (select) {
                           select.scrollIntoView({ block: 'center', inline: 'center' });
-                          select.click();
+                          const target = select.querySelector?.('.ant-select-selector') || select;
+                          if (target.focus) target.focus();
+                          for (const type of ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click']) {
+                            target.dispatchEvent(new MouseEvent(type, {
+                              bubbles: true,
+                              cancelable: true,
+                              view: window,
+                            }));
+                          }
                           return true;
                         }
                       }
                       return false;
+                    }
+                    """,
+                    identity,
+                )
+            )
+        except Error:
+            return False
+
+    @staticmethod
+    def _click_row_property_select(page: Page, row: Locator | None) -> bool:
+        if row is None:
+            return False
+        identity = ApprovalWriter._row_identity(row)
+        try:
+            return bool(
+                page.evaluate(
+                    """
+                    ({ rowKey, top, height }) => {
+                      const wantedHeader = '\u7269\u5316\u7279\u6027';
+                      const visible = (node) => {
+                        const rect = node.getBoundingClientRect();
+                        const style = window.getComputedStyle(node);
+                        return rect.width > 0 && rect.height > 0
+                          && style.visibility !== 'hidden'
+                          && style.display !== 'none';
+                      };
+                      const text = (node) => (node.innerText || node.textContent || '').replace(/\\s+/g, '').trim();
+                      const headers = Array.from(document.querySelectorAll('thead th'))
+                        .filter((node) => visible(node) && text(node).includes(wantedHeader))
+                        .map((node) => ({ node, rect: node.getBoundingClientRect() }))
+                        .sort((a, b) => b.rect.width - a.rect.width);
+                      const header = headers[0];
+                      const headerCenter = header ? header.rect.left + header.rect.width / 2 : null;
+                      const rowCenter = Number.isFinite(top)
+                        ? top + (Number.isFinite(height) ? height / 2 : 0)
+                        : null;
+                      const sameRow = (tr) => {
+                        if (!tr) return false;
+                        if (rowKey && tr.getAttribute('data-row-key') === rowKey) return true;
+                        if (Number.isFinite(rowCenter)) {
+                          const rect = tr.getBoundingClientRect();
+                          const center = rect.top + rect.height / 2;
+                          return Math.abs(center - rowCenter) < 12;
+                        }
+                        return false;
+                      };
+                      const rows = Array.from(document.querySelectorAll('tbody tr.ant-table-row')).filter(sameRow);
+                      const cells = rows.flatMap((tr) => Array.from(tr.querySelectorAll('td')).filter(visible));
+                      let propertyCell = null;
+                      if (Number.isFinite(headerCenter)) {
+                        propertyCell = cells
+                          .map((td) => ({ td, rect: td.getBoundingClientRect() }))
+                          .filter((item) => item.rect.left - 4 <= headerCenter && item.rect.right + 4 >= headerCenter)
+                          .sort((a, b) => Math.abs((a.rect.left + a.rect.width / 2) - headerCenter)
+                            - Math.abs((b.rect.left + b.rect.width / 2) - headerCenter))[0]?.td || null;
+                      }
+                      if (!propertyCell) {
+                        propertyCell = cells.find((td) => (td.innerText || '').includes('\u9009\u62e9\u641c\u7d22')) || null;
+                      }
+                      if (!propertyCell) return false;
+                      const select = Array.from(propertyCell.querySelectorAll('.ant-select, input[role="combobox"]'))
+                        .find(visible);
+                      if (!select) return false;
+                      select.scrollIntoView({ block: 'center', inline: 'center' });
+                      const target = select.querySelector?.('.ant-select-selector') || select;
+                      if (target.focus) target.focus();
+                      for (const type of ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click']) {
+                        target.dispatchEvent(new MouseEvent(type, {
+                          bubbles: true,
+                          cancelable: true,
+                          view: window,
+                        }));
+                      }
+                      return true;
+                    }
+                    """,
+                    identity,
+                )
+            )
+        except Error:
+            return False
+
+    @staticmethod
+    def _row_peer_is_editing(page: Page, row: Locator) -> bool:
+        identity = ApprovalWriter._row_identity(row)
+        try:
+            return bool(
+                page.evaluate(
+                    """
+                    ({ rowKey, top, height }) => {
+                      const visible = (node) => {
+                        const rect = node.getBoundingClientRect();
+                        const style = window.getComputedStyle(node);
+                        return rect.width > 0 && rect.height > 0
+                          && style.visibility !== 'hidden'
+                          && style.display !== 'none';
+                      };
+                      const text = (node) => (node.innerText || node.textContent || '').replace(/\\s+/g, ' ').trim();
+                      const rowCenter = Number.isFinite(top)
+                        ? top + (Number.isFinite(height) ? height / 2 : 0)
+                        : null;
+                      const sameRow = (tr) => {
+                        if (!tr) return false;
+                        if (rowKey && tr.getAttribute('data-row-key') === rowKey) return true;
+                        if (Number.isFinite(rowCenter)) {
+                          const rect = tr.getBoundingClientRect();
+                          const center = rect.top + rect.height / 2;
+                          return Math.abs(center - rowCenter) < 12;
+                        }
+                        return false;
+                      };
+                      const rows = Array.from(document.querySelectorAll('tbody tr.ant-table-row')).filter(sameRow);
+                      if (rows.some((tr) => Array.from(tr.querySelectorAll('.ant-select, input[role="combobox"]')).some(visible))) {
+                        return true;
+                      }
+                      const actions = Array.from(document.querySelectorAll('button, a'))
+                        .filter((node) => visible(node) && text(node).includes('\u4fdd\u5b58'));
+                      return actions.some((node) => sameRow(node.closest('tr')));
                     }
                     """,
                     identity,
@@ -234,7 +507,7 @@ class ApprovalWriter:
             return bool(
                 page.evaluate(
                     """
-                    ({ rowKey, top, actionText }) => {
+                    ({ rowKey, top, height, actionText }) => {
                       const visible = (node) => {
                         const rect = node.getBoundingClientRect();
                         const style = window.getComputedStyle(node);
@@ -243,24 +516,42 @@ class ApprovalWriter:
                           && style.display !== 'none';
                       };
                       const text = (node) => (node.innerText || node.textContent || '').replace(/\\s+/g, ' ').trim();
+                      const rowCenter = Number.isFinite(top) ? top + (Number.isFinite(height) ? height / 2 : 0) : null;
                       const sameRow = (tr) => {
                         if (!tr) return false;
                         if (rowKey && tr.getAttribute('data-row-key') === rowKey) return true;
-                        if (Number.isFinite(top)) {
+                        if (Number.isFinite(rowCenter)) {
                           const rect = tr.getBoundingClientRect();
-                          return Math.abs(rect.top - top) < 3;
+                          const center = rect.top + rect.height / 2;
+                          return Math.abs(center - rowCenter) < 12;
                         }
                         return false;
                       };
-                      const rows = Array.from(document.querySelectorAll('tbody tr.ant-table-row')).filter(sameRow);
-                      for (const tr of rows) {
-                        const action = Array.from(tr.querySelectorAll('button, a'))
-                          .find((node) => visible(node) && text(node).includes(actionText));
-                        if (action) {
-                          action.scrollIntoView({ block: 'center', inline: 'center' });
-                          action.click();
-                          return true;
+                      const clickAction = (action) => {
+                        action.scrollIntoView({ block: 'center', inline: 'center' });
+                        action.click();
+                        return true;
+                      };
+                      const actions = Array.from(document.querySelectorAll('button, a'))
+                        .filter((node) => visible(node) && text(node).includes(actionText));
+                      const rowActions = actions.filter((node) => sameRow(node.closest('tr')));
+                      if (rowActions.length) {
+                        return clickAction(rowActions[0]);
+                      }
+                      if (Number.isFinite(rowCenter)) {
+                        const aligned = actions
+                          .map((node) => {
+                            const rect = node.getBoundingClientRect();
+                            return { node, distance: Math.abs((rect.top + rect.height / 2) - rowCenter) };
+                          })
+                          .filter((item) => item.distance < 18)
+                          .sort((left, right) => left.distance - right.distance);
+                        if (aligned.length) {
+                          return clickAction(aligned[0].node);
                         }
+                      }
+                      if (actions.length === 1) {
+                        return clickAction(actions[0]);
                       }
                       return false;
                     }

@@ -50,6 +50,12 @@ class RecordingSearcher(ChemicalSearcher):
 
 
 class ChemicalSearcherTest(unittest.TestCase):
+    def test_query_candidates_try_names_after_cas(self) -> None:
+        self.assertEqual(
+            ChemicalSearcher._query_candidates("123-45-6", "standard", "cleaned", "english"),
+            ["123-45-6", "standard", "cleaned", "english"],
+        )
+
     def test_manual_verified_source_url_is_used_before_search(self) -> None:
         class ManualUrlSearcher(ChemicalSearcher):
             def __init__(self, *args: Any, **kwargs: Any) -> None:

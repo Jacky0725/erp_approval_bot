@@ -153,6 +153,9 @@ class ReviewQueueMixin:
         list_number = detail_info.get("\u5f53\u524d\u6e05\u5355\u53f7", "")
         chemical_name = reagent.get("\u8bd5\u5242\u540d\u79f0", "")
         cas = reagent.get("CAS\u53f7", "")
+        sequence = reagent.get("\u5e8f\u53f7", "")
+        specification = reagent.get("\u89c4\u683c", "")
+        unit = reagent.get("\u89c4\u683c\u5355\u4f4d", "")
         reason = str(search_result.get("raw_text") or "Chemical website lookup failed after name normalization.")
 
         existing_match = pd.Series(dtype=bool)
@@ -164,12 +167,27 @@ class ReviewQueueMixin:
                 "list_number",
             ]
             name_columns = ["chemical_name", "\u8bd5\u5242\u540d\u79f0"]
+            sequence_columns = ["\u5e8f\u53f7", "sequence", "index"]
+            cas_columns = ["cas", "CAS\u53f7"]
+            specification_columns = ["specification", "\u89c4\u683c"]
+            unit_columns = ["unit", "\u89c4\u683c\u5355\u4f4d"]
+
+            def match_optional(columns: list[str], expected: str) -> pd.Series:
+                column = next((item for item in columns if item in queue.columns), "")
+                if not column:
+                    return pd.Series(True, index=queue.index)
+                return queue[column].astype(str).str.strip() == str(expected or "").strip()
+
             list_column = next((column for column in list_columns if column in queue.columns), "")
             name_column = next((column for column in name_columns if column in queue.columns), "")
             if list_column and name_column:
                 existing_match = (
                     (queue[list_column].astype(str).str.strip() == list_number)
                     & (queue[name_column].astype(str).str.strip() == chemical_name)
+                    & match_optional(sequence_columns, sequence)
+                    & match_optional(cas_columns, cas)
+                    & match_optional(specification_columns, specification)
+                    & match_optional(unit_columns, unit)
                 )
 
         if not existing_match.empty and bool(existing_match.any()):
@@ -180,6 +198,7 @@ class ReviewQueueMixin:
             "timestamp": pd.Timestamp.now().isoformat(timespec="seconds"),
             "\u8bd5\u5242\u6e05\u5355\u53f7": list_number,
             "applicant": detail_info.get("\u7533\u8bf7\u4eba", ""),
+            "\u5e8f\u53f7": sequence,
             "chemical_name": chemical_name,
             "\u8bd5\u5242\u540d\u79f0": chemical_name,
             "cas": cas,

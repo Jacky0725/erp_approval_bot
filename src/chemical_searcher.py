@@ -347,9 +347,9 @@ class ChemicalSearcher:
         candidates: list[str] = []
         for value in (
             cas,
-            standard_name if not cas else "",
-            cleaned_name if not cas else "",
-            english_name if not cas else "",
+            standard_name,
+            cleaned_name,
+            english_name,
         ):
             value = str(value or "").strip()
             if value and value not in candidates:

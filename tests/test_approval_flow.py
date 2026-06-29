@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -11,6 +12,8 @@ ROOT_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT_DIR / "src"))
 
 from approval_flow import ApprovalFlowMixin  # noqa: E402
+from approval_writer import ApprovalWriter  # noqa: E402
+from reagent_memory import ReagentMemory  # noqa: E402
 from reagent_page import ReagentPageMixin  # noqa: E402
 from rule_engine import RuleEngine  # noqa: E402
 from stage_logger import StageLogger  # noqa: E402
@@ -18,6 +21,18 @@ from stage_logger import StageLogger  # noqa: E402
 
 class Bot(ApprovalFlowMixin, ReagentPageMixin):
     pass
+
+
+class ApprovalFlowPropertyMatchTest(unittest.TestCase):
+    def test_property_value_matches_duplicate_fixed_column_text(self) -> None:
+        writer = ApprovalWriter()
+
+        self.assertTrue(Bot.property_value_matches("\u666e\u901a\u7c7b \u666e\u901a\u7c7b", "\u666e\u901a\u7c7b", writer))
+
+    def test_property_value_rejects_conflicting_duplicate_text(self) -> None:
+        writer = ApprovalWriter()
+
+        self.assertFalse(Bot.property_value_matches("\u666e\u901a\u7c7b \u6613\u71c3\u7c7b", "\u666e\u901a\u7c7b", writer))
 
 
 class ApprovalFlowTodoLoopTest(unittest.TestCase):
@@ -52,6 +67,48 @@ class ApprovalFlowTodoLoopTest(unittest.TestCase):
         result = bot.next_unprocessed_list_number(tasks, {"SJ202606170001"})
 
         self.assertEqual(result, "")
+
+    def test_selected_todos_are_processed_even_when_not_on_current_page(self) -> None:
+        class SelectedBot(Bot):
+            def __init__(self) -> None:
+                self.target_list_numbers = ["SJ202606170001", "SJ202606170002"]
+                self.processed: list[str] = []
+
+            def enter_reagent_judgement_page(self, page: object) -> None:
+                return None
+
+            def generate_approval_suggestions(self, page: object) -> None:
+                self.processed.append(self.target_list_number)
+
+        bot = SelectedBot()
+
+        bot.generate_selected_todo_approval_suggestions(object())
+
+        self.assertEqual(bot.processed, ["SJ202606170001", "SJ202606170002"])
+
+    def test_all_todos_uses_all_pages_snapshot(self) -> None:
+        class AllTodoBot(Bot):
+            def __init__(self) -> None:
+                self.processed: list[str] = []
+
+            def enter_reagent_judgement_page(self, page: object) -> None:
+                return None
+
+            def read_all_todo_tasks(self, page: object) -> list[dict[str, str]]:
+                return [
+                    {"\u8bd5\u5242\u6e05\u5355\u53f7": "SJ202606170001"},
+                    {"\u8bd5\u5242\u6e05\u5355\u53f7": "SJ202606170002"},
+                ]
+
+            def generate_approval_suggestions(self, page: object) -> None:
+                self.processed.append(self.target_list_number)
+
+        bot = AllTodoBot()
+
+        with patch.dict(os.environ, {"PROCESS_ALL_TODOS_MAX": "50"}, clear=True):
+            bot.generate_all_todo_approval_suggestions(object())
+
+        self.assertEqual(bot.processed, ["SJ202606170001", "SJ202606170002"])
 
     def test_max_process_all_todos_count_has_safe_default_and_minimum(self) -> None:
         bot = Bot()
@@ -236,12 +293,67 @@ class ApprovalFlowTodoLoopTest(unittest.TestCase):
 
         self.assertEqual([row["\u5e8f\u53f7"] for row in suggestions], ["1", "2", "3"])
 
-    def test_multi_page_mode_processes_until_next_page_has_no_unmatched_rows(self) -> None:
+    def test_reagent_memory_match_skips_chemical_search(self) -> None:
+        class MemoryBot(Bot):
+            def __init__(self, root_dir: Path) -> None:
+                self.settings = {
+                    "paths": {"reagent_memory_sqlite": "data/memory.sqlite"},
+                    "memory": {"min_confidence": 0.8},
+                    "approval": {"parallel_workers": 3},
+                }
+                self.root_dir = root_dir
+                self.stage_logger = StageLogger()
+
+            def read_current_page_reagents(self, page: object) -> list[dict[str, str]]:
+                return [
+                    {
+                        "\u5e8f\u53f7": "8",
+                        "\u8bd5\u5242\u540d\u79f0": "\u805a\u4e59\u4e8c\u9187",
+                        "CAS\u53f7": "25322-68-3",
+                        "\u89c4\u683c": "500",
+                        "\u89c4\u683c\u5355\u4f4d": "g",
+                        "\u7269\u5316\u7279\u6027": "-",
+                    }
+                ]
+
+            def search_reagents_parallel(self, items: list[dict[str, object]]) -> dict[int, dict[str, object]]:
+                raise AssertionError("chemical search should be skipped when reagent memory matches")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            memory = ReagentMemory.from_settings(
+                {
+                    "paths": {"reagent_memory_sqlite": "data/memory.sqlite"},
+                    "memory": {"min_confidence": 0.8},
+                },
+                root,
+            )
+            memory.add_record(
+                raw_name="\u805a\u4e59\u4e8c\u9187",
+                standard_name="\u805a\u4e59\u4e8c\u9187",
+                cleaned_name="\u805a\u4e59\u4e8c\u9187",
+                cas="25322-68-3",
+                final_category="\u666e\u901a\u7c7b",
+                confidence=0.95,
+                reason="unit test memory",
+            )
+            bot = MemoryBot(root)
+            engine = RuleEngine.from_excel(ROOT_DIR / "config" / "rules.xlsx")
+
+            suggestions = bot.process_current_unmatched_reagent_page(object(), engine, None, {})
+
+        self.assertEqual(len(suggestions), 1)
+        self.assertEqual(suggestions[0]["\u67e5\u8be2\u6765\u6e90"], "reagent_memory")
+        self.assertEqual(suggestions[0]["\u6700\u7ec8\u5efa\u8bae\u7c7b\u522b"], "\u666e\u901a\u7c7b")
+        self.assertFalse(suggestions[0]["\u9700\u4eba\u5de5\u590d\u6838"])
+
+    def test_multi_page_mode_stops_when_sorted_current_page_has_no_unmatched_rows(self) -> None:
         class MultiPageBot(Bot):
             def __init__(self) -> None:
                 self.page_number = 1
                 self.applied_pages: list[list[dict[str, object]]] = []
                 self.partial_lengths: list[int] = []
+                self.next_clicks = 0
                 self.stage_logger = StageLogger()
 
             def goto_first_reagent_page(self, page: object) -> bool:
@@ -264,6 +376,9 @@ class ApprovalFlowTodoLoopTest(unittest.TestCase):
                 self.partial_lengths.append(len(suggestions))
 
             def click_next_reagent_page(self, page: object) -> tuple[bool, bool]:
+                self.next_clicks += 1
+                if self.page_number >= 3:
+                    return False, True
                 self.page_number += 1
                 return True, True
 
@@ -279,8 +394,9 @@ class ApprovalFlowTodoLoopTest(unittest.TestCase):
         self.assertEqual([row["\u5e8f\u53f7"] for row in result], ["1", "2"])
         self.assertEqual(len(bot.applied_pages), 2)
         self.assertEqual(bot.partial_lengths, [1, 2])
+        self.assertEqual(bot.next_clicks, 2)
 
-    def test_multi_page_mode_retries_failed_web_write_before_marking_handled(self) -> None:
+    def test_multi_page_mode_advances_after_current_page_write_attempt(self) -> None:
         class RetryBot(Bot):
             def __init__(self) -> None:
                 self.settings = {"approval": {"write_mode": "multi_page", "write_max_attempts": 2}}
@@ -297,8 +413,6 @@ class ApprovalFlowTodoLoopTest(unittest.TestCase):
                 return "1"
 
             def current_page_unmatched_reagents(self, page: object) -> list[dict[str, str]]:
-                if self.apply_calls >= 2:
-                    return []
                 return [
                     {
                         "\u5e8f\u53f7": "1",
@@ -332,12 +446,15 @@ class ApprovalFlowTodoLoopTest(unittest.TestCase):
             def write_partial_approval_suggestions(self, suggestions: list[dict[str, object]]) -> None:
                 return None
 
+            def click_next_reagent_page(self, page: object) -> tuple[bool, bool]:
+                return False, True
+
         bot = RetryBot()
 
         result = bot.process_unmatched_reagent_pages(object(), None, None, {})
 
-        self.assertEqual(bot.apply_calls, 2)
-        self.assertEqual([row["\u5e8f\u53f7"] for row in result], ["1", "1"])
+        self.assertEqual(bot.apply_calls, 1)
+        self.assertEqual([row["\u5e8f\u53f7"] for row in result], ["1"])
 
 
 if __name__ == "__main__":

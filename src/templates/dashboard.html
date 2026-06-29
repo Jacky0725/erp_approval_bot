@@ -21,6 +21,7 @@
       <a href="#settings">基础设置</a>
       <a href="#suggestions">审批建议</a>
       <a href="#review">人工复核</a>
+      <a href="#memory">试剂记忆库</a>
       <a href="#artifacts">产物下载</a>
       <a href="#logs">运行日志</a>
     </nav>
@@ -125,6 +126,8 @@
           </div>
           <div class="button-row">
             <button type="button" data-action="suggestions" class="primary">生成审批建议</button>
+            <button type="button" id="stopRunButton" class="danger-button">停止运行</button>
+            <button type="button" id="restartRunButton">重启程序</button>
             <button type="button" data-action="judgement_capture">采集试剂判定页</button>
             <button type="button" data-action="debug_capture">采集首页</button>
           </div>
@@ -271,10 +274,61 @@
               <th>标准名称</th>
               <th>状态</th>
               <th>需人工复核原因</th>
+              <th>确认类别</th>
+              <th>操作</th>
             </tr>
           </thead>
           <tbody id="reviewTable">
-            <tr><td colspan="7">暂无人工复核项</td></tr>
+            <tr><td colspan="9">暂无人工复核项</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="panel" id="memory">
+      <div class="panel-title">
+        <div>
+          <h2>试剂记忆库</h2>
+          <p id="memoryMeta">读取 data/reagent_memory.sqlite，可搜索并修改高可信历史判定。</p>
+        </div>
+        <div class="memory-tools">
+          <input id="memorySearch" placeholder="搜索 CAS / 试剂名称 / 标准名">
+          <select id="memoryCategoryFilter">
+            <option value="">全部类别</option>
+          </select>
+          <select id="memoryReusableFilter">
+            <option value="">全部复用状态</option>
+            <option value="1">可复用</option>
+            <option value="0">不可复用</option>
+          </select>
+          <select id="memoryConflictFilter">
+            <option value="">全部冲突状态</option>
+            <option value="1">有冲突</option>
+            <option value="0">无冲突</option>
+          </select>
+          <button type="button" id="importMemoryButton" class="primary">从审批建议导入</button>
+          <button type="button" id="saveReusableMemoryButton">一键保存可复用</button>
+          <button type="button" id="refreshMemoryButton">刷新</button>
+        </div>
+      </div>
+      <div class="table-wrap">
+        <table class="memory-table">
+          <thead>
+            <tr>
+              <th>ID</th>
+              <th>CAS</th>
+              <th>ERP原始名</th>
+              <th>清洗名</th>
+              <th>标准名</th>
+              <th>物化特性</th>
+              <th>置信度</th>
+              <th>状态</th>
+              <th>备注</th>
+              <th>操作</th>
+            </tr>
+          </thead>
+          <tbody id="memoryTable">
+            <tr><td colspan="10">暂无记忆库记录</td></tr>
           </tbody>
         </table>
       </div>
@@ -315,6 +369,11 @@
       selected: new Set(),
       tasks: [],
     };
+    const memoryState = {
+      rows: [],
+      categories: [],
+    };
+    let reviewCategories = {{ runtime.erp_property_options | tojson }};
     const llmProviders = {{ runtime.llm_provider_options | tojson }};
     const currentLlm = {
       provider: "{{ runtime.llm_provider }}",
@@ -352,6 +411,26 @@
           alert(payload.message || payload.detail || "任务未启动");
         }
       });
+    });
+
+    document.querySelector("#stopRunButton").addEventListener("click", async () => {
+      const response = await fetch("/api/stop", { method: "POST" });
+      const payload = await response.json();
+      await refreshStatus();
+      if (!payload.stopped) {
+        alert(payload.message || payload.detail || "当前没有运行中的任务");
+      }
+    });
+
+    document.querySelector("#restartRunButton").addEventListener("click", async () => {
+      const response = await fetch("/api/restart", { method: "POST" });
+      const payload = await response.json();
+      if (!payload.restarting) {
+        alert(payload.message || payload.detail || "程序未重启");
+        return;
+      }
+      document.querySelector("#statusLine").textContent = "Web UI 正在重启，几秒后自动刷新页面。";
+      setTimeout(() => window.location.reload(), 4500);
     });
 
     document.querySelector("#selectAllTodos").addEventListener("click", () => {
@@ -611,11 +690,12 @@
       visibleCount.textContent = `显示 ${rows.length} 条`;
       body.innerHTML = "";
       if (!rows.length) {
-        body.innerHTML = '<tr><td colspan="7">暂无人工复核项</td></tr>';
+        body.innerHTML = '<tr><td colspan="9">暂无人工复核项</td></tr>';
         return;
       }
       rows.forEach((row) => {
         const tr = document.createElement("tr");
+        const options = categoryOptionsHtml("");
         tr.innerHTML = `
           <td>${escapeHtml(row.timestamp)}</td>
           <td>${escapeHtml(row.list_number)}</td>
@@ -624,7 +704,39 @@
           <td>${escapeHtml(row.standard_name)}</td>
           <td><span class="warn">${escapeHtml(row.status)}</span></td>
           <td class="reason-cell" title="${escapeHtml(row.reason_full || row.reason)}">${escapeHtml(row.reason)}</td>
+          <td><select class="review-category">${options}</select></td>
+          <td><button type="button" class="review-confirm">确认入库</button></td>
         `;
+        tr.querySelector(".review-confirm").addEventListener("click", async () => {
+          const finalCategory = tr.querySelector(".review-category").value;
+          if (!finalCategory) {
+            alert("请先选择人工确认后的物化特性。");
+            return;
+          }
+          const response = await fetch("/api/review/confirm", {
+            method: "POST",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({
+              review_key: row.review_key,
+              list_number: row.list_number,
+              sequence: row.sequence,
+              reagent_name: row.reagent_name,
+              cas: row.cas,
+              standard_name: row.standard_name,
+              cleaned_name: row.cleaned_name,
+              specification: row.specification,
+              unit: row.unit,
+              final_category: finalCategory,
+              reason: row.reason || row.reason_full || ""
+            }),
+          });
+          const payload = await response.json();
+          if (!response.ok || !payload.confirmed) {
+            alert(payload.detail || payload.message || "人工复核确认失败。");
+            return;
+          }
+          await refreshStatus();
+        });
         body.appendChild(tr);
       });
     }
@@ -638,6 +750,195 @@
       reviewState.sortDirection = reviewState.sortDirection === "desc" ? "asc" : "desc";
       renderReviewRows();
     });
+
+    document.querySelector("#refreshMemoryButton").addEventListener("click", () => refreshMemory());
+    document.querySelector("#memorySearch").addEventListener("keydown", (event) => {
+      if (event.key === "Enter") refreshMemory();
+    });
+    document.querySelector("#memoryCategoryFilter").addEventListener("change", () => refreshMemory());
+    document.querySelector("#memoryReusableFilter").addEventListener("change", () => refreshMemory());
+    document.querySelector("#memoryConflictFilter").addEventListener("change", () => refreshMemory());
+    document.querySelector("#saveReusableMemoryButton").addEventListener("click", () => saveReusableMemoryRows());
+    document.querySelector("#importMemoryButton").addEventListener("click", async () => {
+      const response = await fetch("/api/memory/import_suggestions", { method: "POST" });
+      const payload = await response.json();
+      if (!response.ok) {
+        alert(payload.detail || "历史审批建议导入失败。");
+        return;
+      }
+      const message = [
+        `扫描 ${payload.scanned || 0} 条`,
+        `新增 ${payload.imported || 0} 条`,
+        `已存在 ${payload.existing || 0} 条`,
+        `冲突 ${payload.conflicts || 0} 条`,
+        `人工复核候选 ${payload.candidate_manual_review || 0} 条`,
+        `低置信度候选 ${payload.candidate_low_confidence || 0} 条`,
+        `类别未映射候选 ${payload.candidate_unmapped_category || 0} 条`
+      ].join("；");
+      document.querySelector("#memoryMeta").textContent = `导入完成：${message}`;
+      await refreshMemory();
+    });
+
+    async function refreshMemory() {
+      const params = new URLSearchParams({
+        q: document.querySelector("#memorySearch").value || "",
+        category: document.querySelector("#memoryCategoryFilter").value || "",
+        reusable: document.querySelector("#memoryReusableFilter").value || "",
+        conflict: document.querySelector("#memoryConflictFilter").value || "",
+        limit: "200"
+      });
+      const response = await fetch(`/api/memory?${params.toString()}`);
+      const payload = await response.json();
+      memoryState.rows = payload.preview || [];
+      memoryState.categories = payload.categories || [];
+      if (payload.erp_property_options && payload.erp_property_options.length) {
+        reviewCategories = payload.erp_property_options;
+      }
+      renderMemoryFilters();
+      renderMemoryRows(payload);
+    }
+
+    function renderMemoryFilters() {
+      const select = document.querySelector("#memoryCategoryFilter");
+      const current = select.value;
+      select.innerHTML = '<option value="">全部类别</option>';
+      Array.from(new Set([...(memoryState.categories || []), ...reviewCategories].filter(Boolean))).sort().forEach((category) => {
+        const option = document.createElement("option");
+        option.value = category;
+        option.textContent = category;
+        select.appendChild(option);
+      });
+      if (current) select.value = current;
+    }
+
+    function boolValue(value) {
+      return String(value || "").toLowerCase() === "1" || String(value || "").toLowerCase() === "true";
+    }
+
+    function categoryOptionsHtml(selectedValue) {
+      const selected = safe(selectedValue, "");
+      const options = ['<option value="">请选择 ERP 物化特性</option>'];
+      if (selected && !reviewCategories.includes(selected)) {
+        options.push(`<option value="" selected>${escapeHtml(selected)}（未映射，请重选）</option>`);
+      }
+      reviewCategories.forEach((category) => {
+        options.push(`<option value="${escapeHtml(category)}" ${selected === category ? "selected" : ""}>${escapeHtml(category)}</option>`);
+      });
+      return options.join("");
+    }
+
+    function renderMemoryRows(payload) {
+      const body = document.querySelector("#memoryTable");
+      const meta = document.querySelector("#memoryMeta");
+      const rows = memoryState.rows || [];
+      meta.textContent = payload.exists
+        ? `共显示 ${safe(payload.rows, 0)} 条；数据库：${safe(payload.path)}`
+        : "尚未生成 data/reagent_memory.sqlite";
+      body.innerHTML = "";
+      if (!rows.length) {
+        body.innerHTML = '<tr><td colspan="10">暂无记忆库记录</td></tr>';
+        return;
+      }
+      rows.forEach((row) => {
+        const tr = document.createElement("tr");
+        tr.dataset.id = row.id;
+        const categoryOptions = categoryOptionsHtml(row.final_category);
+        tr.innerHTML = `
+          <td>${escapeHtml(row.id)}</td>
+          <td><input class="memory-cas" value="${escapeHtml(row.cas)}"></td>
+          <td><input class="memory-raw-name" value="${escapeHtml(row.raw_name)}"></td>
+          <td><input class="memory-cleaned-name" value="${escapeHtml(row.cleaned_name)}"></td>
+          <td><input class="memory-standard-name" value="${escapeHtml(row.standard_name)}"></td>
+          <td><select class="memory-category">${categoryOptions}</select></td>
+          <td><input class="memory-confidence" value="${escapeHtml(row.confidence)}"></td>
+          <td>
+            <label class="mini-check"><input type="checkbox" class="memory-reusable" ${boolValue(row.reusable) ? "checked" : ""}>可复用</label>
+            <label class="mini-check"><input type="checkbox" class="memory-conflict" ${boolValue(row.conflict) ? "checked" : ""}>冲突</label>
+            <label class="mini-check"><input type="checkbox" class="memory-manual" ${boolValue(row.manual_verified) ? "checked" : ""}>人工确认</label>
+          </td>
+          <td><textarea class="memory-reason">${escapeHtml(row.reason)}</textarea></td>
+          <td>
+            <button type="button" class="memory-save">保存</button>
+            <button type="button" class="memory-delete danger-button">删除</button>
+          </td>
+        `;
+        tr.querySelector(".memory-save").addEventListener("click", () => saveMemoryRow(tr));
+        tr.querySelector(".memory-delete").addEventListener("click", () => deleteMemoryRow(tr));
+        body.appendChild(tr);
+      });
+    }
+
+    async function saveMemoryRow(tr) {
+      const recordId = tr.dataset.id;
+      const payload = memoryRowPayload(tr);
+      const response = await fetch(`/api/memory/${recordId}`, {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify(payload)
+      });
+      const result = await response.json();
+      if (!response.ok || !result.updated) {
+        alert(result.detail || "记忆库保存失败。");
+        return false;
+      }
+      await refreshMemory();
+      return true;
+    }
+
+    function memoryRowPayload(tr) {
+      return {
+        cas: tr.querySelector(".memory-cas").value,
+        raw_name: tr.querySelector(".memory-raw-name").value,
+        cleaned_name: tr.querySelector(".memory-cleaned-name").value,
+        standard_name: tr.querySelector(".memory-standard-name").value,
+        final_category: tr.querySelector(".memory-category").value,
+        confidence: tr.querySelector(".memory-confidence").value,
+        reusable: tr.querySelector(".memory-reusable").checked,
+        conflict: tr.querySelector(".memory-conflict").checked,
+        manual_verified: tr.querySelector(".memory-manual").checked,
+        need_manual_review: false,
+        reason: tr.querySelector(".memory-reason").value,
+        source: "web_ui_manual_edit"
+      };
+    }
+
+    async function saveReusableMemoryRows() {
+      const rows = Array.from(document.querySelectorAll("#memoryTable tr"))
+        .filter((tr) => tr.dataset.id && tr.querySelector(".memory-reusable")?.checked);
+      if (!rows.length) {
+        alert("当前表格中没有勾选“可复用”的记录。");
+        return;
+      }
+      let saved = 0;
+      for (const tr of rows) {
+        const response = await fetch(`/api/memory/${tr.dataset.id}`, {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify(memoryRowPayload(tr))
+        });
+        const result = await response.json();
+        if (!response.ok || !result.updated) {
+          alert(result.detail || `记录 ${tr.dataset.id} 保存失败，已停止批量保存。`);
+          await refreshMemory();
+          return;
+        }
+        saved += 1;
+      }
+      document.querySelector("#memoryMeta").textContent = `已一键保存 ${saved} 条可复用记录。`;
+      await refreshMemory();
+    }
+
+    async function deleteMemoryRow(tr) {
+      const recordId = tr.dataset.id;
+      if (!confirm(`确认删除记忆库记录 ${recordId}？`)) return;
+      const response = await fetch(`/api/memory/${recordId}`, { method: "DELETE" });
+      const result = await response.json();
+      if (!response.ok || !result.deleted) {
+        alert(result.detail || "记忆库记录删除失败。");
+        return;
+      }
+      await refreshMemory();
+    }
 
     function renderArtifacts(items) {
       const holder = document.querySelector("#artifactList");
@@ -676,9 +977,14 @@
       const approval = data.approval || {};
       const reviewQueue = data.review_queue || {};
       const todoTasks = data.todo_tasks || {};
+      if (runtime.erp_property_options && runtime.erp_property_options.length) {
+        reviewCategories = runtime.erp_property_options;
+      }
 
       document.querySelector("#runBadge").textContent = status.running ? "运行中" : (status.success === false ? "失败" : (status.success === true ? "成功" : "空闲"));
       document.querySelector("#runBadge").className = status.running ? "badge running" : (status.success === false ? "badge failed" : (status.success === true ? "badge succeeded" : "badge"));
+      document.querySelector("#stopRunButton").disabled = !status.running;
+      document.querySelector("#restartRunButton").disabled = false;
       document.querySelector("#statusLine").textContent = status.running ? "任务执行中，请保持 Playwright 浏览器可见。" : safe(status.error, "当前没有运行中的任务。");
       document.querySelector("#erpUrl").textContent = runtime.erp_url_configured ? "已配置" : "未配置";
       document.querySelector("#erpUser").textContent = runtime.erp_username_configured ? "已配置" : "未配置";
@@ -710,6 +1016,7 @@
     }
 
     refreshStatus();
+    refreshMemory();
     setInterval(refreshStatus, 2500);
   </script>
 </body>
