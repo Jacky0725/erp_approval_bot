@@ -9,3 +9,4 @@ config/rule_candidates.xlsx
 
 /data/
 /rules.xlsx
+/dist/
