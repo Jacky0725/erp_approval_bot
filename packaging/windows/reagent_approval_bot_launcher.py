@@ -25,14 +25,17 @@ def app_root() -> Path:
 
 def configure_runtime() -> Path:
     app = app_root()
+    runtime = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else app
     src = app / "src"
     sys.path.insert(0, str(src))
-    os.chdir(app)
+    os.environ.setdefault("REAGENT_APPROVAL_SOURCE_ROOT", str(app))
+    os.environ.setdefault("REAGENT_APPROVAL_RUNTIME_ROOT", str(runtime))
+    os.chdir(runtime)
     browser_root = bundled_root() / "ms-playwright"
     if browser_root.exists():
         os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", str(browser_root))
-    (app / "data" / "logs").mkdir(parents=True, exist_ok=True)
-    return app
+    (runtime / "data" / "logs").mkdir(parents=True, exist_ok=True)
+    return runtime
 
 
 def port_is_open(host: str, port: int) -> bool:
@@ -58,8 +61,9 @@ def run_worker_if_requested() -> bool:
 
 
 def main() -> int:
-    app = configure_runtime()
-    log_path = app / "data" / "logs" / "launcher.log"
+    runtime = configure_runtime()
+    app = app_root()
+    log_path = runtime / "data" / "logs" / "launcher.log"
     try:
         if run_worker_if_requested():
             return 0

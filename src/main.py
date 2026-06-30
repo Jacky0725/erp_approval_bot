@@ -8,9 +8,11 @@ import yaml
 from dotenv import load_dotenv
 
 from browser_bot import BrowserBot
+from runtime_paths import ensure_runtime_layout, runtime_root
 
 
-ROOT_DIR = Path(__file__).resolve().parents[1]
+ensure_runtime_layout()
+ROOT_DIR = runtime_root()
 CONFIG_PATH = ROOT_DIR / "config" / "settings.yaml"
 
 

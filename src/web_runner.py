@@ -29,9 +29,12 @@ from category_mapper import (
     to_erp_property,
 )
 from reagent_memory import ReagentMemory
+from runtime_paths import ensure_runtime_layout, runtime_root, source_root
 
 
-ROOT_DIR = Path(__file__).resolve().parents[1]
+ensure_runtime_layout()
+ROOT_DIR = runtime_root()
+SOURCE_ROOT = source_root()
 CONFIG_PATH = ROOT_DIR / "config" / "settings.yaml"
 ENV_PATH = ROOT_DIR / ".env"
 LOG_DIR = ROOT_DIR / "data" / "logs"
@@ -299,7 +302,7 @@ class AutomationJobManager:
 
             process = subprocess.Popen(
                 [sys.executable, "-u", "-m", "automation_worker", action],
-                cwd=str(self.root_dir / "src"),
+                cwd=str(SOURCE_ROOT / "src"),
                 env=env,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,

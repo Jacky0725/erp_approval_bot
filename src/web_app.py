@@ -29,10 +29,12 @@ from web_runner import (
     todo_tasks_summary,
     update_memory_record,
 )
+from runtime_paths import source_root
 
 
-TEMPLATES_DIR = ROOT_DIR / "src" / "templates"
-STATIC_DIR = ROOT_DIR / "src" / "static"
+SOURCE_ROOT = source_root()
+TEMPLATES_DIR = SOURCE_ROOT / "src" / "templates"
+STATIC_DIR = SOURCE_ROOT / "src" / "static"
 LOG_DIR = ROOT_DIR / "data" / "logs"
 
 app = FastAPI(title="试剂审批自动化控制台")
@@ -284,7 +286,7 @@ def schedule_web_ui_restart() -> None:
                     "--port",
                     "8000",
                 ],
-                cwd=str(ROOT_DIR / "src"),
+                cwd=str(SOURCE_ROOT / "src"),
                 stdout=out,
                 stderr=err,
                 stdin=subprocess.DEVNULL,
