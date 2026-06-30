@@ -266,31 +266,50 @@ def normalize_checkbox(value: str) -> str:
     return "true" if str(value or "").strip().lower() in {"1", "true", "yes", "y", "on"} else "false"
 
 
+def web_ui_restart_command(*, frozen: bool | None = None) -> tuple[list[str], str]:
+    is_frozen = bool(getattr(sys, "frozen", False) if frozen is None else frozen)
+    if is_frozen:
+        return [sys.executable], str(ROOT_DIR)
+
+    host = os.getenv("WEB_UI_HOST", "127.0.0.1")
+    port = os.getenv("WEB_UI_PORT", "8000")
+    return (
+        [
+            sys.executable,
+            "-m",
+            "uvicorn",
+            "web_app:app",
+            "--host",
+            host,
+            "--port",
+            port,
+        ],
+        str(SOURCE_ROOT / "src"),
+    )
+
+
 def schedule_web_ui_restart() -> None:
     def restart_process() -> None:
         time.sleep(1.0)
         stdout = LOG_DIR / "web_ui_stdout.log"
         stderr = LOG_DIR / "web_ui_stderr.log"
+        command, cwd = web_ui_restart_command()
         creationflags = 0
+        startupinfo = None
         if os.name == "nt":
             creationflags = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            startupinfo.wShowWindow = 0
         with stdout.open("a", encoding="utf-8") as out, stderr.open("a", encoding="utf-8") as err:
             subprocess.Popen(
-                [
-                    sys.executable,
-                    "-m",
-                    "uvicorn",
-                    "web_app:app",
-                    "--host",
-                    "127.0.0.1",
-                    "--port",
-                    "8000",
-                ],
-                cwd=str(SOURCE_ROOT / "src"),
+                command,
+                cwd=cwd,
                 stdout=out,
                 stderr=err,
                 stdin=subprocess.DEVNULL,
                 creationflags=creationflags,
+                startupinfo=startupinfo,
                 close_fds=True,
             )
         time.sleep(0.2)

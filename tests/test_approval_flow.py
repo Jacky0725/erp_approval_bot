@@ -13,8 +13,10 @@ sys.path.insert(0, str(ROOT_DIR / "src"))
 
 from approval_flow import ApprovalFlowMixin  # noqa: E402
 from approval_writer import ApprovalWriter  # noqa: E402
+from excel_exports import ExcelExportsMixin  # noqa: E402
 from reagent_memory import ReagentMemory  # noqa: E402
 from reagent_page import ReagentPageMixin  # noqa: E402
+from review_queue import ReviewQueueMixin  # noqa: E402
 from rule_engine import RuleEngine  # noqa: E402
 from stage_logger import StageLogger  # noqa: E402
 
@@ -33,6 +35,18 @@ class ApprovalFlowPropertyMatchTest(unittest.TestCase):
         writer = ApprovalWriter()
 
         self.assertFalse(Bot.property_value_matches("\u666e\u901a\u7c7b \u6613\u71c3\u7c7b", "\u666e\u901a\u7c7b", writer))
+
+    def test_local_only_successful_save_allows_auto_pass_precheck(self) -> None:
+        bot = Bot()
+        bot.save_results = [{"name": "local_approval_suggestions", "success": True, "detail": "xlsx"}]
+
+        self.assertTrue(bot.all_save_operations_successful())
+
+    def test_no_save_result_still_blocks_auto_pass_precheck(self) -> None:
+        bot = Bot()
+        bot.save_results = []
+
+        self.assertFalse(bot.all_save_operations_successful())
 
 
 class ApprovalFlowTodoLoopTest(unittest.TestCase):
@@ -292,6 +306,80 @@ class ApprovalFlowTodoLoopTest(unittest.TestCase):
         )
 
         self.assertEqual([row["\u5e8f\u53f7"] for row in suggestions], ["1", "2", "3"])
+
+    def test_classification_manual_review_is_written_to_review_queue(self) -> None:
+        class ManualReviewBot(Bot, ReviewQueueMixin, ExcelExportsMixin):
+            def __init__(self, root_dir: Path) -> None:
+                self.settings = {
+                    "paths": {"review_queue_excel": "data/review_queue.xlsx"},
+                    "approval": {"parallel_workers": 1},
+                }
+                self.root_dir = root_dir
+                self.stage_logger = StageLogger()
+                self._current_detail_info = {"\u5f53\u524d\u6e05\u5355\u53f7": "SJ1", "\u7533\u8bf7\u4eba": "tester"}
+
+            def read_current_page_reagents(self, page: object) -> list[dict[str, str]]:
+                return [
+                    {
+                        "\u5e8f\u53f7": "1",
+                        "\u8bd5\u5242\u540d\u79f0": "needs-manual",
+                        "CAS\u53f7": "-",
+                        "\u89c4\u683c": "10",
+                        "\u89c4\u683c\u5355\u4f4d": "g",
+                        "\u7269\u5316\u7279\u6027": "-",
+                    }
+                ]
+
+            def search_reagents_parallel(self, items: list[dict[str, object]]) -> dict[int, dict[str, object]]:
+                item = items[0]
+                reagent = item["reagent"]
+                return {
+                    int(item["index"]): {
+                        "name": "needs-manual",
+                        "cas": "",
+                        "source": "test",
+                        "url": "",
+                        "raw_text": "source text",
+                        "hazard_keywords": [],
+                        "need_manual_review": False,
+                        "name_normalization": {
+                            "raw_name": reagent["\u8bd5\u5242\u540d\u79f0"],
+                            "cleaned_name": "needs-manual",
+                            "standard_name": "needs-manual",
+                            "cas": "",
+                            "confidence": 0.9,
+                            "need_manual_review": False,
+                        },
+                        "relevance_passed": True,
+                    }
+                }
+
+            def extract_and_classify_parallel(self, items: list[dict[str, object]], rule_engine: object) -> dict[int, tuple[dict[str, object], dict[str, object]]]:
+                item = items[0]
+                return {
+                    int(item["index"]): (
+                        {"evidence": ["uncertain evidence"], "confidence": 0.2},
+                        {
+                            "final_category": "",
+                            "matched_categories": [],
+                            "reason": "cannot classify from rule evidence",
+                            "confidence": 0.2,
+                            "need_manual_review": True,
+                        },
+                    )
+                }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bot = ManualReviewBot(root)
+            engine = RuleEngine.from_excel(ROOT_DIR / "config" / "rules.xlsx")
+
+            suggestions = bot.process_current_unmatched_reagent_page(object(), engine, None, {})
+            queue = __import__("pandas").read_excel(root / "data" / "review_queue.xlsx", dtype=str).fillna("")
+
+        self.assertTrue(suggestions[0]["\u9700\u4eba\u5de5\u590d\u6838"])
+        self.assertEqual(len(queue), 1)
+        self.assertEqual(queue["\u8bd5\u5242\u6e05\u5355\u53f7"].tolist(), ["SJ1"])
 
     def test_reagent_memory_match_skips_chemical_search(self) -> None:
         class MemoryBot(Bot):

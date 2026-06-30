@@ -2,10 +2,12 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import sys
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from web_runner import AutomationJobManager, parse_target_list_numbers, run_health, workflow_summary
+from web_app import web_ui_restart_command
 
 
 class WorkflowSummaryTest(unittest.TestCase):
@@ -72,6 +74,20 @@ class WorkflowSummaryTest(unittest.TestCase):
 
             self.assertEqual(result, 130)
             self.assertIsNone(manager._process)
+
+    def test_source_restart_command_uses_configured_port(self) -> None:
+        with patch.dict("os.environ", {"WEB_UI_HOST": "127.0.0.1", "WEB_UI_PORT": "8123"}):
+            command, cwd = web_ui_restart_command(frozen=False)
+
+        self.assertIn("uvicorn", command)
+        self.assertEqual(command[-1], "8123")
+        self.assertTrue(cwd.endswith("src"))
+
+    def test_frozen_restart_command_restarts_current_executable(self) -> None:
+        command, cwd = web_ui_restart_command(frozen=True)
+
+        self.assertEqual(command, [sys.executable])
+        self.assertFalse(cwd.endswith("src"))
 
 
 if __name__ == "__main__":

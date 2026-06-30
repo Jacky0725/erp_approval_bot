@@ -510,6 +510,16 @@ class ApprovalFlowMixin:
                 extracted,
                 classification,
             )
+            if suggestions_by_index[item["index"]].get("需人工复核"):
+                with stage_logger.stage("add_manual_review_item", reagent_name):
+                    self.add_manual_review_item_from_suggestion(
+                        reagent,
+                        name_result,
+                        search_result,
+                        extracted,
+                        classification,
+                        suggestions_by_index[item["index"]],
+                    )
             self.remember_erp_suggestion(memory, suggestions_by_index[item["index"]])
 
         return [suggestions_by_index[index] for index in sorted(suggestions_by_index)]
@@ -522,6 +532,31 @@ class ApprovalFlowMixin:
         normalized = dict(suggestion)
         normalized["最终建议类别"] = erp_category
         return memory.remember_suggestion(normalized)
+
+    def add_manual_review_item_from_suggestion(
+        self,
+        reagent: dict[str, str],
+        name_result: dict[str, Any],
+        search_result: dict[str, Any],
+        extracted: dict[str, Any],
+        classification: dict[str, Any],
+        suggestion: dict[str, Any],
+    ) -> None:
+        reason_parts = [
+            str(suggestion.get("规则原因") or "").strip(),
+            str(search_result.get("failure_reason") or "").strip(),
+            str(name_result.get("reason") or "").strip(),
+            " | ".join(str(item) for item in extracted.get("evidence", []) or [] if str(item).strip()),
+            str(search_result.get("raw_text") or "").strip()[:800],
+        ]
+        reason = next((part for part in reason_parts if part), "")
+        if not reason:
+            reason = "Rule classification, name normalization, or source evidence requires manual review."
+        self.add_manual_review_item(
+            reagent,
+            name_result,
+            reason=reason,
+        )
 
     def search_reagents_parallel(self, items: list[dict[str, Any]]) -> dict[int, dict[str, Any]]:
         worker_count = self.parallel_worker_count()
@@ -1270,6 +1305,15 @@ class ApprovalFlowMixin:
         ]
 
         if not approval_saves:
+            local_saves = [
+                result
+                for result in self.save_results
+                if str(result.get("name", "")).startswith("local_")
+            ]
+            failed_local = [result for result in local_saves if not result.get("success")]
+            if local_saves and not failed_local:
+                print("No ERP/page save operations were needed; local save operation(s) succeeded.")
+                return True
             print("No ERP/page save operations were recorded; auto-pass save precheck failed.")
             return False
 

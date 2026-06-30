@@ -27,6 +27,13 @@ class ReviewQueueBot(ReviewQueueMixin, ExcelExportsMixin):
 
 
 class ReviewQueueTest(unittest.TestCase):
+    def test_missing_review_queue_does_not_block_auto_pass(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            blocked, reason = ReviewQueueBot(Path(tmp)).current_list_has_manual_review_item("SJ1")
+
+        self.assertFalse(blocked)
+        self.assertEqual(reason, "")
+
     def test_resolved_rows_do_not_block_auto_pass(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

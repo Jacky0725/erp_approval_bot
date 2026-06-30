@@ -71,7 +71,8 @@ class ReviewQueueMixin:
         review_queue_path = self.root_dir / paths.get("review_queue_excel", "data/review_queue.xlsx")
 
         if not review_queue_path.exists():
-            return True, f"Review queue file does not exist: {review_queue_path}"
+            print(f"Review queue file does not exist; treating as no pending manual review item: {review_queue_path}")
+            return False, ""
 
         try:
             queue = pd.read_excel(review_queue_path, dtype=str).fillna("")
@@ -137,6 +138,18 @@ class ReviewQueueMixin:
         name_result: dict[str, Any],
         search_result: dict[str, Any],
     ) -> None:
+        self.add_manual_review_item(
+            reagent,
+            name_result,
+            reason=str(search_result.get("raw_text") or search_result.get("failure_reason") or "Chemical website lookup failed after name normalization."),
+        )
+
+    def add_manual_review_item(
+        self,
+        reagent: dict[str, str],
+        name_result: dict[str, Any],
+        reason: str = "",
+    ) -> None:
         detail_info = getattr(self, "_current_detail_info", None)
         if not detail_info:
             detail_info = {}
@@ -156,7 +169,7 @@ class ReviewQueueMixin:
         sequence = reagent.get("\u5e8f\u53f7", "")
         specification = reagent.get("\u89c4\u683c", "")
         unit = reagent.get("\u89c4\u683c\u5355\u4f4d", "")
-        reason = str(search_result.get("raw_text") or "Chemical website lookup failed after name normalization.")
+        reason = str(reason or "Manual review is required before writing this reagent to ERP.")
 
         existing_match = pd.Series(dtype=bool)
         if not queue.empty:
