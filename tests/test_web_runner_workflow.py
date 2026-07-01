@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from web_runner import AutomationJobManager, parse_target_list_numbers, run_health, workflow_summary
+from web_runner import AutomationJobManager, parse_target_list_numbers, repair_display_text, run_health, workflow_summary
 from web_app import web_ui_restart_command
 
 
@@ -49,6 +49,14 @@ class WorkflowSummaryTest(unittest.TestCase):
         result = parse_target_list_numbers("SJ1, SJ2;SJ1\nSJ3")
 
         self.assertEqual(result, ["SJ1", "SJ2", "SJ3"])
+
+    def test_repair_display_text_keeps_valid_chinese(self) -> None:
+        self.assertEqual(repair_display_text("成功"), "成功")
+
+    def test_repair_display_text_restores_gbk_decoded_utf8(self) -> None:
+        mojibake = "成功".encode("utf-8").decode("gbk")
+
+        self.assertEqual(repair_display_text(mojibake), "成功")
 
     def test_run_health_warns_on_business_failures(self) -> None:
         health = run_health(["Failed save operation(s): reagent_save_1"], True, "")

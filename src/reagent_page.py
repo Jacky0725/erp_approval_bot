@@ -727,15 +727,102 @@ class ReagentPageMixin:
                 return False, True
 
             before_page = self.current_reagent_page_number(page)
-            next_button.click()
-            self.wait_for_reagent_table_ready(page)
-            page.wait_for_timeout(600)
+            before_signature = self.reagent_table_signature(page)
+            for attempt in range(2):
+                if attempt == 0:
+                    next_button.click(timeout=3000)
+                else:
+                    self.click_next_reagent_page_by_dom(page)
+                if self.wait_for_reagent_page_change(page, before_page, before_signature):
+                    return True, True
+                page.wait_for_timeout(300)
             after_page = self.current_reagent_page_number(page)
-            moved = after_page != before_page or not after_page
+            after_signature = self.reagent_table_signature(page)
+            moved = bool(after_page and before_page and after_page != before_page) or (
+                bool(after_signature) and bool(before_signature) and after_signature != before_signature
+            )
             return moved, moved
         except Error as error:
             print(f"Could not click next reagent page: {error}")
             return False, False
+
+    def wait_for_reagent_page_change(self, page: Page, before_page: str, before_signature: str) -> bool:
+        for _ in range(12):
+            try:
+                self.wait_for_reagent_table_ready(page)
+            except Error:
+                pass
+            page.wait_for_timeout(250)
+            after_page = self.current_reagent_page_number(page)
+            if before_page and after_page and after_page != before_page:
+                return True
+            after_signature = self.reagent_table_signature(page)
+            if before_signature and after_signature and after_signature != before_signature:
+                return True
+        return False
+
+    @staticmethod
+    def reagent_table_signature(page: Page) -> str:
+        try:
+            return str(
+                page.evaluate(
+                    """
+                    () => {
+                      const visible = (node) => {
+                        const rect = node.getBoundingClientRect();
+                        const style = window.getComputedStyle(node);
+                        return rect.width > 0 && rect.height > 0
+                          && style.visibility !== 'hidden'
+                          && style.display !== 'none';
+                      };
+                      const tables = Array.from(document.querySelectorAll('.ant-table-tbody')).filter(visible);
+                      const body = tables[tables.length - 1] || tables[0];
+                      if (!body) return '';
+                      return Array.from(body.querySelectorAll('tr.ant-table-row'))
+                        .filter(visible)
+                        .slice(0, 5)
+                        .map((row) => (row.innerText || row.textContent || '').replace(/\\s+/g, ' ').trim())
+                        .join('|')
+                        .slice(0, 800);
+                    }
+                    """
+                )
+                or ""
+            )
+        except Error:
+            return ""
+
+    @staticmethod
+    def click_next_reagent_page_by_dom(page: Page) -> bool:
+        try:
+            return bool(
+                page.evaluate(
+                    """
+                    () => {
+                      const visible = (node) => {
+                        const rect = node.getBoundingClientRect();
+                        const style = window.getComputedStyle(node);
+                        return rect.width > 0 && rect.height > 0
+                          && style.visibility !== 'hidden'
+                          && style.display !== 'none';
+                      };
+                      const buttons = Array.from(document.querySelectorAll('.ant-pagination-next')).filter(visible);
+                      const button = buttons[buttons.length - 1];
+                      if (!button) return false;
+                      const cls = button.getAttribute('class') || '';
+                      if (cls.includes('ant-pagination-disabled') || button.getAttribute('aria-disabled') === 'true') {
+                        return false;
+                      }
+                      button.scrollIntoView({ block: 'center', inline: 'center' });
+                      const target = button.querySelector('button, a') || button;
+                      target.click();
+                      return true;
+                    }
+                    """
+                )
+            )
+        except Error:
+            return False
 
     def reagent_pagination(self, page: Page) -> Locator | None:
         candidates = [

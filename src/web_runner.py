@@ -79,6 +79,37 @@ def save_settings(settings: dict[str, Any]) -> None:
         yaml.safe_dump(settings, file, allow_unicode=True, sort_keys=False)
 
 
+MOJIBAKE_MARKERS = (
+    "\ufffd",
+    "\u00c2",
+    "\u00c3",
+    "\u93b4",
+    "\u6fb6",
+    "\u9427",
+    "\u93c8",
+    "\u934f",
+    "\u74c7",
+    "\u6d93",
+)
+
+
+def repair_display_text(value: Any) -> str:
+    text = str(value or "")
+    if not text or not any(marker in text for marker in MOJIBAKE_MARKERS):
+        return text
+    candidates = [text]
+    for encoding in ("latin1", "cp1252", "gbk", "cp936"):
+        try:
+            candidates.append(text.encode(encoding).decode("utf-8"))
+        except UnicodeError:
+            continue
+    return min(candidates, key=mojibake_score)
+
+
+def mojibake_score(text: str) -> int:
+    return sum(text.count(marker) for marker in MOJIBAKE_MARKERS)
+
+
 class LineBufferWriter(io.TextIOBase):
     def __init__(self, lines: list[str], path: Path, limit: int = 800) -> None:
         self.lines = lines
@@ -93,10 +124,11 @@ class LineBufferWriter(io.TextIOBase):
     def write(self, text: str) -> int:
         if not text:
             return 0
+        cleaned_text = repair_display_text(text)
         with self._lock:
-            self._file.write(text)
+            self._file.write(cleaned_text)
             self._file.flush()
-            for line in text.splitlines():
+            for line in cleaned_text.splitlines():
                 if line.strip():
                     self.lines.append(line)
             if len(self.lines) > self.limit:
@@ -232,14 +264,15 @@ class AutomationJobManager:
 
     def _persist_state(self) -> None:
         WEB_RUN_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        log_tail = [repair_display_text(line) for line in self.lines[-160:]]
         payload = {
             "running": self.running,
             "action": self.action,
             "started_at": self.started_at,
             "finished_at": self.finished_at,
             "success": self.success,
-            "error": self.error,
-            "log_tail": self.lines[-160:],
+            "error": repair_display_text(self.error),
+            "log_tail": log_tail,
         }
         with WEB_RUN_STATE_PATH.open("w", encoding="utf-8") as file:
             yaml.safe_dump(payload, file, allow_unicode=True, sort_keys=False)
@@ -262,9 +295,9 @@ class AutomationJobManager:
                 payload = yaml.safe_load(file) or {}
         except Exception:
             payload = {}
-        log_tail = payload.get("log_tail") or []
+        log_tail = [repair_display_text(line) for line in (payload.get("log_tail") or [])]
         success = payload.get("success")
-        error = str(payload.get("error") or "")
+        error = repair_display_text(payload.get("error") or "")
         health = run_health(log_tail, success, error)
         return {
             "running": False,

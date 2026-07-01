@@ -62,6 +62,60 @@ class ApprovalWriter:
     def generate_reagent_library(self, page: Page, row: Locator) -> bool:
         return self._click_row_action(page, row, "\u751f\u6210\u8bd5\u5242\u5e93")
 
+    def cancel_edit(self, page: Page, row: Locator | None = None) -> bool:
+        self.dismiss_open_dropdown(page)
+        clicked = False
+        if row is not None:
+            clicked = self._click_row_action(page, row, "\u53d6\u6d88")
+        if not clicked:
+            clicked = self._click_first_visible_action(page, "\u53d6\u6d88")
+        if not clicked:
+            try:
+                page.keyboard.press("Escape")
+                page.wait_for_timeout(150)
+                page.keyboard.press("Escape")
+            except (Error, TimeoutError):
+                pass
+        page.wait_for_timeout(350)
+        if row is not None:
+            try:
+                return not self.row_is_editing(page, row)
+            except (Error, TimeoutError):
+                return not self.any_row_is_editing(page)
+        return not self.any_row_is_editing(page)
+
+    def any_row_is_editing(self, page: Page) -> bool:
+        try:
+            return bool(
+                page.evaluate(
+                    """
+                    () => {
+                      const visible = (node) => {
+                        const rect = node.getBoundingClientRect();
+                        const style = window.getComputedStyle(node);
+                        return rect.width > 0 && rect.height > 0
+                          && style.visibility !== 'hidden'
+                          && style.display !== 'none';
+                      };
+                      const text = (node) => (node.innerText || node.textContent || '').replace(/\\s+/g, ' ').trim();
+                      const rows = Array.from(document.querySelectorAll('tbody tr.ant-table-row')).filter(visible);
+                      return rows.some((tr) => {
+                        const hasEditor = Array.from(tr.querySelectorAll('.ant-select, input[role="combobox"]')).some(visible);
+                        const hasSave = Array.from(tr.querySelectorAll('button, a')).some(
+                          (node) => visible(node) && text(node).includes('\u4fdd\u5b58')
+                        );
+                        return hasEditor || hasSave;
+                      });
+                    }
+                    """
+                )
+            )
+        except (Error, TimeoutError):
+            return False
+
+    def cancel_any_edit(self, page: Page) -> bool:
+        return self.cancel_edit(page, None)
+
     def _open_property_dropdown(self, page: Page, row: Locator | None = None) -> bool:
         selectors = (self.settings or {}).get("selectors", {})
         configured = str(selectors.get("property_select", "") or "").strip()
@@ -311,6 +365,35 @@ class ApprovalWriter:
             except (Error, TimeoutError):
                 continue
         return ApprovalWriter._click_row_peer_action(page, row, action_text)
+
+    @staticmethod
+    def _click_first_visible_action(page: Page, action_text: str) -> bool:
+        try:
+            return bool(
+                page.evaluate(
+                    """
+                    ({ actionText }) => {
+                      const visible = (node) => {
+                        const rect = node.getBoundingClientRect();
+                        const style = window.getComputedStyle(node);
+                        return rect.width > 0 && rect.height > 0
+                          && style.visibility !== 'hidden'
+                          && style.display !== 'none';
+                      };
+                      const text = (node) => (node.innerText || node.textContent || '').replace(/\\s+/g, ' ').trim();
+                      const action = Array.from(document.querySelectorAll('button, a'))
+                        .find((node) => visible(node) && text(node).includes(actionText));
+                      if (!action) return false;
+                      action.scrollIntoView({ block: 'center', inline: 'center' });
+                      action.click();
+                      return true;
+                    }
+                    """,
+                    {"actionText": action_text},
+                )
+            )
+        except (Error, TimeoutError):
+            return False
 
     @staticmethod
     def _row_identity(row: Locator) -> dict[str, Any]:

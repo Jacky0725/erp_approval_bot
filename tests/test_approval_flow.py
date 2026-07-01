@@ -7,6 +7,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import pandas as pd
+
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT_DIR / "src"))
@@ -47,6 +49,55 @@ class ApprovalFlowPropertyMatchTest(unittest.TestCase):
         bot.save_results = []
 
         self.assertFalse(bot.all_save_operations_successful())
+
+
+class ApprovalSuggestionExportTest(unittest.TestCase):
+    def test_save_outputs_keep_latest_list_specific_and_aggregate_files(self) -> None:
+        class ExportBot(ApprovalFlowMixin, ExcelExportsMixin):
+            pass
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            bot = ExportBot()
+            bot.root_dir = Path(temp_dir)
+            bot.settings = {"paths": {"audit_log_dir": "logs"}}
+            bot._current_detail_info = {"当前清单号": "SJ202606300009"}
+
+            saved_paths = bot.save_approval_suggestions_outputs(
+                [
+                    {
+                        "序号": "3",
+                        "试剂名称": "测试试剂",
+                        "CAS号": "-",
+                        "最终建议类别": "普通类",
+                    }
+                ]
+            )
+
+            log_dir = Path(temp_dir) / "logs"
+            self.assertEqual(
+                {path.name for path in saved_paths},
+                {
+                    "approval_suggestions.xlsx",
+                    "approval_suggestions_SJ202606300009.xlsx",
+                    "approval_suggestions_all.xlsx",
+                },
+            )
+            aggregate = pd.read_excel(log_dir / "approval_suggestions_all.xlsx")
+            self.assertEqual(aggregate.loc[0, "试剂清单号"], "SJ202606300009")
+
+            bot._current_detail_info = {"当前清单号": "SJ202606300010"}
+            bot.save_approval_suggestions_outputs(
+                [
+                    {
+                        "序号": "1",
+                        "试剂名称": "第二清单试剂",
+                        "CAS号": "-",
+                        "最终建议类别": "普通类",
+                    }
+                ]
+            )
+            aggregate = pd.read_excel(log_dir / "approval_suggestions_all.xlsx")
+            self.assertEqual(set(aggregate["试剂清单号"].astype(str)), {"SJ202606300009", "SJ202606300010"})
 
 
 class ApprovalFlowTodoLoopTest(unittest.TestCase):

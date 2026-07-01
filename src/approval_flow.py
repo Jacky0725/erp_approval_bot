@@ -148,14 +148,14 @@ class ApprovalFlowMixin:
             with stage_logger.stage("apply_approval_write_mode"):
                 self.apply_approval_write_mode(page, suggestions)
 
-        output_path = self._log_dir() / "approval_suggestions.xlsx"
         with stage_logger.stage("write_approval_suggestions"):
-            output_path = self.write_excel_with_fallback(
-                pd.DataFrame(suggestions, columns=self.approval_suggestion_columns()),
-                output_path,
-            )
-        print(f"Saved approval suggestions: {output_path}")
-        self.record_save_result("local_approval_suggestions", True, str(output_path))
+            saved_paths = self.save_approval_suggestions_outputs(suggestions)
+        print(f"Saved approval suggestions: {saved_paths[0] if saved_paths else '-'}")
+        self.record_save_result(
+            "local_approval_suggestions",
+            True,
+            ", ".join(str(path) for path in saved_paths) if saved_paths else "-",
+        )
 
         with stage_logger.stage("try_auto_pass_current_task"):
             self.try_auto_pass_current_task(page)
@@ -336,12 +336,68 @@ class ApprovalFlowMixin:
     def write_partial_approval_suggestions(self, suggestions: list[dict[str, Any]]) -> None:
         if not suggestions:
             return
+        export_rows = self.suggestions_with_current_list_number(suggestions)
+        columns = self.approval_suggestion_export_columns()
         output_path = self._log_dir() / "approval_suggestions_partial.xlsx"
         output_path = self.write_excel_with_fallback(
-            pd.DataFrame(suggestions, columns=self.approval_suggestion_columns()),
+            pd.DataFrame(export_rows, columns=columns),
             output_path,
         )
         print(f"Saved partial approval suggestions: {output_path}")
+
+    def save_approval_suggestions_outputs(self, suggestions: list[dict[str, Any]]) -> list[Any]:
+        export_rows = self.suggestions_with_current_list_number(suggestions)
+        columns = self.approval_suggestion_export_columns()
+        dataframe = pd.DataFrame(export_rows, columns=columns)
+        log_dir = self._log_dir()
+        saved_paths: list[Any] = []
+
+        latest_path = self.write_excel_with_fallback(dataframe, log_dir / "approval_suggestions.xlsx")
+        saved_paths.append(latest_path)
+
+        list_number = self.current_detail_list_number()
+        if list_number:
+            list_path = self.write_excel_with_fallback(
+                dataframe,
+                log_dir / f"approval_suggestions_{self.safe_filename_part(list_number)}.xlsx",
+            )
+            saved_paths.append(list_path)
+
+        aggregate_path = self.write_aggregate_approval_suggestions(dataframe, list_number)
+        if aggregate_path is not None:
+            saved_paths.append(aggregate_path)
+        return saved_paths
+
+    def suggestions_with_current_list_number(self, suggestions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        list_number = self.current_detail_list_number()
+        return [{"试剂清单号": list_number, **suggestion} for suggestion in suggestions]
+
+    def approval_suggestion_export_columns(self) -> list[str]:
+        return ["试剂清单号", *self.approval_suggestion_columns()]
+
+    def current_detail_list_number(self) -> str:
+        detail_info = getattr(self, "_current_detail_info", {}) or {}
+        return str(detail_info.get("当前清单号") or detail_info.get("试剂清单号") or "").strip()
+
+    def write_aggregate_approval_suggestions(self, dataframe: pd.DataFrame, list_number: str) -> Any:
+        output_path = self._log_dir() / "approval_suggestions_all.xlsx"
+        try:
+            existing = pd.read_excel(output_path) if output_path.exists() else pd.DataFrame(columns=dataframe.columns)
+            if list_number and "试剂清单号" in existing.columns:
+                existing = existing[existing["试剂清单号"].astype(str) != str(list_number)]
+            combined = pd.concat([existing, dataframe], ignore_index=True)
+            return self.write_excel_with_fallback(
+                combined.reindex(columns=self.approval_suggestion_export_columns()),
+                output_path,
+            )
+        except Exception as error:
+            print(f"Could not update aggregate approval suggestions: {error}")
+            return None
+
+    @staticmethod
+    def safe_filename_part(value: str) -> str:
+        safe = "".join(ch for ch in str(value or "") if ch.isalnum() or ch in {"-", "_"})
+        return safe or "unknown"
 
     def max_reagent_write_attempts(self) -> int:
         approval_settings = getattr(self, "settings", {}).get("approval", {}) or {}
@@ -920,6 +976,11 @@ class ApprovalFlowMixin:
             for write_attempt in range(1, write_attempt_limit + 1):
                 if write_attempt > 1:
                     print(f"Retrying approval write for sequence {sequence}, attempt {write_attempt}/{write_attempt_limit}.")
+                if not self.clear_existing_edit_state(page, writer, sequence):
+                    last_failure_detail = "could not clear existing edit row"
+                    print(f"Could not clear an existing edit row before writing sequence: {sequence}")
+                    self.capture_write_failure(page, sequence, write_attempt, last_failure_detail)
+                    break
                 writer.dismiss_open_dropdown(page)
                 row = self.find_reagent_row_by_sequence(page, sequence, reagent_name, cas)
                 if row is None:
@@ -938,6 +999,7 @@ class ApprovalFlowMixin:
                     last_failure_detail = "technical judgement button not found"
                     print(f"Could not open technical judgement for sequence: {sequence}")
                     self.capture_write_failure(page, sequence, write_attempt, last_failure_detail)
+                    self.cleanup_failed_write(page, writer, row, sequence, last_failure_detail)
                     continue
 
                 page.wait_for_timeout(500)
@@ -946,16 +1008,18 @@ class ApprovalFlowMixin:
                     last_failure_detail = f"could not select {category}"
                     print(f"Could not select physicochemical property {category} for sequence: {sequence}")
                     self.capture_write_failure(page, sequence, write_attempt, last_failure_detail)
+                    self.cleanup_failed_write(page, writer, row, sequence, last_failure_detail)
                     continue
 
                 selected_value = self.read_reagent_property_by_sequence(page, sequence)
-                if selected_value and selected_value != "-" and not self.property_value_matches(selected_value, category, writer):
+                if not self.property_value_matches(selected_value, category, writer):
                     last_failure_detail = f"selected {category}, but row still shows {selected_value or '<empty>'}"
                     print(
                         f"Property selection verification failed for sequence {sequence}: "
                         f"expected {category}, got {selected_value or '<empty>'}."
                     )
                     self.capture_write_failure(page, sequence, write_attempt, last_failure_detail)
+                    self.cleanup_failed_write(page, writer, row, sequence, last_failure_detail)
                     continue
 
                 screenshot_path = self._log_dir() / f"write_mode_{mode}_{sequence}.png"
@@ -980,6 +1044,7 @@ class ApprovalFlowMixin:
                     f"expected {category}, got {saved_value or '<empty>'}."
                 )
                 self.capture_write_failure(page, sequence, write_attempt, last_failure_detail)
+                self.cleanup_failed_write(page, writer, row, sequence, last_failure_detail)
 
             self.record_save_result(
                 f"reagent_save_{sequence}",
@@ -989,6 +1054,8 @@ class ApprovalFlowMixin:
             if verified:
                 result["handled"].add(work_key)
                 consecutive_failures = 0
+                if writer.any_row_is_editing(page):
+                    writer.cancel_any_edit(page)
             else:
                 result["failed"].add(work_key)
                 consecutive_failures += 1
@@ -1005,6 +1072,27 @@ class ApprovalFlowMixin:
                 return result
 
         return result
+
+    def clear_existing_edit_state(self, page: Page, writer: ApprovalWriter, sequence: str) -> bool:
+        if not writer.any_row_is_editing(page):
+            return True
+        print(f"An existing edit row is open before sequence {sequence}; cancelling it first.")
+        return writer.cancel_any_edit(page)
+
+    def cleanup_failed_write(
+        self,
+        page: Page,
+        writer: ApprovalWriter,
+        row: Any,
+        sequence: str,
+        reason: str,
+    ) -> bool:
+        cleaned = writer.cancel_edit(page, row)
+        if cleaned:
+            print(f"Cancelled edit state after failed write for sequence {sequence}: {reason}")
+        else:
+            print(f"Could not fully cancel edit state after failed write for sequence {sequence}: {reason}")
+        return cleaned
 
     def capture_write_failure(self, page: Page, sequence: str, attempt: int, reason: str) -> None:
         safe_sequence = "".join(ch for ch in str(sequence or "unknown") if ch.isalnum() or ch in {"-", "_"})
