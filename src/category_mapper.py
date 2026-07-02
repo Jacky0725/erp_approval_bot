@@ -24,9 +24,10 @@ DEFAULT_RULE_TO_ERP_ALIASES = {
     "易燃液体": ["易燃类"],
     "易燃类": ["易燃液体"],
     "拒收类": ["不建议接收类"],
+    "不建议接收类": ["拒收类"],
 }
 
-NON_WRITABLE_RULE_CATEGORIES = {"不建议接收类", "未知类", "剧毒品"}
+NON_WRITABLE_RULE_CATEGORIES = {"不建议接收类", "拒收类", "未知类", "剧毒品"}
 
 
 def erp_property_options(settings: dict[str, Any] | None = None) -> list[str]:
@@ -130,7 +131,35 @@ def to_rule_category(category: str, settings: dict[str, Any] | None = None, root
             for value in values:
                 if value in categories:
                     return value
+            for value in values:
+                if value in NON_WRITABLE_RULE_CATEGORIES:
+                    return value
     return category
+
+
+def is_non_writable_rule_category(
+    category: str,
+    settings: dict[str, Any] | None = None,
+    root_dir: Path | None = None,
+) -> bool:
+    category = str(category or "").strip()
+    if not category:
+        return False
+    canonical = to_rule_category(category, settings, root_dir)
+    return category in NON_WRITABLE_RULE_CATEGORIES or canonical in NON_WRITABLE_RULE_CATEGORIES
+
+
+def review_decision_options(settings: dict[str, Any] | None = None, root_dir: Path | None = None) -> list[str]:
+    settings = settings or {}
+    writable = erp_property_options(settings)
+    non_writable = [
+        category
+        for category in rule_categories(settings, root_dir)
+        if is_non_writable_rule_category(category, settings, root_dir)
+    ]
+    if "不建议接收类" in non_writable and "拒收类" not in non_writable:
+        non_writable.append("拒收类")
+    return list(dict.fromkeys([*writable, *non_writable]))
 
 
 def category_mapping_summary(settings: dict[str, Any] | None = None, root_dir: Path | None = None) -> dict[str, Any]:
@@ -154,4 +183,5 @@ def category_mapping_summary(settings: dict[str, Any] | None = None, root_dir: P
         "mappings": mappings,
         "unmapped_rule_categories": unmapped,
         "non_writable_rule_categories": non_writable,
+        "review_decision_options": review_decision_options(settings, root_dir),
     }

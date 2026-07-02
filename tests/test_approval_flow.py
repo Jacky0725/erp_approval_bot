@@ -592,7 +592,7 @@ class ApprovalFlowTodoLoopTest(unittest.TestCase):
 
         result = bot.process_unmatched_reagent_pages(object(), None, None, {})
 
-        self.assertEqual(bot.apply_calls, 1)
+        self.assertEqual(bot.apply_calls, 2)
         self.assertEqual([row["\u5e8f\u53f7"] for row in result], ["1"])
 
 

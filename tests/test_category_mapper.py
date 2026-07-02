@@ -14,6 +14,8 @@ sys.path.insert(0, str(ROOT_DIR / "src"))
 from category_mapper import (  # noqa: E402
     category_mapping_summary,
     erp_property_options,
+    is_non_writable_rule_category,
+    review_decision_options,
     to_erp_property,
     to_rule_category,
 )
@@ -61,6 +63,29 @@ class CategoryMapperTest(unittest.TestCase):
 
             self.assertEqual(to_rule_category("强反应", settings, root), "强反应性")
             self.assertEqual(to_rule_category("易燃类", settings, root), "易燃液体")
+
+    def test_reject_alias_is_non_writable_review_decision(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rules_path = root / "config" / "rules_structured.xlsx"
+            rules_path.parent.mkdir(parents=True)
+            with pd.ExcelWriter(rules_path, engine="openpyxl") as writer:
+                pd.DataFrame(
+                    [
+                        {"category": "不建议接收类", "priority": 1, "enabled": True},
+                        {"category": "普通类", "priority": 2, "enabled": True},
+                    ]
+                ).to_excel(writer, sheet_name="categories", index=False)
+
+            settings = {
+                "paths": {"structured_rules_excel": "config/rules_structured.xlsx"},
+                "reagent": {"physicochemical_property_options": ["普通类"]},
+            }
+
+            self.assertEqual(to_rule_category("拒收类", settings, root), "不建议接收类")
+            self.assertEqual(to_erp_property("拒收类", settings), "")
+            self.assertTrue(is_non_writable_rule_category("拒收类", settings, root))
+            self.assertIn("拒收类", review_decision_options(settings, root))
 
     def test_mapping_summary_reports_unmapped_rule_categories(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -169,6 +169,8 @@ class ApprovalWriter:
     @staticmethod
     def _click_property_option(page: Page, candidate_name: str) -> bool:
         for _ in range(8):
+            if ApprovalWriter._click_property_option_in_active_dropdown(page, candidate_name):
+                return True
             candidates = [
                 page.locator(".ant-select-dropdown:not(.ant-select-dropdown-hidden) .ant-select-item-option")
                 .filter(has_text=candidate_name)
@@ -189,6 +191,59 @@ class ApprovalWriter:
             if not ApprovalWriter._scroll_open_dropdown(page):
                 break
         return False
+
+    @staticmethod
+    def _click_property_option_in_active_dropdown(page: Page, candidate_name: str) -> bool:
+        try:
+            return bool(
+                page.evaluate(
+                    """
+                    (candidateName) => {
+                      const visible = (node) => {
+                        const rect = node.getBoundingClientRect();
+                        const style = window.getComputedStyle(node);
+                        return rect.width > 0 && rect.height > 0
+                          && style.visibility !== 'hidden'
+                          && style.display !== 'none';
+                      };
+                      const text = (node) => (node.innerText || node.textContent || '').replace(/\\s+/g, ' ').trim();
+                      const active = document.activeElement;
+                      const activeControls = active?.getAttribute?.('aria-controls') || '';
+                      const dropdowns = Array.from(document.querySelectorAll(
+                        '.ant-select-dropdown:not(.ant-select-dropdown-hidden)'
+                      )).filter(visible);
+                      const ordered = dropdowns
+                        .map((dropdown, index) => ({
+                          dropdown,
+                          index,
+                          activeScore: activeControls && dropdown.id === activeControls ? 0 : 1,
+                        }))
+                        .sort((a, b) => a.activeScore - b.activeScore || a.index - b.index)
+                        .map((item) => item.dropdown);
+                      for (const dropdown of ordered) {
+                        const options = Array.from(dropdown.querySelectorAll('.ant-select-item-option')).filter(visible);
+                        const option = options.find((node) => text(node) === candidateName)
+                          || options.find((node) => text(node).includes(candidateName));
+                        if (!option) continue;
+                        option.scrollIntoView({ block: 'center', inline: 'center' });
+                        const target = option.querySelector('.ant-select-item-option-content') || option;
+                        for (const type of ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click']) {
+                          target.dispatchEvent(new MouseEvent(type, {
+                            bubbles: true,
+                            cancelable: true,
+                            view: window,
+                          }));
+                        }
+                        return true;
+                      }
+                      return false;
+                    }
+                    """,
+                    candidate_name,
+                )
+            )
+        except (Error, TimeoutError):
+            return False
 
     @staticmethod
     def _type_property_search_text(page: Page, candidate_name: str) -> bool:

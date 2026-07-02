@@ -248,6 +248,7 @@ class ApprovalFlowMixin:
             print("Could not move to first reagent page; multi-page mode will continue from current page.")
 
         all_suggestions: list[dict[str, Any]] = []
+        all_suggestion_keys: set[str] = set()
         handled_reagent_keys: set[str] = set()
         write_attempts_by_key: dict[str, int] = {}
         visited_steps = 0
@@ -294,7 +295,11 @@ class ApprovalFlowMixin:
                 page_label=current_page,
                 skip_reagent_keys=handled_reagent_keys,
             )
-            all_suggestions.extend(page_suggestions)
+            for suggestion in page_suggestions:
+                key = self.suggestion_work_key(suggestion)
+                if key not in all_suggestion_keys:
+                    all_suggestions.append(suggestion)
+                    all_suggestion_keys.add(key)
             if page_suggestions:
                 self.write_partial_approval_suggestions(all_suggestions)
 
@@ -313,6 +318,14 @@ class ApprovalFlowMixin:
                     if write_attempts_by_key.get(key, 0) >= self.max_reagent_write_attempts():
                         handled_reagent_keys.add(key)
                         print(f"Write retry limit reached for reagent key: {key}")
+
+                if write_result.get("failed"):
+                    print(
+                        "Multi-page mode will re-read the current reagent page after write failure "
+                        "before moving to the next page."
+                    )
+                    self.sort_property_column_until_unmatched_visible(page)
+                    continue
             else:
                 write_result = {"attempted": set(), "handled": set(), "failed": set()}
 
@@ -967,7 +980,10 @@ class ApprovalFlowMixin:
             result["attempted"].add(work_key)
             print(f"Approval write candidate {row_index}/{len(candidates)}: {sequence} {reagent_name} -> {category}")
 
-            write_attempt_limit = 2 if mode == "multi_page" else 1
+            # In multi-page mode, ERP saves can re-render or re-sort the table.
+            # Keep retries at the page-loop level so each retry starts from a
+            # freshly read current page instead of stale row locators.
+            write_attempt_limit = 1
             last_failure_detail = ""
             verified = False
             saved = False
@@ -1059,7 +1075,10 @@ class ApprovalFlowMixin:
             else:
                 result["failed"].add(work_key)
                 consecutive_failures += 1
-                if mode != "multi_page" and consecutive_failures >= self.approval_write_failure_break_limit():
+                if mode == "multi_page":
+                    print("Stopping this multi-page write round after a failed write; the page will be re-read.")
+                    break
+                if consecutive_failures >= self.approval_write_failure_break_limit():
                     print("Stopping this write round after repeated save failures; the page will be re-read.")
                     break
 
@@ -1077,7 +1096,9 @@ class ApprovalFlowMixin:
         if not writer.any_row_is_editing(page):
             return True
         print(f"An existing edit row is open before sequence {sequence}; cancelling it first.")
-        return writer.cancel_any_edit(page)
+        if writer.cancel_any_edit(page):
+            return True
+        return self.recover_reagent_detail_page_after_write_failure(page, "existing edit row before write")
 
     def cleanup_failed_write(
         self,
@@ -1092,7 +1113,34 @@ class ApprovalFlowMixin:
             print(f"Cancelled edit state after failed write for sequence {sequence}: {reason}")
         else:
             print(f"Could not fully cancel edit state after failed write for sequence {sequence}: {reason}")
+            cleaned = self.recover_reagent_detail_page_after_write_failure(page, f"failed write for sequence {sequence}")
         return cleaned
+
+    def recover_reagent_detail_page_after_write_failure(self, page: Page, reason: str) -> bool:
+        target_page = self.current_reagent_page_number(page)
+        print(
+            "Recovering reagent detail page after write-state failure"
+            f" ({reason}); target reagent page: {target_page or '<current>'}."
+        )
+        try:
+            page.keyboard.press("Escape")
+            page.wait_for_timeout(150)
+        except Exception:
+            pass
+        try:
+            page.reload(wait_until="domcontentloaded", timeout=60000)
+        except Exception as error:
+            print(f"Normal detail page reload failed; continuing with current page: {error}")
+        try:
+            self.wait_for_reagent_table_ready(page)
+            page.wait_for_timeout(1000)
+        except Exception as error:
+            print(f"Reagent table was not ready after reload: {error}")
+            return False
+        if target_page and not self.goto_reagent_page_number(page, target_page):
+            print(f"Could not return to reagent page {target_page} after recovery.")
+            return False
+        return True
 
     def capture_write_failure(self, page: Page, sequence: str, attempt: int, reason: str) -> None:
         safe_sequence = "".join(ch for ch in str(sequence or "unknown") if ch.isalnum() or ch in {"-", "_"})

@@ -36,6 +36,63 @@ class StructuredRulesTest(unittest.TestCase):
         self.assertEqual(result["final_category"], "\u6613\u7206\u7c7b")
         self.assertFalse(result["need_manual_review"])
 
+    def test_specific_reject_examples_override_generic_azide(self) -> None:
+        for name in ["叠氮化铅", "雷汞", "TNT", "史蒂芬酸铅"]:
+            with self.subTest(name=name):
+                result = self.engine.classify(
+                    {
+                        "reagent_name": name,
+                        "text": name,
+                        "allow_default_normal": True,
+                    }
+                )
+
+                self.assertEqual(result["final_category"], "不建议接收类")
+                self.assertTrue(result["need_manual_review"])
+
+    def test_reject_examples_from_structured_rules(self) -> None:
+        for name in ["黑索今", "RDX", "太安", "PETN", "奥克托今", "HMX", "医疗废物", "放射性元素", "氚", "镭", "铀"]:
+            with self.subTest(name=name):
+                result = self.engine.classify(
+                    {
+                        "reagent_name": name,
+                        "text": name,
+                        "allow_default_normal": True,
+                    }
+                )
+
+                self.assertEqual(result["final_category"], "不建议接收类")
+                self.assertTrue(result["need_manual_review"])
+
+    def test_lead_mercury_thallium_beryllium_examples_are_reject_class(self) -> None:
+        for name in [
+            "硝酸汞",
+            "碘化汞",
+            "溴化汞",
+            "氰化汞",
+            "硫氰酸汞",
+            "氯化甲氧基乙基汞",
+            "铊",
+            "氧化亚铊",
+            "氧化铊",
+            "碳酸亚铊",
+            "乙酸亚铊",
+            "丙二酸铊",
+            "铍类",
+            "乙酸铅",
+        ]:
+            with self.subTest(name=name):
+                result = self.engine.classify(
+                    {
+                        "reagent_name": name,
+                        "text": name,
+                        "allow_default_normal": True,
+                    }
+                )
+
+                self.assertEqual(result["final_category"], "不建议接收类")
+                self.assertTrue(result["need_manual_review"])
+
     def test_perchloric_acid_concentration_rules(self) -> None:
         low = self.engine.classify({"reagent_name": "70%\u9ad8\u6c2f\u9178", "allow_default_normal": True})
         high = self.engine.classify({"reagent_name": "75%\u9ad8\u6c2f\u9178", "allow_default_normal": True})

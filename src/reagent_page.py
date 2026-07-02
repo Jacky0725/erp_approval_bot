@@ -714,6 +714,43 @@ class ReagentPageMixin:
         except Error:
             return 0
 
+    def goto_reagent_page_number(self, page: Page, target_page: str | int) -> bool:
+        target = str(target_page or "").strip()
+        if not target or target == self.current_reagent_page_number(page):
+            return True
+
+        pagination = self.reagent_pagination(page)
+        try:
+            direct = (
+                pagination.locator(f".ant-pagination-item-{target}").first
+                if pagination
+                else page.locator(f".ant-pagination-item-{target}").last
+            )
+            if direct.count() and direct.is_visible():
+                before_signature = self.reagent_table_signature(page)
+                direct.click(timeout=3000)
+                if self.wait_for_reagent_page_change(page, "", before_signature):
+                    return self.current_reagent_page_number(page) == target
+                return self.current_reagent_page_number(page) == target
+        except Error:
+            pass
+
+        if not self.goto_first_reagent_page(page):
+            return False
+        for _ in range(250):
+            current = self.current_reagent_page_number(page)
+            if current == target:
+                return True
+            try:
+                if current and int(current) > int(target):
+                    return False
+            except ValueError:
+                pass
+            moved_next, terminal_or_error = self.click_next_reagent_page(page)
+            if not moved_next:
+                return bool(terminal_or_error and self.current_reagent_page_number(page) == target)
+        return False
+
     def click_next_reagent_page(self, page: Page) -> tuple[bool, bool]:
         pagination = self.reagent_pagination(page)
         next_button = pagination.locator(".ant-pagination-next").first if pagination else page.locator(".ant-pagination-next").last

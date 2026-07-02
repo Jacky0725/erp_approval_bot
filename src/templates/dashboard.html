@@ -264,7 +264,7 @@
         </div>
       </div>
       <div class="table-wrap">
-        <table>
+        <table class="review-table">
           <thead>
             <tr>
               <th><button type="button" id="reviewTimeSort" class="table-sort">时间 <span id="reviewSortIcon">↓</span></button></th>
@@ -364,6 +364,7 @@
       rows: [],
       listNumber: "",
       sortDirection: "desc",
+      pointerInside: false,
     };
     const todoState = {
       selected: new Set(),
@@ -373,7 +374,7 @@
       rows: [],
       categories: [],
     };
-    let reviewCategories = {{ runtime.erp_property_options | tojson }};
+    let reviewCategories = {{ runtime.review_decision_options | tojson }};
     const llmProviders = {{ runtime.llm_provider_options | tojson }};
     const currentLlm = {
       provider: "{{ runtime.llm_provider }}",
@@ -406,7 +407,7 @@
         data.set("target_list_numbers", selectedTodoNumbers().join(","));
         const response = await fetch("/api/run", { method: "POST", body: data });
         const payload = await response.json();
-        await refreshStatus();
+        await refreshStatus({forceReview: true});
         if (!payload.started) {
           alert(payload.message || payload.detail || "任务未启动");
         }
@@ -416,7 +417,7 @@
     document.querySelector("#stopRunButton").addEventListener("click", async () => {
       const response = await fetch("/api/stop", { method: "POST" });
       const payload = await response.json();
-      await refreshStatus();
+      await refreshStatus({forceReview: true});
       if (!payload.stopped) {
         alert(payload.message || payload.detail || "当前没有运行中的任务");
       }
@@ -530,7 +531,7 @@
       state.className = "save-state saved";
       settingsForm.querySelector('[name="erp_password"]').value = "";
       settingsForm.querySelector('[name="llm_api_key"]').value = "";
-      await refreshStatus();
+      await refreshStatus({forceReview: true});
     });
 
     function safe(value, fallback = "-") {
@@ -704,15 +705,38 @@
           <td>${escapeHtml(row.standard_name)}</td>
           <td><span class="warn">${escapeHtml(row.status)}</span></td>
           <td class="reason-cell" title="${escapeHtml(row.reason_full || row.reason)}">${escapeHtml(row.reason)}</td>
-          <td><select class="review-category">${options}</select></td>
-          <td><button type="button" class="review-confirm">确认入库</button></td>
+          <td class="review-category-cell">
+            <select class="review-category">${options}</select>
+            <span class="review-selected">未选择</span>
+          </td>
+          <td class="review-action-cell">
+            <button type="button" class="review-confirm" disabled>确认入库</button>
+            <span class="review-row-message"></span>
+          </td>
         `;
-        tr.querySelector(".review-confirm").addEventListener("click", async () => {
-          const finalCategory = tr.querySelector(".review-category").value;
+        const categorySelect = tr.querySelector(".review-category");
+        const selectedText = tr.querySelector(".review-selected");
+        const confirmButton = tr.querySelector(".review-confirm");
+        const rowMessage = tr.querySelector(".review-row-message");
+        const updateReviewSelection = () => {
+          const value = categorySelect.value;
+          selectedText.textContent = value ? `已选择：${value}` : "未选择";
+          confirmButton.disabled = !value;
+          rowMessage.textContent = "";
+          rowMessage.className = "review-row-message";
+        };
+        categorySelect.addEventListener("change", updateReviewSelection);
+        updateReviewSelection();
+        confirmButton.addEventListener("click", async () => {
+          const finalCategory = categorySelect.value;
           if (!finalCategory) {
-            alert("请先选择人工确认后的物化特性。");
+            rowMessage.textContent = "请先选择人工确认后的物化特性。";
+            rowMessage.className = "review-row-message failed";
             return;
           }
+          confirmButton.disabled = true;
+          rowMessage.textContent = "正在确认...";
+          rowMessage.className = "review-row-message";
           const response = await fetch("/api/review/confirm", {
             method: "POST",
             headers: {"Content-Type": "application/json"},
@@ -732,14 +756,36 @@
           });
           const payload = await response.json();
           if (!response.ok || !payload.confirmed) {
-            alert(payload.detail || payload.message || "人工复核确认失败。");
+            rowMessage.textContent = payload.detail || payload.message || "人工复核确认失败。";
+            rowMessage.className = "review-row-message failed";
+            confirmButton.disabled = false;
             return;
           }
-          await refreshStatus();
+          rowMessage.textContent = payload.message || "已确认入库。";
+          rowMessage.className = "review-row-message ok";
+          await refreshStatus({forceReview: true});
         });
         body.appendChild(tr);
       });
     }
+
+    function reviewInteractionActive() {
+      const table = document.querySelector("#reviewTable");
+      if (!table) return false;
+      if (reviewState.pointerInside) return true;
+      if (table.contains(document.activeElement)) return true;
+      if (Array.from(table.querySelectorAll(".review-category")).some((field) => field.value)) return true;
+      if (Array.from(table.querySelectorAll(".review-row-message")).some((node) => node.textContent.trim())) return true;
+      return false;
+    }
+
+    document.querySelector("#review").addEventListener("mouseenter", () => {
+      reviewState.pointerInside = true;
+    });
+
+    document.querySelector("#review").addEventListener("mouseleave", () => {
+      reviewState.pointerInside = false;
+    });
 
     document.querySelector("#reviewListFilter").addEventListener("change", (event) => {
       reviewState.listNumber = event.target.value;
@@ -791,8 +837,8 @@
       const payload = await response.json();
       memoryState.rows = payload.preview || [];
       memoryState.categories = payload.categories || [];
-      if (payload.erp_property_options && payload.erp_property_options.length) {
-        reviewCategories = payload.erp_property_options;
+      if (payload.review_decision_options && payload.review_decision_options.length) {
+        reviewCategories = payload.review_decision_options;
       }
       renderMemoryFilters();
       renderMemoryRows(payload);
@@ -817,7 +863,7 @@
 
     function categoryOptionsHtml(selectedValue) {
       const selected = safe(selectedValue, "");
-      const options = ['<option value="">请选择 ERP 物化特性</option>'];
+      const options = ['<option value="">请选择确认类别</option>'];
       if (selected && !reviewCategories.includes(selected)) {
         options.push(`<option value="" selected>${escapeHtml(selected)}（未映射，请重选）</option>`);
       }
@@ -969,7 +1015,7 @@
       });
     }
 
-    async function refreshStatus() {
+    async function refreshStatus(options = {}) {
       const response = await fetch("/api/status");
       const data = await response.json();
       const status = data.status || {};
@@ -977,8 +1023,8 @@
       const approval = data.approval || {};
       const reviewQueue = data.review_queue || {};
       const todoTasks = data.todo_tasks || {};
-      if (runtime.erp_property_options && runtime.erp_property_options.length) {
-        reviewCategories = runtime.erp_property_options;
+      if (runtime.review_decision_options && runtime.review_decision_options.length) {
+        reviewCategories = runtime.review_decision_options;
       }
 
       document.querySelector("#runBadge").textContent = status.running ? "运行中" : (status.success === false ? "失败" : (status.success === true ? "成功" : "空闲"));
@@ -1008,7 +1054,9 @@
 
       renderTags(approval.categories || {});
       renderSuggestions(approval.preview || []);
-      renderReviewQueue(reviewQueue);
+      if (options.forceReview || !reviewInteractionActive()) {
+        renderReviewQueue(reviewQueue);
+      }
       renderTodoTasks(todoTasks);
       renderWorkflow(status.workflow || {});
       renderArtifacts(data.artifacts || []);

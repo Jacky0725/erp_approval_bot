@@ -26,7 +26,9 @@ from llm_providers import (
 from category_mapper import (
     category_mapping_summary,
     erp_property_options,
+    is_non_writable_rule_category,
     to_erp_property,
+    to_rule_category,
 )
 from reagent_memory import ReagentMemory
 from runtime_paths import ensure_runtime_layout, runtime_root, source_root
@@ -845,7 +847,11 @@ def confirm_review_item(payload: dict[str, Any], root_dir: Path = ROOT_DIR) -> d
         return {"confirmed": False, "message": "请先选择人工确认后的物化特性。"}
     settings = load_settings()
     options = erp_property_options(settings)
-    if final_category not in options:
+    rule_category = to_rule_category(final_category, settings, root_dir)
+    non_writable_decision = is_non_writable_rule_category(rule_category, settings, root_dir)
+    if non_writable_decision:
+        final_category = rule_category
+    elif final_category not in options:
         mapped_category = to_erp_property(final_category, settings)
         if not mapped_category:
             return {
@@ -881,13 +887,14 @@ def confirm_review_item(payload: dict[str, Any], root_dir: Path = ROOT_DIR) -> d
         or str(payload.get("standard_name") or ""),
         cas=first_existing_value(row, ["cas", "CAS号"]) or str(payload.get("cas") or ""),
         final_category=final_category,
-        confidence=1.0,
+        confidence=0.0 if non_writable_decision else 1.0,
         reason=str(payload.get("reason") or "人工复核确认后加入高可信试剂记忆库。"),
         source="manual_review_web_ui",
         specification=first_existing_value(row, ["specification", "规格"]) or str(payload.get("specification") or ""),
         unit=first_existing_value(row, ["unit", "规格单位"]) or str(payload.get("unit") or ""),
         need_manual_review=False,
         manual_verified=True,
+        track_conflicts=not non_writable_decision,
     )
 
     now = datetime.now().isoformat(timespec="seconds")
@@ -905,12 +912,18 @@ def confirm_review_item(payload: dict[str, Any], root_dir: Path = ROOT_DIR) -> d
     frame = frame.drop(columns=["_review_key"], errors="ignore")
     path.parent.mkdir(parents=True, exist_ok=True)
     frame.to_excel(path, index=False)
+    if non_writable_decision:
+        message = "已确认人工复核项，并入库为不可自动写网页的拒收/复核决策。"
+    else:
+        message = (
+            "已确认人工复核项，并写入高可信试剂记忆库。"
+            if memory_added
+            else "已确认人工复核项；存在冲突或限制，未设为可自动复用。"
+        )
     return {
         "confirmed": True,
         "memory_added": bool(memory_added),
-        "message": "已确认人工复核项，并写入高可信试剂记忆库。"
-        if memory_added
-        else "已确认人工复核项；存在冲突或限制，未设为可自动复用。",
+        "message": message,
     }
 
 
@@ -979,6 +992,7 @@ def memory_summary(
         "rows": len(rows),
         "categories": categories,
         "erp_property_options": mapping["erp_property_options"],
+        "review_decision_options": mapping["review_decision_options"],
         "category_mappings": mapping["mappings"],
         "unmapped_rule_categories": mapping["unmapped_rule_categories"],
         "non_writable_rule_categories": mapping["non_writable_rule_categories"],
@@ -991,7 +1005,12 @@ def update_memory_record(record_id: int, payload: dict[str, Any], root_dir: Path
     final_category = str(payload.get("final_category") or "").strip()
     if final_category:
         options = erp_property_options(settings)
-        if final_category not in options:
+        rule_category = to_rule_category(final_category, settings, root_dir)
+        if is_non_writable_rule_category(rule_category, settings, root_dir):
+            payload = dict(payload)
+            payload["final_category"] = rule_category
+            payload["reusable"] = False
+        elif final_category not in options:
             mapped_category = to_erp_property(final_category, settings)
             if not mapped_category:
                 raise ValueError(f"物化特性类别未映射到 ERP 下拉选项：{final_category}")
@@ -1068,8 +1087,13 @@ def import_approval_suggestions_to_memory(root_dir: Path = ROOT_DIR) -> dict[str
             if not any((cas, standard_name, cleaned_name, raw_name)):
                 stats["skipped_missing_identity"] += 1
                 continue
-            erp_category = to_erp_property(final_category, settings) or final_category
-            category_mapped = erp_category in erp_property_options(settings)
+            rule_category = to_rule_category(final_category, settings, root_dir)
+            if is_non_writable_rule_category(rule_category, settings, root_dir):
+                erp_category = rule_category
+                category_mapped = False
+            else:
+                erp_category = to_erp_property(final_category, settings) or final_category
+                category_mapped = erp_category in erp_property_options(settings)
 
             existing = memory.find_any(
                 cas=cas,
@@ -1184,6 +1208,7 @@ def runtime_config_snapshot() -> dict[str, Any]:
         "llm_timeout_seconds": llm.get("timeout_seconds", 45),
         "llm_max_retries": llm.get("max_retries", 1),
         "erp_property_options": mapping["erp_property_options"],
+        "review_decision_options": mapping["review_decision_options"],
         "category_mappings": mapping["mappings"],
         "unmapped_rule_categories": mapping["unmapped_rule_categories"],
         "non_writable_rule_categories": mapping["non_writable_rule_categories"],

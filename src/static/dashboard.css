@@ -700,6 +700,10 @@ table {
   min-width: 980px;
 }
 
+.review-table {
+  min-width: 1480px;
+}
+
 .memory-table {
   min-width: 1460px;
 }
@@ -759,6 +763,58 @@ tr:last-child td {
   max-width: 620px;
   color: #33485b;
   line-height: 1.45;
+}
+
+.review-category-cell {
+  min-width: 180px;
+  width: 180px;
+}
+
+.review-category {
+  width: 160px;
+  min-width: 160px;
+  height: 34px;
+  padding: 0 10px;
+  white-space: nowrap;
+}
+
+.review-selected,
+.review-row-message {
+  display: block;
+  margin-top: 6px;
+  font-size: 12px;
+  font-weight: 800;
+  line-height: 1.35;
+}
+
+.review-selected {
+  color: var(--muted);
+}
+
+.review-action-cell {
+  min-width: 160px;
+  width: 160px;
+}
+
+.review-confirm {
+  width: 110px;
+  min-width: 110px;
+  height: 34px;
+  padding: 0 10px;
+  white-space: nowrap;
+}
+
+.review-row-message {
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.review-row-message.failed {
+  color: var(--red);
+}
+
+.review-row-message.ok {
+  color: var(--green);
 }
 
 .memory-table input,

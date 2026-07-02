@@ -66,6 +66,49 @@ class WebReviewConfirmationTest(unittest.TestCase):
             assert match is not None
             self.assertEqual(match["final_category"], "普通类")
 
+    def test_confirm_review_item_accepts_reject_alias_as_non_writable_decision(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            data_dir = root / "data"
+            data_dir.mkdir(parents=True)
+            queue_path = data_dir / "review_queue.xlsx"
+            pd.DataFrame(
+                [
+                    {
+                        "timestamp": "2026-06-25T10:00:00",
+                        "试剂清单号": "SJ1",
+                        "序号": "1",
+                        "试剂名称": "TNT",
+                        "cas": "",
+                        "standard_name": "TNT",
+                        "cleaned_name": "TNT",
+                        "reason": "命中拒收类规则",
+                        "status": "pending",
+                    }
+                ]
+            ).to_excel(queue_path, index=False)
+
+            summary = review_queue_summary(root)
+            review_key = summary["preview"][0]["review_key"]
+            result = confirm_review_item(
+                {
+                    "review_key": review_key,
+                    "final_category": "拒收类",
+                    "reason": "人工确认拒收类",
+                },
+                root,
+            )
+
+            self.assertTrue(result["confirmed"])
+            self.assertFalse(result["memory_added"])
+            self.assertEqual(review_queue_summary(root)["pending"], 0)
+
+            memory = ReagentMemory.from_settings({}, root)
+            rows = memory.list_records(query="TNT")
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["final_category"], "不建议接收类")
+            self.assertEqual(rows[0]["reusable"], 0)
+
     def test_memory_summary_and_update_record(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

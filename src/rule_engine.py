@@ -9,7 +9,7 @@ import pandas as pd
 
 
 RULE_COLUMNS = ["category", "explanation", "examples"]
-CRITICAL_PRIORITY = ["不建议接收类", "剧毒品"]
+CRITICAL_PRIORITY = ["不建议接收类", "拒收类", "剧毒品"]
 UNKNOWN_CATEGORY = "未知类"
 NORMAL_CATEGORY = "普通类"
 
@@ -36,7 +36,7 @@ class RuleEngine:
     rules: list[Rule]
     priority: list[str]
     manual_review_categories: set[str] = field(
-        default_factory=lambda: {UNKNOWN_CATEGORY, "不建议接收类"}
+        default_factory=lambda: {UNKNOWN_CATEGORY, "不建议接收类", "拒收类"}
     )
 
     @classmethod
@@ -73,7 +73,7 @@ class RuleEngine:
             and str(row.get("default_manual_review", "")).strip().lower()
             in {"true", "1", "yes", "y", "on"}
         }
-        manual_review_categories.update({UNKNOWN_CATEGORY, "不建议接收类"})
+        manual_review_categories.update({UNKNOWN_CATEGORY, "不建议接收类", "拒收类"})
 
         rule_entries: list[Rule] = []
         for category in priority:
@@ -262,10 +262,13 @@ class RuleEngine:
 
     def _sort_matched_categories(self, matches: dict[str, RuleMatch]) -> list[str]:
         rank = {category: index for index, category in enumerate(self.priority)}
+        has_reject_match = any(category in {"不建议接收类", "拒收类"} for category in matches)
         return sorted(
             matches,
             key=lambda category: (
-                0 if RuleEngine._is_azide_explosive_match(category, matches[category]) else 1,
+                0
+                if not has_reject_match and RuleEngine._is_azide_explosive_match(category, matches[category])
+                else 1,
                 rank.get(category, len(rank) + 100),
                 -matches[category].score,
             ),
@@ -440,6 +443,9 @@ class RuleEngine:
         text = RuleEngine._raw_reagent_text(reagent_info).lower()
         hits: list[str] = []
 
+        if category == "不建议接收类":
+            hits.extend(RuleEngine._reject_metal_name_hits(reagent_info))
+
         if category == "\u7279\u6b8a\u9178" and RuleEngine._is_hydrochloride_salt(reagent_info):
             return []
 
@@ -457,6 +463,20 @@ class RuleEngine:
             hits.extend(RuleEngine._flash_point_flammable_hits(reagent_info))
 
         return hits
+
+    @staticmethod
+    def _reject_metal_name_hits(reagent_info: dict[str, Any]) -> list[str]:
+        parts = []
+        for key in ("name", "reagent_name", "chemical_name", "standard_name", "cleaned_name"):
+            value = reagent_info.get(key)
+            if value:
+                parts.append(str(value))
+        name_text = "".join(parts)
+        hits = []
+        for token in ("铅", "汞", "铊", "铍"):
+            if token in name_text:
+                hits.append(f"含{token}")
+        return list(dict.fromkeys(hits))
 
     @staticmethod
     def _raw_reagent_text(reagent_info: dict[str, Any]) -> str:

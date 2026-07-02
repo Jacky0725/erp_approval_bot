@@ -33,6 +33,53 @@ DEFAULT_PRIORITY = [
 
 MANUAL_REVIEW_CATEGORIES = {"\u4e0d\u5efa\u8bae\u63a5\u6536\u7c7b", "\u5267\u6bd2\u54c1", "\u672a\u77e5\u7c7b"}
 
+CATEGORY_DESCRIPTIONS = {
+    "\u4e0d\u5efa\u8bae\u63a5\u6536\u7c7b": "\u62d2\u6536\u7c7b/\u4e0d\u5efa\u8bae\u63a5\u6536\u7c7b\uff1b\u65e0\u8bb8\u53ef\u8d44\u8d28\u3001\u65e0\u5904\u7f6e\u80fd\u529b\u6216\u89c4\u5219\u5217\u660e\u4e0d\u53ef\u63a5\u6536\u7684\u7206\u70b8\u7269\u3001\u533b\u7597\u5e9f\u7269\u3001\u653e\u5c04\u6027\u5143\u7d20\uff0c\u4ee5\u53ca\u542b\u94c5\u3001\u6c5e\u3001\u94ca\u3001\u94cd\u7b49\u8bd5\u5242\u3002",
+    "\u5267\u6bd2\u54c1": "\u5267\u6bd2\u54c1\u4e13\u9879\u89c4\u5219\uff1b\u9700\u4eba\u5de5\u590d\u6838\uff0c\u4e0d\u4f5c\u4e3a ERP \u7269\u5316\u7279\u6027\u81ea\u52a8\u5199\u5165\u3002",
+    "\u672a\u77e5\u7c7b": "\u672a\u77e5\u3001\u65e0\u6807\u7b7e\u3001\u65e0 MSDS \u6216\u65e0\u6cd5\u8fa8\u8bc6\uff1b\u9700\u4eba\u5de5\u590d\u6838\u3002",
+}
+
+SUPPLEMENTAL_EXAMPLES = [
+    ("\u4e0d\u5efa\u8bae\u63a5\u6536\u7c7b", "\u62d2\u6536\u7c7b", "contains", "\u4e1a\u52a1\u522b\u540d\uff1a\u62d2\u6536\u7c7b\u7b49\u540c\u4e8e\u4e0d\u5efa\u8bae\u63a5\u6536\u7c7b"),
+    ("\u4e0d\u5efa\u8bae\u63a5\u6536\u7c7b", "\u9ed1\u7d22\u4eca", "contains", "RDX / \u73af\u4e09\u4e9a\u7532\u57fa\u4e09\u785d\u80fa"),
+    ("\u4e0d\u5efa\u8bae\u63a5\u6536\u7c7b", "RDX", "contains", "\u5de5\u4e1a\u9ed1\u7d22\u4eca"),
+    ("\u4e0d\u5efa\u8bae\u63a5\u6536\u7c7b", "\u73af\u4e09\u4e9a\u7532\u57fa\u4e09\u785d\u80fa", "contains", "\u5de5\u4e1a\u9ed1\u7d22\u4eca RDX"),
+    ("\u4e0d\u5efa\u8bae\u63a5\u6536\u7c7b", "\u592a\u5b89", "contains", "PETN / \u5b63\u620a\u56db\u9187\u56db\u785d\u9178\u916f"),
+    ("\u4e0d\u5efa\u8bae\u63a5\u6536\u7c7b", "PETN", "contains", "\u592a\u5b89"),
+    ("\u4e0d\u5efa\u8bae\u63a5\u6536\u7c7b", "\u5b63\u620a\u56db\u9187\u56db\u785d\u9178\u916f", "contains", "\u592a\u5b89 PETN"),
+    ("\u4e0d\u5efa\u8bae\u63a5\u6536\u7c7b", "\u5965\u514b\u6258\u4eca", "contains", "HMX"),
+    ("\u4e0d\u5efa\u8bae\u63a5\u6536\u7c7b", "HMX", "contains", "\u5965\u514b\u6258\u4eca"),
+    ("\u4e0d\u5efa\u8bae\u63a5\u6536\u7c7b", "\u7279\u5c48\u62c9\u8f9b", "contains", "\u70b8\u836f"),
+    ("\u4e0d\u5efa\u8bae\u63a5\u6536\u7c7b", "\u70b8\u836f", "contains", "\u65e0\u8bb8\u53ef\u8d44\u8d28\u3001\u65e0\u5904\u7f6e\u80fd\u529b"),
+    ("\u4e0d\u5efa\u8bae\u63a5\u6536\u7c7b", "\u533b\u7597\u5e9f\u7269", "contains", "\u8840\u6e05\u3001\u52a8\u7269\u4f53\u5185\u5bfc\u51fa\u7b49\u533b\u7597\u5e9f\u7269"),
+    ("\u4e0d\u5efa\u8bae\u63a5\u6536\u7c7b", "\u653e\u5c04\u6027\u5143\u7d20", "contains", "\u6c1a\u3001\u956d\u3001\u94c0\u7b49\u653e\u5c04\u6027\u5143\u7d20"),
+    ("\u4e0d\u5efa\u8bae\u63a5\u6536\u7c7b", "\u6c1a", "exact", "\u653e\u5c04\u6027\u5143\u7d20"),
+    ("\u4e0d\u5efa\u8bae\u63a5\u6536\u7c7b", "\u956d", "exact", "\u653e\u5c04\u6027\u5143\u7d20"),
+    ("\u4e0d\u5efa\u8bae\u63a5\u6536\u7c7b", "\u94c0", "exact", "\u653e\u5c04\u6027\u5143\u7d20"),
+    ("\u4e0d\u5efa\u8bae\u63a5\u6536\u7c7b", "\u785d\u9178\u6c5e", "exact", "\u542b\u94c5\u3001\u6c5e\u3001\u94ca\u3001\u94cd\u7b49\u62d2\u6536\u7c7b\u4e3e\u4f8b"),
+    ("\u4e0d\u5efa\u8bae\u63a5\u6536\u7c7b", "\u7898\u5316\u6c5e", "exact", "\u542b\u94c5\u3001\u6c5e\u3001\u94ca\u3001\u94cd\u7b49\u62d2\u6536\u7c7b\u4e3e\u4f8b"),
+    ("\u4e0d\u5efa\u8bae\u63a5\u6536\u7c7b", "\u6eb4\u5316\u6c5e", "exact", "\u542b\u94c5\u3001\u6c5e\u3001\u94ca\u3001\u94cd\u7b49\u62d2\u6536\u7c7b\u4e3e\u4f8b"),
+    ("\u4e0d\u5efa\u8bae\u63a5\u6536\u7c7b", "\u6c30\u5316\u6c5e", "exact", "\u542b\u94c5\u3001\u6c5e\u3001\u94ca\u3001\u94cd\u7b49\u62d2\u6536\u7c7b\u4e3e\u4f8b"),
+    ("\u4e0d\u5efa\u8bae\u63a5\u6536\u7c7b", "\u786b\u6c30\u9178\u6c5e", "exact", "\u542b\u94c5\u3001\u6c5e\u3001\u94ca\u3001\u94cd\u7b49\u62d2\u6536\u7c7b\u4e3e\u4f8b"),
+    ("\u4e0d\u5efa\u8bae\u63a5\u6536\u7c7b", "\u6c2f\u5316\u7532\u6c27\u57fa\u4e59\u57fa\u6c5e", "exact", "\u542b\u94c5\u3001\u6c5e\u3001\u94ca\u3001\u94cd\u7b49\u62d2\u6536\u7c7b\u4e3e\u4f8b"),
+    ("\u4e0d\u5efa\u8bae\u63a5\u6536\u7c7b", "\u94ca", "exact", "\u542b\u94c5\u3001\u6c5e\u3001\u94ca\u3001\u94cd\u7b49\u62d2\u6536\u7c7b\u4e3e\u4f8b"),
+    ("\u4e0d\u5efa\u8bae\u63a5\u6536\u7c7b", "\u6c27\u5316\u4e9a\u94ca", "exact", "\u542b\u94c5\u3001\u6c5e\u3001\u94ca\u3001\u94cd\u7b49\u62d2\u6536\u7c7b\u4e3e\u4f8b"),
+    ("\u4e0d\u5efa\u8bae\u63a5\u6536\u7c7b", "\u6c27\u5316\u94ca", "exact", "\u542b\u94c5\u3001\u6c5e\u3001\u94ca\u3001\u94cd\u7b49\u62d2\u6536\u7c7b\u4e3e\u4f8b"),
+    ("\u4e0d\u5efa\u8bae\u63a5\u6536\u7c7b", "\u78b3\u9178\u4e9a\u94ca", "exact", "\u542b\u94c5\u3001\u6c5e\u3001\u94ca\u3001\u94cd\u7b49\u62d2\u6536\u7c7b\u4e3e\u4f8b"),
+    ("\u4e0d\u5efa\u8bae\u63a5\u6536\u7c7b", "\u4e59\u9178\u4e9a\u94ca", "exact", "\u542b\u94c5\u3001\u6c5e\u3001\u94ca\u3001\u94cd\u7b49\u62d2\u6536\u7c7b\u4e3e\u4f8b"),
+    ("\u4e0d\u5efa\u8bae\u63a5\u6536\u7c7b", "\u4e19\u4e8c\u9178\u94ca", "exact", "\u542b\u94c5\u3001\u6c5e\u3001\u94ca\u3001\u94cd\u7b49\u62d2\u6536\u7c7b\u4e3e\u4f8b"),
+    ("\u4e0d\u5efa\u8bae\u63a5\u6536\u7c7b", "\u94cd\u7c7b", "contains", "\u542b\u94c5\u3001\u6c5e\u3001\u94ca\u3001\u94cd\u7b49\u62d2\u6536\u7c7b\u4e3e\u4f8b"),
+]
+
+SUPPLEMENTAL_NOTES = [
+    {
+        "note_id": "NOTE-REJECT-001",
+        "note": "\u62d2\u6536\u7c7b\u662f\u4e1a\u52a1\u5904\u7f6e\u7ed3\u8bba\uff0c\u5728 ERP \u7269\u5316\u7279\u6027\u4e0b\u62c9\u4e2d\u65e0\u5bf9\u5e94\u53ef\u5199\u9009\u9879\uff1b\u7a0b\u5e8f\u6309\u201c\u4e0d\u5efa\u8bae\u63a5\u6536\u7c7b\u201d\u8bc6\u522b\u5e76\u8fdb\u5165\u4eba\u5de5\u590d\u6838/\u4e0d\u53ef\u81ea\u52a8\u5199\u5165\u3002",
+        "source": "rules.xlsx",
+        "enabled": True,
+    }
+]
+
 SPECIAL_RULES = [
     {
         "rule_id": "SPECIAL-EXP-001",
@@ -186,7 +233,7 @@ def _categories_sheet(priority: list[str]) -> pd.DataFrame:
                 "category": category,
                 "priority": index,
                 "default_manual_review": category in MANUAL_REVIEW_CATEGORIES,
-                "description": "",
+                "description": CATEGORY_DESCRIPTIONS.get(category, ""),
                 "enabled": True,
             }
             for index, category in enumerate(priority, start=1)
@@ -247,21 +294,36 @@ def _examples_sheet(legacy: LegacyRules, priority: list[str]) -> pd.DataFrame:
                         "notes": "",
                     }
                 )
+    for category, example, match_mode, notes in SUPPLEMENTAL_EXAMPLES:
+        key = (category, example)
+        if key in seen:
+            continue
+        seen.add(key)
+        rows.append(
+            {
+                "category": category,
+                "example_name": example,
+                "match_mode": match_mode,
+                "enabled": True,
+                "source": "rules.xlsx",
+                "notes": notes,
+            }
+        )
     return pd.DataFrame(rows)
 
 
 def _notes_sheet(notes: list[str]) -> pd.DataFrame:
-    return pd.DataFrame(
-        [
-            {
-                "note_id": f"NOTE-{index:03d}",
-                "note": note,
-                "source": "rules.xlsx",
-                "enabled": True,
-            }
-            for index, note in enumerate(notes, start=1)
-        ]
-    )
+    rows = [
+        {
+            "note_id": f"NOTE-{index:03d}",
+            "note": note,
+            "source": "rules.xlsx",
+            "enabled": True,
+        }
+        for index, note in enumerate(notes, start=1)
+    ]
+    rows.extend(SUPPLEMENTAL_NOTES)
+    return pd.DataFrame(rows)
 
 
 def _priority(categories: list[str]) -> list[str]:
