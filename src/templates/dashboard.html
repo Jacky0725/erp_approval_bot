@@ -283,6 +283,11 @@
           </tbody>
         </table>
       </div>
+      <div class="review-pagination">
+        <button type="button" id="reviewPrevPage">上一页</button>
+        <span id="reviewPageInfo">第 1 / 1 页，每页 20 条</span>
+        <button type="button" id="reviewNextPage">下一页</button>
+      </div>
     </section>
 
     <section class="panel" id="memory">
@@ -308,6 +313,7 @@
           </select>
           <button type="button" id="importMemoryButton" class="primary">从审批建议导入</button>
           <button type="button" id="saveReusableMemoryButton">一键保存可复用</button>
+          <button type="button" id="deleteConflictMemoryButton" class="danger-button">删除全部冲突</button>
           <button type="button" id="refreshMemoryButton">刷新</button>
         </div>
       </div>
@@ -331,6 +337,11 @@
             <tr><td colspan="10">暂无记忆库记录</td></tr>
           </tbody>
         </table>
+      </div>
+      <div class="memory-pagination">
+        <button type="button" id="memoryPrevPage">上一页</button>
+        <span id="memoryPageInfo">第 1 / 1 页，每页 20 条</span>
+        <button type="button" id="memoryNextPage">下一页</button>
       </div>
     </section>
 
@@ -365,6 +376,10 @@
       listNumber: "",
       sortDirection: "desc",
       pointerInside: false,
+      page: 1,
+      perPage: 20,
+      pages: 1,
+      total: 0,
     };
     const todoState = {
       selected: new Set(),
@@ -373,6 +388,12 @@
     const memoryState = {
       rows: [],
       categories: [],
+      page: 1,
+      pages: 1,
+      perPage: 20,
+      total: 0,
+      requestSeq: 0,
+      loading: false,
     };
     let reviewCategories = {{ runtime.review_decision_options | tojson }};
     const llmProviders = {{ runtime.llm_provider_options | tojson }};
@@ -614,6 +635,7 @@
         ? `共 ${safe(queue.rows, 0)} 条历史记录，当前待处理 ${safe(queue.pending, 0)} 条；最近更新：${safe(queue.modified)}`
         : "尚未生成 data/review_queue.xlsx";
       reviewState.rows = rows;
+      reviewState.page = Math.min(reviewState.page || 1, Math.max(1, Math.ceil(rows.length / reviewState.perPage)));
       updateReviewListFilter(queue.list_numbers || rows.map((row) => row.list_number).filter(Boolean));
       renderReviewRows();
     }
@@ -688,13 +710,19 @@
           return reviewState.sortDirection === "desc" ? rightTime - leftTime : leftTime - rightTime;
         });
       document.querySelector("#reviewSortIcon").textContent = reviewState.sortDirection === "desc" ? "↓" : "↑";
-      visibleCount.textContent = `显示 ${rows.length} 条`;
+      reviewState.total = rows.length;
+      reviewState.pages = Math.max(1, Math.ceil(rows.length / reviewState.perPage));
+      reviewState.page = Math.min(Math.max(1, reviewState.page || 1), reviewState.pages);
+      const start = (reviewState.page - 1) * reviewState.perPage;
+      const pageRows = rows.slice(start, start + reviewState.perPage);
+      visibleCount.textContent = `显示 ${pageRows.length} / ${rows.length} 条`;
       body.innerHTML = "";
       if (!rows.length) {
         body.innerHTML = '<tr><td colspan="9">暂无人工复核项</td></tr>';
+        updateReviewPagination();
         return;
       }
-      rows.forEach((row) => {
+      pageRows.forEach((row) => {
         const tr = document.createElement("tr");
         const options = categoryOptionsHtml("");
         tr.innerHTML = `
@@ -711,12 +739,14 @@
           </td>
           <td class="review-action-cell">
             <button type="button" class="review-confirm" disabled>确认入库</button>
+            <button type="button" class="review-delete danger-button">删除</button>
             <span class="review-row-message"></span>
           </td>
         `;
         const categorySelect = tr.querySelector(".review-category");
         const selectedText = tr.querySelector(".review-selected");
         const confirmButton = tr.querySelector(".review-confirm");
+        const deleteButton = tr.querySelector(".review-delete");
         const rowMessage = tr.querySelector(".review-row-message");
         const updateReviewSelection = () => {
           const value = categorySelect.value;
@@ -765,8 +795,45 @@
           rowMessage.className = "review-row-message ok";
           await refreshStatus({forceReview: true});
         });
+        deleteButton.addEventListener("click", async () => {
+          if (!confirm(`确认删除人工复核项：${row.reagent_name || row.cas || row.review_key}？`)) return;
+          deleteButton.disabled = true;
+          rowMessage.textContent = "正在删除...";
+          rowMessage.className = "review-row-message";
+          const response = await fetch("/api/review", {
+            method: "DELETE",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({
+              review_key: row.review_key,
+              list_number: row.list_number,
+              sequence: row.sequence,
+              reagent_name: row.reagent_name,
+              cas: row.cas,
+              standard_name: row.standard_name,
+            }),
+          });
+          const payload = await response.json();
+          if (!response.ok || !payload.deleted) {
+            rowMessage.textContent = payload.detail || payload.message || "删除失败。";
+            rowMessage.className = "review-row-message failed";
+            deleteButton.disabled = false;
+            return;
+          }
+          await refreshStatus({forceReview: true});
+        });
         body.appendChild(tr);
       });
+      updateReviewPagination();
+    }
+
+    function updateReviewPagination() {
+      const prev = document.querySelector("#reviewPrevPage");
+      const next = document.querySelector("#reviewNextPage");
+      const info = document.querySelector("#reviewPageInfo");
+      if (!prev || !next || !info) return;
+      prev.disabled = reviewState.page <= 1;
+      next.disabled = reviewState.page >= reviewState.pages;
+      info.textContent = `第 ${reviewState.page} / ${reviewState.pages} 页，每页 ${reviewState.perPage} 条，共 ${reviewState.total} 条`;
     }
 
     function reviewInteractionActive() {
@@ -789,22 +856,83 @@
 
     document.querySelector("#reviewListFilter").addEventListener("change", (event) => {
       reviewState.listNumber = event.target.value;
+      reviewState.page = 1;
       renderReviewRows();
     });
 
     document.querySelector("#reviewTimeSort").addEventListener("click", () => {
       reviewState.sortDirection = reviewState.sortDirection === "desc" ? "asc" : "desc";
+      reviewState.page = 1;
       renderReviewRows();
     });
 
-    document.querySelector("#refreshMemoryButton").addEventListener("click", () => refreshMemory());
-    document.querySelector("#memorySearch").addEventListener("keydown", (event) => {
-      if (event.key === "Enter") refreshMemory();
+    document.querySelector("#reviewPrevPage").addEventListener("click", () => {
+      if (reviewState.page <= 1) return;
+      reviewState.page -= 1;
+      renderReviewRows();
     });
-    document.querySelector("#memoryCategoryFilter").addEventListener("change", () => refreshMemory());
-    document.querySelector("#memoryReusableFilter").addEventListener("change", () => refreshMemory());
-    document.querySelector("#memoryConflictFilter").addEventListener("change", () => refreshMemory());
+
+    document.querySelector("#reviewNextPage").addEventListener("click", () => {
+      if (reviewState.page >= reviewState.pages) return;
+      reviewState.page += 1;
+      renderReviewRows();
+    });
+
+    let memorySearchTimer = null;
+    let memorySearchComposing = false;
+    const memorySearchInput = document.querySelector("#memorySearch");
+    const resetMemoryPage = () => {
+      memoryState.page = 1;
+    };
+    const scheduleMemorySearch = () => {
+      window.clearTimeout(memorySearchTimer);
+      memorySearchTimer = window.setTimeout(() => {
+        resetMemoryPage();
+        refreshMemory();
+      }, 350);
+    };
+    document.querySelector("#refreshMemoryButton").addEventListener("click", () => refreshMemory());
+    document.querySelector("#memoryPrevPage").addEventListener("click", () => {
+      if (memoryState.page <= 1) return;
+      memoryState.page -= 1;
+      refreshMemory();
+    });
+    document.querySelector("#memoryNextPage").addEventListener("click", () => {
+      if (memoryState.page >= memoryState.pages) return;
+      memoryState.page += 1;
+      refreshMemory();
+    });
+    memorySearchInput.addEventListener("compositionstart", () => {
+      memorySearchComposing = true;
+    });
+    memorySearchInput.addEventListener("compositionend", () => {
+      memorySearchComposing = false;
+      scheduleMemorySearch();
+    });
+    memorySearchInput.addEventListener("input", () => {
+      if (!memorySearchComposing) scheduleMemorySearch();
+    });
+    memorySearchInput.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        window.clearTimeout(memorySearchTimer);
+        resetMemoryPage();
+        refreshMemory();
+      }
+    });
+    document.querySelector("#memoryCategoryFilter").addEventListener("change", () => {
+      resetMemoryPage();
+      refreshMemory();
+    });
+    document.querySelector("#memoryReusableFilter").addEventListener("change", () => {
+      resetMemoryPage();
+      refreshMemory();
+    });
+    document.querySelector("#memoryConflictFilter").addEventListener("change", () => {
+      resetMemoryPage();
+      refreshMemory();
+    });
     document.querySelector("#saveReusableMemoryButton").addEventListener("click", () => saveReusableMemoryRows());
+    document.querySelector("#deleteConflictMemoryButton").addEventListener("click", () => deleteConflictingMemory());
     document.querySelector("#importMemoryButton").addEventListener("click", async () => {
       const response = await fetch("/api/memory/import_suggestions", { method: "POST" });
       const payload = await response.json();
@@ -822,26 +950,43 @@
         `类别未映射候选 ${payload.candidate_unmapped_category || 0} 条`
       ].join("；");
       document.querySelector("#memoryMeta").textContent = `导入完成：${message}`;
+      resetMemoryPage();
       await refreshMemory();
     });
 
     async function refreshMemory() {
+      const requestId = memoryState.requestSeq + 1;
+      memoryState.requestSeq = requestId;
+      setMemoryLoading(true);
       const params = new URLSearchParams({
         q: document.querySelector("#memorySearch").value || "",
         category: document.querySelector("#memoryCategoryFilter").value || "",
         reusable: document.querySelector("#memoryReusableFilter").value || "",
         conflict: document.querySelector("#memoryConflictFilter").value || "",
-        limit: "200"
+        page: String(memoryState.page || 1),
+        per_page: String(memoryState.perPage || 20),
+        limit: String(memoryState.perPage || 20)
       });
-      const response = await fetch(`/api/memory?${params.toString()}`);
-      const payload = await response.json();
-      memoryState.rows = payload.preview || [];
-      memoryState.categories = payload.categories || [];
-      if (payload.review_decision_options && payload.review_decision_options.length) {
-        reviewCategories = payload.review_decision_options;
+      try {
+        const response = await fetch(`/api/memory?${params.toString()}`);
+        const payload = await response.json();
+        if (requestId !== memoryState.requestSeq) return;
+        memoryState.rows = payload.preview || [];
+        memoryState.categories = payload.categories || [];
+        memoryState.page = Number(payload.page || 1);
+        memoryState.pages = Number(payload.pages || 1);
+        memoryState.perPage = Number(payload.per_page || 20);
+        memoryState.total = Number(payload.rows || 0);
+        if (payload.review_decision_options && payload.review_decision_options.length) {
+          reviewCategories = payload.review_decision_options;
+        }
+        renderMemoryFilters();
+        renderMemoryRows(payload);
+      } finally {
+        if (requestId === memoryState.requestSeq) {
+          setMemoryLoading(false);
+        }
       }
-      renderMemoryFilters();
-      renderMemoryRows(payload);
     }
 
     function renderMemoryFilters() {
@@ -878,8 +1023,9 @@
       const meta = document.querySelector("#memoryMeta");
       const rows = memoryState.rows || [];
       meta.textContent = payload.exists
-        ? `共显示 ${safe(payload.rows, 0)} 条；数据库：${safe(payload.path)}`
+        ? `共 ${safe(payload.rows, 0)} 条；第 ${safe(payload.page, 1)} / ${safe(payload.pages, 1)} 页；每页 ${safe(payload.per_page, 20)} 条；数据库：${safe(payload.path)}`
         : "尚未生成 data/reagent_memory.sqlite";
+      renderMemoryPagination(payload);
       body.innerHTML = "";
       if (!rows.length) {
         body.innerHTML = '<tr><td colspan="10">暂无记忆库记录</td></tr>';
@@ -910,8 +1056,40 @@
         `;
         tr.querySelector(".memory-save").addEventListener("click", () => saveMemoryRow(tr));
         tr.querySelector(".memory-delete").addEventListener("click", () => deleteMemoryRow(tr));
+        const reusableCheck = tr.querySelector(".memory-reusable");
+        reusableCheck.addEventListener("change", () => {
+          if (!reusableCheck.checked) return;
+          tr.querySelector(".memory-conflict").checked = false;
+          tr.querySelector(".memory-manual").checked = true;
+        });
         body.appendChild(tr);
       });
+    }
+
+    function renderMemoryPagination(payload) {
+      const prev = document.querySelector("#memoryPrevPage");
+      const next = document.querySelector("#memoryNextPage");
+      const info = document.querySelector("#memoryPageInfo");
+      const page = Number(payload.page || 1);
+      const pages = Number(payload.pages || 1);
+      const total = Number(payload.rows || 0);
+      const perPage = Number(payload.per_page || 20);
+      prev.disabled = !payload.exists || page <= 1;
+      next.disabled = !payload.exists || page >= pages;
+      info.textContent = `第 ${page} / ${pages} 页，共 ${total} 条，每页 ${perPage} 条`;
+    }
+
+    function setMemoryLoading(loading) {
+      memoryState.loading = loading;
+      const prev = document.querySelector("#memoryPrevPage");
+      const next = document.querySelector("#memoryNextPage");
+      const info = document.querySelector("#memoryPageInfo");
+      if (!prev || !next || !info) return;
+      prev.disabled = loading || memoryState.page <= 1;
+      next.disabled = loading || memoryState.page >= memoryState.pages;
+      if (loading) {
+        info.textContent = `第 ${memoryState.page} / ${memoryState.pages} 页，正在加载...`;
+      }
     }
 
     async function saveMemoryRow(tr) {
@@ -932,6 +1110,7 @@
     }
 
     function memoryRowPayload(tr) {
+      const reusable = tr.querySelector(".memory-reusable").checked;
       return {
         cas: tr.querySelector(".memory-cas").value,
         raw_name: tr.querySelector(".memory-raw-name").value,
@@ -939,9 +1118,9 @@
         standard_name: tr.querySelector(".memory-standard-name").value,
         final_category: tr.querySelector(".memory-category").value,
         confidence: tr.querySelector(".memory-confidence").value,
-        reusable: tr.querySelector(".memory-reusable").checked,
-        conflict: tr.querySelector(".memory-conflict").checked,
-        manual_verified: tr.querySelector(".memory-manual").checked,
+        reusable,
+        conflict: reusable ? false : tr.querySelector(".memory-conflict").checked,
+        manual_verified: reusable ? true : tr.querySelector(".memory-manual").checked,
         need_manual_review: false,
         reason: tr.querySelector(".memory-reason").value,
         source: "web_ui_manual_edit"
@@ -984,6 +1163,24 @@
         return;
       }
       await refreshMemory();
+    }
+
+    async function deleteConflictingMemory() {
+      const message = [
+        "确认删除所有标记为“冲突”的试剂记忆记录？",
+        "包括已经人工确认过的冲突记录。",
+        "删除前会自动备份 SQLite 数据库。"
+      ].join("\n");
+      if (!confirm(message)) return;
+      const response = await fetch("/api/memory/delete_conflicting", { method: "POST" });
+      const result = await response.json();
+      if (!response.ok) {
+        alert(result.detail || "批量删除冲突记录失败。");
+        return;
+      }
+      resetMemoryPage();
+      await refreshMemory();
+      alert(`已删除 ${result.deleted || 0} 条冲突记录。`);
     }
 
     function renderArtifacts(items) {

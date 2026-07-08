@@ -3,6 +3,7 @@ from __future__ import annotations
 import contextlib
 import io
 import os
+import shutil
 import subprocess
 import sys
 import threading
@@ -927,6 +928,37 @@ def confirm_review_item(payload: dict[str, Any], root_dir: Path = ROOT_DIR) -> d
     }
 
 
+def delete_review_item(payload: dict[str, Any], root_dir: Path = ROOT_DIR) -> dict[str, Any]:
+    path = root_dir / "data" / "review_queue.xlsx"
+    if not path.exists():
+        return {"deleted": False, "message": "review_queue.xlsx does not exist."}
+
+    frame = pd.read_excel(path, dtype=str).fillna("")
+    if frame.empty:
+        return {"deleted": False, "message": "review_queue.xlsx is empty."}
+
+    if "_review_key" not in frame.columns:
+        frame["_review_key"] = frame.apply(review_queue_row_key, axis=1)
+
+    review_key = str(payload.get("review_key") or "").strip()
+    matched_index: int | None = None
+    if review_key:
+        matches = frame.index[frame["_review_key"].astype(str) == review_key].tolist()
+        if matches:
+            matched_index = matches[-1]
+
+    if matched_index is None:
+        matched_index = match_review_item_by_fields(frame, payload)
+
+    if matched_index is None:
+        return {"deleted": False, "message": "没有找到对应的人工复核记录，可能已被处理或文件已刷新。"}
+
+    frame = frame.drop(index=matched_index).drop(columns=["_review_key"], errors="ignore")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    frame.to_excel(path, index=False)
+    return {"deleted": True, "message": "已删除该人工复核项。"}
+
+
 def match_review_item_by_fields(frame: pd.DataFrame, payload: dict[str, Any]) -> int | None:
     list_number = str(payload.get("list_number") or "").strip()
     reagent_name = str(payload.get("reagent_name") or "").strip()
@@ -972,24 +1004,41 @@ def memory_summary(
     category: str = "",
     reusable: str = "",
     conflict: str = "",
-    limit: int = 200,
+    limit: int = 20,
+    page: int = 1,
+    per_page: int | None = None,
     root_dir: Path = ROOT_DIR,
 ) -> dict[str, Any]:
     settings = load_settings()
     memory = ReagentMemory.from_settings(settings, root_dir)
     mapping = category_mapping_summary(settings, root_dir)
+    safe_per_page = max(1, min(100, int(per_page or limit or 20)))
+    total = memory.count_records(
+        query=query,
+        category=category,
+        reusable=reusable,
+        conflict=conflict,
+    )
+    pages = max(1, (total + safe_per_page - 1) // safe_per_page)
+    safe_page = max(1, min(pages, int(page or 1)))
+    offset = (safe_page - 1) * safe_per_page
     rows = memory.list_records(
         query=query,
         category=category,
         reusable=reusable,
         conflict=conflict,
-        limit=limit,
+        limit=safe_per_page,
+        offset=offset,
     )
-    categories = sorted({str(row.get("final_category") or "") for row in rows if str(row.get("final_category") or "")})
+    categories = memory.list_categories()
     return {
         "exists": memory.path.exists(),
         "path": str(memory.path),
-        "rows": len(rows),
+        "rows": total,
+        "page_rows": len(rows),
+        "page": safe_page,
+        "pages": pages,
+        "per_page": safe_per_page,
         "categories": categories,
         "erp_property_options": mapping["erp_property_options"],
         "review_decision_options": mapping["review_decision_options"],
@@ -1002,6 +1051,12 @@ def memory_summary(
 
 def update_memory_record(record_id: int, payload: dict[str, Any], root_dir: Path = ROOT_DIR) -> dict[str, Any]:
     settings = load_settings()
+    payload = dict(payload)
+    if truthy_value(payload.get("reusable")):
+        payload["reusable"] = True
+        payload["conflict"] = False
+        payload["need_manual_review"] = False
+        payload["manual_verified"] = True
     final_category = str(payload.get("final_category") or "").strip()
     if final_category:
         options = erp_property_options(settings)
@@ -1026,6 +1081,25 @@ def delete_memory_record(record_id: int, root_dir: Path = ROOT_DIR) -> dict[str,
     memory = ReagentMemory.from_settings(settings, root_dir)
     deleted = memory.delete_record(record_id)
     return {"deleted": deleted}
+
+
+def delete_conflicting_memory(root_dir: Path = ROOT_DIR) -> dict[str, Any]:
+    settings = load_settings()
+    memory = ReagentMemory.from_settings(settings, root_dir)
+    delete_count = memory.count_conflicting_records()
+    backup_path = ""
+    if delete_count and memory.path.exists():
+        log_dir = root_dir / "data" / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        backup = log_dir / f"reagent_memory_backup_before_delete_conflicting_{datetime.now():%Y%m%d_%H%M%S}.sqlite"
+        shutil.copy2(memory.path, backup)
+        backup_path = str(backup)
+    deleted = memory.delete_conflicting_records()
+    return {
+        "deleted": deleted,
+        "candidate_count": delete_count,
+        "backup": backup_path,
+    }
 
 
 def import_approval_suggestions_to_memory(root_dir: Path = ROOT_DIR) -> dict[str, Any]:

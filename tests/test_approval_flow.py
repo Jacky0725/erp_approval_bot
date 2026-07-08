@@ -50,6 +50,38 @@ class ApprovalFlowPropertyMatchTest(unittest.TestCase):
 
         self.assertFalse(bot.all_save_operations_successful())
 
+    def test_auto_pass_disabled_skips_page_precheck(self) -> None:
+        class AutoPassBot(Bot):
+            def read_detail_info(self, page: object) -> dict[str, str]:
+                raise AssertionError("AUTO_PASS=false should not read page detail info")
+
+            def find_unmatched_reagents_across_all_pages(self, page: object) -> list[dict[str, str]]:
+                raise AssertionError("AUTO_PASS=false should not inspect reagent pages")
+
+        with patch.dict(os.environ, {"AUTO_PASS": "false"}, clear=False):
+            AutoPassBot().try_auto_pass_current_task(object())
+
+    def test_auto_pass_page_precheck_failure_blocks_without_raising(self) -> None:
+        class AutoPassBot(Bot):
+            def __init__(self) -> None:
+                self.auto_match_succeeded = True
+                self.save_results = [{"name": "reagent_save_1", "success": True, "detail": ""}]
+
+            def read_detail_info(self, page: object) -> dict[str, str]:
+                return {"\u5f53\u524d\u6e05\u5355\u53f7": "SJ202607020001"}
+
+            def find_unmatched_reagents_across_all_pages(self, page: object) -> list[dict[str, str]]:
+                raise RuntimeError("header missing")
+
+            def current_list_has_manual_review_item(self, list_number: str) -> tuple[bool, str]:
+                return False, ""
+
+            def click_top_approve_button(self, page: object) -> None:
+                raise AssertionError("Auto-pass should be blocked when page verification fails")
+
+        with patch.dict(os.environ, {"AUTO_PASS": "true"}, clear=False):
+            AutoPassBot().try_auto_pass_current_task(object())
+
 
 class ApprovalSuggestionExportTest(unittest.TestCase):
     def test_save_outputs_keep_latest_list_specific_and_aggregate_files(self) -> None:
@@ -230,6 +262,87 @@ class ApprovalFlowTodoLoopTest(unittest.TestCase):
 
         self.assertEqual(result, [suggestion])
 
+    def test_high_confidence_candidate_maps_rule_category_to_erp_property(self) -> None:
+        bot = Bot()
+        bot.settings = {
+            "approval": {"write_min_confidence": 0.7},
+            "reagent": {
+                "physicochemical_property_options": ["\u6613\u71c3\u7c7b"],
+                "physicochemical_property_aliases": {"\u6613\u71c3\u6db2\u4f53": ["\u6613\u71c3\u7c7b"]},
+            },
+        }
+        suggestion = {
+            "\u6700\u7ec8\u5efa\u8bae\u7c7b\u522b": "\u6613\u71c3\u6db2\u4f53",
+            "\u9700\u4eba\u5de5\u590d\u6838": False,
+            "\u7f6e\u4fe1\u5ea6": 0.76,
+        }
+
+        with patch.dict(os.environ, {}, clear=True):
+            result = bot.high_confidence_write_candidates([suggestion])
+
+        self.assertEqual(result[0]["\u6700\u7ec8\u5efa\u8bae\u7c7b\u522b"], "\u6613\u71c3\u7c7b")
+        self.assertEqual(result[0]["\u89c4\u5219\u5224\u5b9a\u7c7b\u522b"], "\u6613\u71c3\u6db2\u4f53")
+
+    def test_not_recommended_category_maps_to_reject_property_for_write(self) -> None:
+        bot = Bot()
+        bot.settings = {
+            "approval": {"write_min_confidence": 0.7},
+            "reagent": {
+                "physicochemical_property_options": ["\u62d2\u6536\u7c7b"],
+                "physicochemical_property_aliases": {
+                    "\u4e0d\u5efa\u8bae\u63a5\u6536\u7c7b": ["\u62d2\u6536\u7c7b"],
+                },
+            },
+        }
+        suggestion = {
+            "\u6700\u7ec8\u5efa\u8bae\u7c7b\u522b": "\u4e0d\u5efa\u8bae\u63a5\u6536\u7c7b",
+            "\u9700\u4eba\u5de5\u590d\u6838": False,
+            "\u7f6e\u4fe1\u5ea6": 0.9,
+        }
+
+        with patch.dict(os.environ, {}, clear=True):
+            result = bot.high_confidence_write_candidates([suggestion])
+
+        self.assertEqual(result[0]["\u6700\u7ec8\u5efa\u8bae\u7c7b\u522b"], "\u62d2\u6536\u7c7b")
+        self.assertEqual(result[0]["\u89c4\u5219\u5224\u5b9a\u7c7b\u522b"], "\u4e0d\u5efa\u8bae\u63a5\u6536\u7c7b")
+
+    def test_write_failure_recovery_reopens_target_detail_without_old_page_number(self) -> None:
+        class RecoveryBot(Bot):
+            def __init__(self) -> None:
+                self._current_detail_info = {"\u5f53\u524d\u6e05\u5355\u53f7": "SJ202607020001"}
+                self.reopened: list[str] = []
+
+            def current_reagent_page_number(self, page: object) -> str:
+                return "7"
+
+            def goto_reagent_page_number(self, page: object, target_page: object) -> bool:
+                raise AssertionError("write recovery should not restore an old reagent page number")
+
+            def read_detail_info(self, page: object) -> dict[str, str]:
+                return {}
+
+            def read_current_page_reagents(self, page: object) -> list[dict[str, str]]:
+                return []
+
+            def open_task_detail_by_list_number(self, page: object, target_list_number: str) -> bool:
+                self.reopened.append(target_list_number)
+                return True
+
+            def wait_for_reagent_table_ready(self, page: object) -> None:
+                return None
+
+        class FakePage:
+            def reload(self, **kwargs: object) -> None:
+                return None
+
+            def wait_for_timeout(self, timeout: int) -> None:
+                return None
+
+        bot = RecoveryBot()
+
+        self.assertTrue(bot.recover_reagent_detail_page_after_write_failure(FakePage(), "unit test"))
+        self.assertEqual(bot.reopened, ["SJ202607020001"])
+
     def test_direct_business_rule_suggestion_allows_color_standard_without_search(self) -> None:
         bot = Bot()
         engine = RuleEngine.from_excel(ROOT_DIR / "config" / "rules.xlsx")
@@ -310,9 +423,12 @@ class ApprovalFlowTodoLoopTest(unittest.TestCase):
 
     def test_parallel_processing_keeps_table_order_with_direct_rules(self) -> None:
         class OrderedBot(Bot):
-            def __init__(self) -> None:
-                self.settings = {"approval": {"parallel_workers": 3}}
-                self.root_dir = ROOT_DIR
+            def __init__(self, root_dir: Path) -> None:
+                self.settings = {
+                    "paths": {"reagent_memory_sqlite": "data/memory.sqlite"},
+                    "approval": {"parallel_workers": 3},
+                }
+                self.root_dir = root_dir
                 self.stage_logger = StageLogger()
 
             def read_current_page_reagents(self, page: object) -> list[dict[str, str]]:
@@ -346,15 +462,19 @@ class ApprovalFlowTodoLoopTest(unittest.TestCase):
             def add_manual_review_item_from_search_failure(self, *args: object, **kwargs: object) -> None:
                 return None
 
-        bot = OrderedBot()
-        engine = RuleEngine.from_excel(ROOT_DIR / "config" / "rules.xlsx")
+            def add_manual_review_item_from_suggestion(self, *args: object, **kwargs: object) -> None:
+                return None
 
-        suggestions = bot.process_current_unmatched_reagent_page(
-            object(),
-            engine,
-            None,
-            {},
-        )
+        with tempfile.TemporaryDirectory() as tmp:
+            bot = OrderedBot(Path(tmp))
+            engine = RuleEngine.from_excel(ROOT_DIR / "config" / "rules.xlsx")
+
+            suggestions = bot.process_current_unmatched_reagent_page(
+                object(),
+                engine,
+                None,
+                {},
+            )
 
         self.assertEqual([row["\u5e8f\u53f7"] for row in suggestions], ["1", "2", "3"])
 
@@ -486,6 +606,267 @@ class ApprovalFlowTodoLoopTest(unittest.TestCase):
         self.assertEqual(suggestions[0]["\u6700\u7ec8\u5efa\u8bae\u7c7b\u522b"], "\u666e\u901a\u7c7b")
         self.assertFalse(suggestions[0]["\u9700\u4eba\u5de5\u590d\u6838"])
 
+    def test_unknown_packaging_name_forces_unknown_class_before_memory(self) -> None:
+        class UnknownNameBot(Bot):
+            def __init__(self, root_dir: Path) -> None:
+                self.settings = {
+                    "paths": {"reagent_memory_sqlite": "data/memory.sqlite"},
+                    "memory": {"min_confidence": 0.8},
+                    "approval": {"parallel_workers": 3},
+                }
+                self.root_dir = root_dir
+                self.stage_logger = StageLogger()
+                self.review_items: list[tuple[dict[str, str], str]] = []
+
+            def read_current_page_reagents(self, page: object) -> list[dict[str, str]]:
+                return [
+                    {
+                        "\u5e8f\u53f7": "6",
+                        "\u8bd5\u5242\u540d\u79f0": "\u672a\u77e5\u836f\u54c1\uff08\u767d\u74f6\u7ea2\u76d6\uff09",
+                        "CAS\u53f7": "-",
+                        "\u89c4\u683c": "10",
+                        "\u89c4\u683c\u5355\u4f4d": "mL",
+                        "\u7269\u5316\u7279\u6027": "-",
+                    }
+                ]
+
+            def add_manual_review_item(self, reagent, name_result, *, reason: str) -> None:  # type: ignore[no-untyped-def]
+                self.review_items.append((reagent, reason))
+
+            def search_reagents_parallel(self, items: list[dict[str, object]]) -> dict[int, dict[str, object]]:
+                raise AssertionError("unknown packaging names should not be searched")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            memory = ReagentMemory.from_settings(
+                {
+                    "paths": {"reagent_memory_sqlite": "data/memory.sqlite"},
+                    "memory": {"min_confidence": 0.8},
+                },
+                root,
+            )
+            memory.add_record(
+                raw_name="\u672a\u77e5\u836f\u54c1\uff08\u767d\u74f6\u7ea2\u76d6\uff09",
+                standard_name="\u672a\u77e5\u836f\u54c1\uff08\u767d\u74f6\u7ea2\u76d6\uff09",
+                cleaned_name="\u672a\u77e5\u836f\u54c1\uff08\u767d\u74f6\u7ea2\u76d6\uff09",
+                cas="-",
+                final_category="\u5f3a\u53cd\u5e94",
+                confidence=0.95,
+                reason="old bad memory",
+            )
+            bot = UnknownNameBot(root)
+            engine = RuleEngine.from_excel(ROOT_DIR / "config" / "rules.xlsx")
+
+            suggestions = bot.process_current_unmatched_reagent_page(object(), engine, None, {})
+            stored = memory.find_any(raw_name="\u672a\u77e5\u836f\u54c1\uff08\u767d\u74f6\u7ea2\u76d6\uff09")
+
+        self.assertEqual(suggestions[0]["\u6700\u7ec8\u5efa\u8bae\u7c7b\u522b"], "\u672a\u77e5\u7c7b")
+        self.assertFalse(suggestions[0]["\u9700\u4eba\u5de5\u590d\u6838"])
+        self.assertEqual(len(bot.review_items), 0)
+        self.assertEqual(stored["final_category"], "\u672a\u77e5\u7c7b")
+        self.assertEqual(stored["reusable"], 1)
+        self.assertEqual(stored["conflict"], 0)
+
+    def test_memory_url_cas_overrides_and_drops_conflicting_erp_cas(self) -> None:
+        bot = Bot()
+        suggestion = bot.reagent_memory_suggestion(
+            {
+                "\u5e8f\u53f7": "226",
+                "\u8bd5\u5242\u540d\u79f0": "\u5421\u5511-5-\u787c\u9178",
+                "CAS\u53f7": "724710-02-5",
+                "\u89c4\u683c": "1",
+                "\u89c4\u683c\u5355\u4f4d": "g",
+                "\u8bd5\u5242\u6570\u91cf": "1",
+            },
+            {
+                "raw_name": "1H-\u5421\u5511-5-\u787c\u9178",
+                "cleaned_name": "1H-\u5421\u5511-5-\u787c\u9178",
+                "standard_name": "1H-\u5421\u5511-5-\u787c\u9178",
+                "cas": "376584-63-3",
+                "final_category": "\u666e\u901a\u7c7b",
+                "confidence": 0.9,
+                "reason": "unit memory",
+                "url": "https://www.chemsrc.com/en/cas/376584-63-3_727612.html",
+            },
+        )
+
+        self.assertEqual(suggestion["CAS\u53f7"], "")
+        self.assertEqual(suggestion["\u67e5\u8be2\u6765\u6e90"], "reagent_memory")
+        self.assertEqual(suggestion["\u67e5\u8be2URL"], "https://www.chemsrc.com/en/cas/376584-63-3_727612.html")
+        self.assertIn("724710-02-5", suggestion["\u89c4\u5219\u539f\u56e0"])
+        self.assertIn("376584-63-3", suggestion["\u89c4\u5219\u539f\u56e0"])
+
+    def test_unsafe_pharmacopoeia_memory_match_is_disabled(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            memory = ReagentMemory.from_settings(
+                {
+                    "paths": {"reagent_memory_sqlite": "data/memory.sqlite"},
+                    "memory": {"min_confidence": 0.8},
+                },
+                root,
+            )
+            memory.add_record(
+                raw_name="3,4-\u4e8c\u6eb4\u9a6c\u6765\u9170\u4e9a\u80fa",
+                standard_name="\u836f\u5178\u8272\u5ea6\u6807\u51c6\u54c1",
+                cleaned_name="\u836f\u5178\u8272\u5ea6\u6807\u51c6\u54c1",
+                cas="-",
+                final_category="\u666e\u901a\u7c7b",
+                confidence=0.95,
+                reason="\u836f\u5178\u8272\u5ea6\u6807\u51c6\u54c1\u4e1a\u52a1\u89c4\u5219",
+            )
+            row = memory.lookup(raw_name="3,4-\u4e8c\u6eb4\u9a6c\u6765\u9170\u4e9a\u80fa")
+            bot = Bot()
+
+            self.assertFalse(
+                bot.memory_match_is_safe(
+                    {"\u8bd5\u5242\u540d\u79f0": "3,4-\u4e8c\u6eb4\u9a6c\u6765\u9170\u4e9a\u80fa"},
+                    row,
+                )
+            )
+            bot.disable_unsafe_memory_match(
+                memory,
+                row,
+                {"\u8bd5\u5242\u540d\u79f0": "3,4-\u4e8c\u6eb4\u9a6c\u6765\u9170\u4e9a\u80fa"},
+            )
+
+            self.assertIsNone(memory.lookup(raw_name="3,4-\u4e8c\u6eb4\u9a6c\u6765\u9170\u4e9a\u80fa"))
+            disabled = memory.find_any(raw_name="3,4-\u4e8c\u6eb4\u9a6c\u6765\u9170\u4e9a\u80fa")
+            self.assertEqual(disabled["reusable"], 0)
+            self.assertEqual(disabled["conflict"], 1)
+
+    def test_halogen_memory_match_cannot_force_ordinary_class(self) -> None:
+        bot = Bot()
+        row = {
+            "raw_name": "3,4-\u4e8c\u6eb4\u9a6c\u6765\u9170\u4e9a\u80fa",
+            "cleaned_name": "3,4-\u4e8c\u6eb4\u9a6c\u6765\u9170\u4e9a\u80fa",
+            "standard_name": "3,4-\u4e8c\u6eb4\u9a6c\u6765\u9170\u4e9a\u80fa",
+            "final_category": "\u666e\u901a\u7c7b",
+        }
+
+        self.assertFalse(
+            bot.memory_match_is_safe(
+                {"\u8bd5\u5242\u540d\u79f0": "3,4-\u4e8c\u6eb4\u9a6c\u6765\u9170\u4e9a\u80fa"},
+                row,
+            )
+        )
+
+    def test_ordinary_memory_match_is_rechecked_against_current_rules(self) -> None:
+        bot = Bot()
+        row = {
+            "raw_name": "BIOTIN-PEG5-AZIDE",
+            "cleaned_name": "BIOTIN-PEG5-AZIDE",
+            "standard_name": "BIOTIN-PEG5-AZIDE",
+            "final_category": "\u666e\u901a\u7c7b",
+        }
+        engine = RuleEngine.from_structured_excel(ROOT_DIR / "config" / "rules_structured.xlsx")
+
+        self.assertFalse(
+            bot.memory_match_is_safe(
+                {"\u8bd5\u5242\u540d\u79f0": "BIOTIN-PEG5-AZIDE"},
+                row,
+                rule_engine=engine,
+            )
+        )
+
+    def test_reagent_memory_source_is_not_remembered_again(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            memory = ReagentMemory.from_settings(
+                {"paths": {"reagent_memory_sqlite": "data/memory.sqlite"}},
+                root,
+            )
+            bot = Bot()
+            bot.settings = {}
+
+            saved = bot.remember_erp_suggestion(
+                memory,
+                {
+                    "\u8bd5\u5242\u540d\u79f0": "\u6d4b\u8bd5\u8bd5\u5242",
+                    "\u6700\u7ec8\u5efa\u8bae\u7c7b\u522b": "\u666e\u901a\u7c7b",
+                    "\u7f6e\u4fe1\u5ea6": 0.95,
+                    "\u9700\u4eba\u5de5\u590d\u6838": False,
+                    "\u67e5\u8be2\u6765\u6e90": "reagent_memory",
+                },
+            )
+
+            self.assertFalse(saved)
+            self.assertIsNone(memory.lookup(raw_name="\u6d4b\u8bd5\u8bd5\u5242"))
+
+    def test_write_failure_for_reusable_suggestion_skips_manual_review_queue(self) -> None:
+        class WriteFailureBot(Bot):
+            def __init__(self, root_dir: Path) -> None:
+                self.root_dir = root_dir
+                self.settings = {
+                    "paths": {"reagent_memory_sqlite": "data/memory.sqlite"},
+                    "approval": {"write_min_confidence": 0.8},
+                    "reagent": {"physicochemical_property_options": ["普通类"]},
+                }
+                self.review_items: list[tuple[dict[str, str], str]] = []
+
+            def add_manual_review_item(self, reagent, name_result, *, reason: str) -> None:  # type: ignore[no-untyped-def]
+                self.review_items.append((reagent, reason))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bot = WriteFailureBot(root)
+            bot.add_manual_review_item_from_write_failure(
+                {
+                    "\u5e8f\u53f7": "1",
+                    "\u8bd5\u5242\u540d\u79f0": "\u53ef\u4fe1\u8bd5\u5242",
+                    "CAS\u53f7": "123-45-6",
+                    "\u6807\u51c6\u5316\u540d\u79f0": "\u53ef\u4fe1\u8bd5\u5242",
+                    "\u6e05\u6d17\u540e\u540d\u79f0": "\u53ef\u4fe1\u8bd5\u5242",
+                    "\u6700\u7ec8\u5efa\u8bae\u7c7b\u522b": "\u666e\u901a\u7c7b",
+                    "\u7f6e\u4fe1\u5ea6": 0.95,
+                    "\u9700\u4eba\u5de5\u590d\u6838": False,
+                },
+                "saved=False, row shows <empty>",
+            )
+
+            memory = ReagentMemory.from_settings(bot.settings, root)
+            match = memory.lookup(cas="123-45-6")
+
+        self.assertEqual(bot.review_items, [])
+        self.assertIsNotNone(match)
+        assert match is not None
+        self.assertEqual(match["final_category"], "\u666e\u901a\u7c7b")
+        self.assertEqual(match["reusable"], 1)
+
+    def test_write_failure_for_manual_review_suggestion_still_queues_review(self) -> None:
+        class WriteFailureBot(Bot):
+            def __init__(self, root_dir: Path) -> None:
+                self.root_dir = root_dir
+                self.settings = {
+                    "paths": {"reagent_memory_sqlite": "data/memory.sqlite"},
+                    "approval": {"write_min_confidence": 0.8},
+                    "reagent": {"physicochemical_property_options": ["普通类"]},
+                }
+                self.review_items: list[tuple[dict[str, str], str]] = []
+
+            def add_manual_review_item(self, reagent, name_result, *, reason: str) -> None:  # type: ignore[no-untyped-def]
+                self.review_items.append((reagent, reason))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bot = WriteFailureBot(root)
+            bot.add_manual_review_item_from_write_failure(
+                {
+                    "\u5e8f\u53f7": "1",
+                    "\u8bd5\u5242\u540d\u79f0": "\u4f4e\u7f6e\u4fe1\u8bd5\u5242",
+                    "CAS\u53f7": "123-45-6",
+                    "\u6807\u51c6\u5316\u540d\u79f0": "\u4f4e\u7f6e\u4fe1\u8bd5\u5242",
+                    "\u6e05\u6d17\u540e\u540d\u79f0": "\u4f4e\u7f6e\u4fe1\u8bd5\u5242",
+                    "\u6700\u7ec8\u5efa\u8bae\u7c7b\u522b": "\u666e\u901a\u7c7b",
+                    "\u7f6e\u4fe1\u5ea6": 0.5,
+                    "\u9700\u4eba\u5de5\u590d\u6838": True,
+                },
+                "saved=False, row shows <empty>",
+            )
+
+        self.assertEqual(len(bot.review_items), 1)
+        self.assertIn("\u7f51\u9875\u5199\u5165\u5931\u8d25", bot.review_items[0][1])
+
     def test_multi_page_mode_stops_when_sorted_current_page_has_no_unmatched_rows(self) -> None:
         class MultiPageBot(Bot):
             def __init__(self) -> None:
@@ -500,6 +881,9 @@ class ApprovalFlowTodoLoopTest(unittest.TestCase):
                 return True
 
             def sort_property_column_until_unmatched_visible(self, page: object) -> bool:
+                return True
+
+            def stabilize_reagent_detail_after_write_failure(self, page: object) -> bool:
                 return True
 
             def current_reagent_page_number(self, page: object) -> str:
@@ -546,6 +930,9 @@ class ApprovalFlowTodoLoopTest(unittest.TestCase):
                 return True
 
             def sort_property_column_until_unmatched_visible(self, page: object) -> bool:
+                return True
+
+            def stabilize_reagent_detail_after_write_failure(self, page: object) -> bool:
                 return True
 
             def current_reagent_page_number(self, page: object) -> str:

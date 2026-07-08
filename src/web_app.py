@@ -19,7 +19,9 @@ from web_runner import (
     approval_summary,
     artifact_summary,
     confirm_review_item,
+    delete_conflicting_memory,
     delete_memory_record,
+    delete_review_item,
     import_approval_suggestions_to_memory,
     manager,
     memory_summary,
@@ -78,7 +80,9 @@ def api_memory(
     category: str = "",
     reusable: str = "",
     conflict: str = "",
-    limit: int = 200,
+    limit: int = 20,
+    page: int = 1,
+    per_page: int = 20,
 ) -> JSONResponse:
     return JSONResponse(
         memory_summary(
@@ -87,6 +91,8 @@ def api_memory(
             reusable=reusable,
             conflict=conflict,
             limit=limit,
+            page=page,
+            per_page=per_page,
         )
     )
 
@@ -96,6 +102,18 @@ def api_memory_import_suggestions() -> JSONResponse:
     if manager.status().get("running"):
         raise HTTPException(status_code=409, detail="当前自动化任务正在运行，结束后再导入历史审批建议。")
     return JSONResponse(import_approval_suggestions_to_memory())
+
+
+@app.post("/api/memory/delete_conflicting")
+def api_memory_delete_conflicting() -> JSONResponse:
+    if manager.status().get("running"):
+        raise HTTPException(status_code=409, detail="当前自动化任务正在运行，结束后再批量删除试剂记忆库记录。")
+    return JSONResponse(delete_conflicting_memory())
+
+
+@app.post("/api/memory/delete_conflicting_unverified")
+def api_memory_delete_conflicting_unverified() -> JSONResponse:
+    return api_memory_delete_conflicting()
 
 
 @app.post("/api/memory/{record_id}")
@@ -231,6 +249,17 @@ async def api_review_confirm(request: Request) -> JSONResponse:
         raise HTTPException(status_code=409, detail="当前自动化任务正在运行，结束后再确认人工复核项。")
     payload = await request.json()
     return JSONResponse(confirm_review_item(payload))
+
+
+@app.delete("/api/review")
+async def api_review_delete(request: Request) -> JSONResponse:
+    if manager.status().get("running"):
+        raise HTTPException(status_code=409, detail="当前自动化任务正在运行，结束后再删除人工复核项。")
+    payload = await request.json()
+    result = delete_review_item(payload)
+    if not result.get("deleted"):
+        raise HTTPException(status_code=404, detail=result.get("message") or "人工复核项不存在。")
+    return JSONResponse(result)
 
 
 @app.get("/artifacts/{filename}")

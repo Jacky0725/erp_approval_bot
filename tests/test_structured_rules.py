@@ -48,7 +48,7 @@ class StructuredRulesTest(unittest.TestCase):
                 )
 
                 self.assertEqual(result["final_category"], "不建议接收类")
-                self.assertTrue(result["need_manual_review"])
+                self.assertFalse(result["need_manual_review"])
 
     def test_reject_examples_from_structured_rules(self) -> None:
         for name in ["黑索今", "RDX", "太安", "PETN", "奥克托今", "HMX", "医疗废物", "放射性元素", "氚", "镭", "铀"]:
@@ -62,7 +62,7 @@ class StructuredRulesTest(unittest.TestCase):
                 )
 
                 self.assertEqual(result["final_category"], "不建议接收类")
-                self.assertTrue(result["need_manual_review"])
+                self.assertFalse(result["need_manual_review"])
 
     def test_lead_mercury_thallium_beryllium_examples_are_reject_class(self) -> None:
         for name in [
@@ -91,7 +91,7 @@ class StructuredRulesTest(unittest.TestCase):
                 )
 
                 self.assertEqual(result["final_category"], "不建议接收类")
-                self.assertTrue(result["need_manual_review"])
+                self.assertFalse(result["need_manual_review"])
 
     def test_perchloric_acid_concentration_rules(self) -> None:
         low = self.engine.classify({"reagent_name": "70%\u9ad8\u6c2f\u9178", "allow_default_normal": True})
@@ -114,6 +114,19 @@ class StructuredRulesTest(unittest.TestCase):
 
         self.assertEqual(result["final_category"], "\u6eb4\u7898\u7c7b")
 
+    def test_indole_derivative_matches_odor_class(self) -> None:
+        result = self.engine.classify(
+            {
+                "reagent_name": "4-\u6c28\u57fa-N-\u7532\u57fa\u5432\u54da",
+                "standard_name": "4-amino-1-methylindole",
+                "text": "Chemsrc matched 4-amino-1-methylindole. Flash point 152.2 C.",
+                "allow_default_normal": True,
+            }
+        )
+
+        self.assertEqual(result["final_category"], "\u5f02\u5473")
+        self.assertFalse(result["need_manual_review"])
+
     def test_bromine_iodine_does_not_match_raw_text_noise(self) -> None:
         result = self.engine.classify(
             {
@@ -127,6 +140,17 @@ class StructuredRulesTest(unittest.TestCase):
         )
 
         self.assertNotEqual(result["final_category"], "\u6eb4\u7898\u7c7b")
+
+    def test_normal_category_ignores_halogen_price_note(self) -> None:
+        result = self.engine.classify(
+            {
+                "reagent_name": "\u672a\u77e5\u4e2d\u95f4\u4f53",
+                "text": "\u666e\u901a\u7c7b\u89e3\u91ca\u5907\u6ce8\uff1a\u542b\u6c1f\u6c2f\u6eb4\u7898\u7c7b\uff08\u5364\u4ee3\u70c3\u53ca\u884d\u751f\u7269\u9664\u5916\uff09\u4ef7\u683c\u7ffb\u500d",
+                "allow_default_normal": False,
+            }
+        )
+
+        self.assertNotEqual(result["final_category"], "\u666e\u901a\u7c7b")
 
     def test_hydrochloride_salt_does_not_match_special_acid(self) -> None:
         result = self.engine.classify(

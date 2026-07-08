@@ -7,6 +7,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from reagent_name_rules import UNKNOWN_CATEGORY, unknown_reagent_name_reason
+
 
 RAW_NAME_KEY = "\u8bd5\u5242\u540d\u79f0"
 CAS_KEY = "CAS\u53f7"
@@ -123,10 +125,40 @@ class ReagentMemory:
             row = conn.execute(sql, params).fetchone()
             return dict(row) if row else None
 
+    def find_by_id(self, record_id: int) -> dict[str, Any] | None:
+        self._ensure_schema()
+        with closing(self._connect()) as conn:
+            row = conn.execute(
+                "SELECT * FROM reagent_memory WHERE id = ?",
+                (int(record_id),),
+            ).fetchone()
+            return dict(row) if row else None
+
     def remember_suggestion(self, suggestion: dict[str, Any]) -> bool:
         final_category = str(suggestion.get(FINAL_CATEGORY_KEY) or "").strip()
         if not final_category:
             return False
+        unknown_reason = unknown_reagent_name_reason(
+            suggestion.get(RAW_NAME_KEY, ""),
+            suggestion.get(CLEANED_NAME_KEY, ""),
+            suggestion.get(STANDARD_NAME_KEY, ""),
+        )
+        if unknown_reason:
+            return self.add_record(
+                raw_name=str(suggestion.get(RAW_NAME_KEY) or "").strip(),
+                cleaned_name=str(suggestion.get(CLEANED_NAME_KEY) or "").strip(),
+                standard_name=str(suggestion.get(STANDARD_NAME_KEY) or "").strip(),
+                cas=str(suggestion.get(CAS_KEY) or "").strip(),
+                final_category=UNKNOWN_CATEGORY,
+                confidence=1.0,
+                reason=unknown_reason,
+                source=str(suggestion.get(SOURCE_KEY) or "").strip() or "approval_flow",
+                url=str(suggestion.get(URL_KEY) or "").strip(),
+                specification=str(suggestion.get(SPECIFICATION_KEY) or "").strip(),
+                unit=str(suggestion.get(UNIT_KEY) or "").strip(),
+                need_manual_review=False,
+                manual_verified=True,
+            )
         if self._truthy(suggestion.get(MANUAL_REVIEW_KEY)):
             return False
         confidence = self._float(suggestion.get(CONFIDENCE_KEY), 0.0)
@@ -157,8 +189,73 @@ class ReagentMemory:
         reusable: str = "",
         conflict: str = "",
         limit: int = 200,
+        offset: int = 0,
     ) -> list[dict[str, Any]]:
         self._ensure_schema()
+        where_sql, params = self._record_filter_sql(
+            query=query,
+            category=category,
+            reusable=reusable,
+            conflict=conflict,
+        )
+        safe_limit = max(1, min(1000, int(limit or 200)))
+        safe_offset = max(0, int(offset or 0))
+        sql = f"""
+            SELECT *
+            FROM reagent_memory
+            WHERE {where_sql}
+            ORDER BY updated_at DESC, id DESC
+            LIMIT ?
+            OFFSET ?
+        """
+        params.extend([safe_limit, safe_offset])
+        with closing(self._connect()) as conn:
+            rows = conn.execute(sql, params).fetchall()
+            return [dict(row) for row in rows]
+
+    def count_records(
+        self,
+        *,
+        query: str = "",
+        category: str = "",
+        reusable: str = "",
+        conflict: str = "",
+    ) -> int:
+        self._ensure_schema()
+        where_sql, params = self._record_filter_sql(
+            query=query,
+            category=category,
+            reusable=reusable,
+            conflict=conflict,
+        )
+        with closing(self._connect()) as conn:
+            row = conn.execute(
+                f"SELECT COUNT(*) AS count FROM reagent_memory WHERE {where_sql}",
+                params,
+            ).fetchone()
+            return int(row["count"] if row else 0)
+
+    def list_categories(self) -> list[str]:
+        self._ensure_schema()
+        with closing(self._connect()) as conn:
+            rows = conn.execute(
+                """
+                SELECT DISTINCT final_category
+                FROM reagent_memory
+                WHERE final_category IS NOT NULL AND final_category != ''
+                ORDER BY final_category
+                """
+            ).fetchall()
+            return [str(row["final_category"]) for row in rows if str(row["final_category"] or "")]
+
+    def _record_filter_sql(
+        self,
+        *,
+        query: str = "",
+        category: str = "",
+        reusable: str = "",
+        conflict: str = "",
+    ) -> tuple[str, list[Any]]:
         clauses = ["1 = 1"]
         params: list[Any] = []
         query = str(query or "").strip()
@@ -186,19 +283,7 @@ class ReagentMemory:
         if conflict in {"0", "1"}:
             clauses.append("conflict = ?")
             params.append(int(conflict))
-
-        safe_limit = max(1, min(1000, int(limit or 200)))
-        sql = f"""
-            SELECT *
-            FROM reagent_memory
-            WHERE {' AND '.join(clauses)}
-            ORDER BY updated_at DESC, id DESC
-            LIMIT ?
-        """
-        params.append(safe_limit)
-        with closing(self._connect()) as conn:
-            rows = conn.execute(sql, params).fetchall()
-            return [dict(row) for row in rows]
+        return " AND ".join(clauses), params
 
     def update_record(self, record_id: int, updates: dict[str, Any]) -> dict[str, Any]:
         self._ensure_schema()
@@ -228,6 +313,8 @@ class ReagentMemory:
                 cleaned[key] = int(self._truthy(cleaned[key]))
         if "confidence" in cleaned:
             cleaned["confidence"] = self._float(cleaned["confidence"], 0.0)
+        if "final_category" in cleaned:
+            cleaned["final_category"] = self._normalize_final_category(cleaned["final_category"])
 
         for name_field, key_field in (
             ("raw_name", "raw_name_key"),
@@ -237,6 +324,24 @@ class ReagentMemory:
         ):
             if name_field in cleaned:
                 cleaned[key_field] = self._norm(cleaned[name_field])
+
+        current = self.find_by_id(record_id) or {}
+        raw_name = cleaned.get("raw_name", current.get("raw_name", ""))
+        cleaned_name = cleaned.get("cleaned_name", current.get("cleaned_name", ""))
+        standard_name = cleaned.get("standard_name", current.get("standard_name", ""))
+        unknown_reason = unknown_reagent_name_reason(raw_name, cleaned_name, standard_name)
+        if unknown_reason:
+            previous_reason = str(cleaned.get("reason") or current.get("reason") or "").strip()
+            cleaned["final_category"] = UNKNOWN_CATEGORY
+            cleaned["confidence"] = 1.0
+            cleaned["reusable"] = int(self._truthy(cleaned.get("reusable", True)))
+            cleaned["conflict"] = 0
+            cleaned["need_manual_review"] = 0
+            cleaned["manual_verified"] = 1
+            if unknown_reason not in previous_reason:
+                cleaned["reason"] = f"{previous_reason}\n{unknown_reason}".strip()
+            else:
+                cleaned["reason"] = previous_reason
 
         cleaned["updated_at"] = self._now()
         assignments = ", ".join(f"{column} = ?" for column in cleaned)
@@ -255,6 +360,30 @@ class ReagentMemory:
             with conn:
                 cursor = conn.execute("DELETE FROM reagent_memory WHERE id = ?", (int(record_id),))
                 return cursor.rowcount > 0
+
+    def delete_conflicting_records(self) -> int:
+        self._ensure_schema()
+        with closing(self._connect()) as conn:
+            with conn:
+                cursor = conn.execute(
+                    """
+                    DELETE FROM reagent_memory
+                    WHERE conflict = 1
+                    """
+                )
+                return int(cursor.rowcount or 0)
+
+    def count_conflicting_records(self) -> int:
+        self._ensure_schema()
+        with closing(self._connect()) as conn:
+            row = conn.execute(
+                """
+                SELECT COUNT(*) AS count
+                FROM reagent_memory
+                WHERE conflict = 1
+                """
+            ).fetchone()
+            return int(row["count"] if row else 0)
 
     def add_record(
         self,
@@ -275,14 +404,30 @@ class ReagentMemory:
         track_conflicts: bool = True,
     ) -> bool:
         self._ensure_schema()
-        conflict = track_conflicts and self._has_conflict(
-            cas=cas,
-            standard_name=standard_name,
-            cleaned_name=cleaned_name,
-            raw_name=raw_name,
-            final_category=final_category,
+        final_category = self._normalize_final_category(final_category)
+        unknown_reason = unknown_reagent_name_reason(raw_name, cleaned_name, standard_name)
+        if unknown_reason:
+            final_category = UNKNOWN_CATEGORY
+            confidence = max(confidence, 1.0)
+            reason = f"{reason}\n{unknown_reason}".strip()
+            need_manual_review = False
+            manual_verified = True
+        if unknown_reason:
+            conflict = False
+        else:
+            conflict = track_conflicts and self._has_conflict(
+                cas=cas,
+                standard_name=standard_name,
+                cleaned_name=cleaned_name,
+                raw_name=raw_name,
+                final_category=final_category,
+            )
+        reusable = bool(
+            final_category
+            and not need_manual_review
+            and not conflict
+            and confidence >= self.min_confidence
         )
-        reusable = bool(final_category and not need_manual_review and not conflict and confidence >= self.min_confidence)
         now = self._now()
         with closing(self._connect()) as conn:
             with conn:
@@ -421,6 +566,13 @@ class ReagentMemory:
     @staticmethod
     def _norm(value: Any) -> str:
         return " ".join(str(value or "").strip().lower().split())
+
+    @staticmethod
+    def _normalize_final_category(value: Any) -> str:
+        category = str(value or "").strip()
+        if category == "不建议接收类":
+            return "拒收类"
+        return category
 
     @staticmethod
     def _now() -> str:

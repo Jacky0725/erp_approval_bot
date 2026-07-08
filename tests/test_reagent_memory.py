@@ -122,6 +122,122 @@ class ReagentMemoryTest(unittest.TestCase):
             self.assertEqual(match["cas"], "222-22-2")
             self.assertEqual(match["final_category"], "易燃类")
 
+    def test_not_recommended_category_is_stored_as_reject_class(self) -> None:
+        tmp, memory = self.make_memory()
+        with tmp:
+            memory.add_record(
+                raw_name="reject sample",
+                final_category="不建议接收类",
+                confidence=0.95,
+            )
+
+            row = memory.lookup(raw_name="reject sample")
+
+            self.assertIsNotNone(row)
+            assert row is not None
+            self.assertEqual(row["final_category"], "拒收类")
+
+    def test_update_normalizes_not_recommended_category_to_reject_class(self) -> None:
+        tmp, memory = self.make_memory()
+        with tmp:
+            memory.add_record(
+                raw_name="reject edit",
+                final_category="普通类",
+                confidence=0.95,
+            )
+            row = memory.lookup(raw_name="reject edit")
+            assert row is not None
+
+            updated = memory.update_record(row["id"], {"final_category": "不建议接收类"})
+
+            self.assertEqual(updated["final_category"], "拒收类")
+
+    def test_unknown_packaging_names_are_reusable_unknown_class(self) -> None:
+        tmp, memory = self.make_memory()
+        with tmp:
+            memory.add_record(
+                raw_name="Lot#L2107277",
+                cleaned_name="Lot#L2107277",
+                standard_name="Lot#L2107277",
+                cas="-",
+                final_category="\u5f3a\u53cd\u5e94",
+                confidence=0.95,
+                reason="old imported result",
+            )
+            row = memory.find_any(raw_name="Lot#L2107277")
+
+            self.assertEqual(row["final_category"], "\u672a\u77e5\u7c7b")
+            self.assertEqual(row["reusable"], 1)
+            self.assertEqual(row["need_manual_review"], 0)
+            self.assertEqual(row["conflict"], 0)
+            self.assertIsNotNone(memory.lookup(raw_name="Lot#L2107277"))
+
+    def test_update_record_keeps_unknown_packaging_names_reusable(self) -> None:
+        tmp, memory = self.make_memory()
+        with tmp:
+            memory.add_record(raw_name="normal", final_category="普通类", confidence=0.9)
+            row = memory.lookup(raw_name="normal")
+            assert row is not None
+
+            updated = memory.update_record(
+                row["id"],
+                {
+                    "raw_name": "未知药品（白瓶红盖）",
+                    "cleaned_name": "未知药品（白瓶红盖）",
+                    "standard_name": "未知药品（白瓶红盖）",
+                    "final_category": "强反应",
+                    "reusable": True,
+                    "conflict": False,
+                    "need_manual_review": False,
+                    "manual_verified": True,
+                },
+            )
+
+            self.assertEqual(updated["final_category"], "未知类")
+            self.assertEqual(updated["reusable"], 1)
+            self.assertEqual(updated["conflict"], 0)
+            self.assertEqual(updated["need_manual_review"], 0)
+            self.assertEqual(updated["manual_verified"], 1)
+
+    def test_list_records_supports_pagination_and_count(self) -> None:
+        tmp, memory = self.make_memory()
+        with tmp:
+            for index in range(25):
+                memory.add_record(
+                    raw_name=f"paged-{index:02d}",
+                    final_category="普通类",
+                    confidence=0.9,
+                    source="unit_test",
+                )
+
+            self.assertEqual(memory.count_records(), 25)
+            first_page = memory.list_records(limit=20, offset=0)
+            second_page = memory.list_records(limit=20, offset=20)
+
+            self.assertEqual(len(first_page), 20)
+            self.assertEqual(len(second_page), 5)
+            self.assertNotEqual(first_page[0]["id"], second_page[0]["id"])
+
+    def test_delete_conflicting_records_removes_manual_confirmed_too(self) -> None:
+        tmp, memory = self.make_memory()
+        with tmp:
+            memory.add_record(raw_name="delete-me", final_category="普通类", confidence=0.9)
+            delete_row = memory.list_records(query="delete-me")[0]
+            memory.update_record(delete_row["id"], {"conflict": True, "manual_verified": False})
+
+            memory.add_record(raw_name="keep-confirmed", final_category="普通类", confidence=0.9)
+            keep_row = memory.list_records(query="keep-confirmed")[0]
+            memory.update_record(keep_row["id"], {"conflict": True, "manual_verified": True})
+
+            memory.add_record(raw_name="keep-normal", final_category="普通类", confidence=0.9)
+
+            self.assertEqual(memory.count_conflicting_records(), 2)
+            self.assertEqual(memory.delete_conflicting_records(), 2)
+
+            self.assertIsNone(memory.find_any(raw_name="delete-me"))
+            self.assertIsNone(memory.find_any(raw_name="keep-confirmed"))
+            self.assertIsNotNone(memory.find_any(raw_name="keep-normal"))
+
 
 if __name__ == "__main__":
     unittest.main()

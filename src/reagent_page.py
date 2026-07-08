@@ -15,17 +15,43 @@ class ReagentPageMixin:
         target_name = "\u8bd5\u5242\u5224\u5b9a"
 
         print(f"Opening menu: {menu_name}")
-        self.click_visible_text(page, menu_name)
+        try:
+            self.click_visible_text(page, menu_name)
+        except RuntimeError as error:
+            if self.page_contains_text(page, target_name):
+                print(f"Menu click skipped because target page is already visible: {target_name}")
+            else:
+                raise error
         page.wait_for_timeout(1000)
 
         print(f"Opening page: {target_name}")
-        self.click_visible_text(page, target_name)
+        try:
+            self.click_visible_text(page, target_name)
+        except RuntimeError as error:
+            if self.page_contains_text(page, target_name):
+                print(f"Page click skipped because target page is already visible: {target_name}")
+            else:
+                raise error
         self.wait_for_table_ready(page)
 
         try:
             page.wait_for_selector(f"text={target_name}", timeout=10000)
         except TimeoutError:
             print(f"Target page text was not confirmed: {target_name}")
+
+    @staticmethod
+    def page_contains_text(page: Page, text: str) -> bool:
+        try:
+            return bool(
+                page.evaluate(
+                    """
+                    (wanted) => (document.body?.innerText || '').includes(wanted)
+                    """,
+                    text,
+                )
+            )
+        except Error:
+            return False
 
     def export_todo_tasks(self, page: Page) -> None:
         self.enter_reagent_judgement_page(page)

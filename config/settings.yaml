@@ -51,11 +51,19 @@ reagent:
     - "\u7279\u6b8a\u9178"
     - "\u91cd\u91d1\u5c5e\u7c7b"
     - "\u5e38\u89c4\u78b1"
+    - "\u62d2\u6536\u7c7b"
+    - "\u672a\u77e5\u7c7b"
   physicochemical_property_aliases:
     "\u5f3a\u53cd\u5e94\u6027":
       - "\u5f3a\u53cd\u5e94"
     "\u6613\u71c3\u6db2\u4f53":
       - "\u6613\u71c3\u7c7b"
+    "\u4e0d\u5efa\u8bae\u63a5\u6536\u7c7b":
+      - "\u62d2\u6536\u7c7b"
+    "\u62d2\u6536\u7c7b":
+      - "\u62d2\u6536\u7c7b"
+    "\u672a\u77e5\u7c7b":
+      - "\u672a\u77e5\u7c7b"
 
 selectors:
   username_input: "#userName"

@@ -46,7 +46,12 @@ class ApprovalWriter:
             if not self._open_property_dropdown(page, row):
                 continue
             if self._select_property_option(page, candidate_name):
-                return True
+                self.commit_property_selection(page)
+                if row is None or self._row_property_selection_matches(page, row, candidate_name):
+                    return True
+                self._commit_row_property_selection(page, row)
+                if self._row_property_selection_matches(page, row, candidate_name):
+                    return True
         self.dismiss_open_dropdown(page)
         return False
 
@@ -120,6 +125,7 @@ class ApprovalWriter:
         selectors = (self.settings or {}).get("selectors", {})
         configured = str(selectors.get("property_select", "") or "").strip()
         candidates = []
+        self._scroll_property_column_into_view(page)
         if row is not None:
             candidates.extend(
                 [
@@ -190,6 +196,170 @@ class ApprovalWriter:
 
             if not ApprovalWriter._scroll_open_dropdown(page):
                 break
+        return False
+
+    @staticmethod
+    def _scroll_property_column_into_view(page: Page) -> bool:
+        try:
+            return bool(
+                page.evaluate(
+                    """
+                    () => {
+                      const wantedHeader = '物化特性';
+                      const visible = (node) => {
+                        const rect = node.getBoundingClientRect();
+                        const style = window.getComputedStyle(node);
+                        return rect.width > 0 && rect.height > 0
+                          && style.visibility !== 'hidden'
+                          && style.display !== 'none';
+                      };
+                      const text = (node) => (node.innerText || node.textContent || '').replace(/\\s+/g, '').trim();
+                      const header = Array.from(document.querySelectorAll('thead th'))
+                        .filter((node) => text(node).includes(wantedHeader))
+                        .sort((a, b) => b.getBoundingClientRect().width - a.getBoundingClientRect().width)[0];
+                      const scrollBody = Array.from(document.querySelectorAll('.ant-table-body'))
+                        .filter(visible)
+                        .sort((a, b) => b.getBoundingClientRect().width - a.getBoundingClientRect().width)[0];
+                      if (!header || !scrollBody) return false;
+
+                      const bodyRect = scrollBody.getBoundingClientRect();
+                      const headerRect = header.getBoundingClientRect();
+                      const headerCenter = headerRect.left + headerRect.width / 2;
+                      if (headerCenter > bodyRect.left + 80 && headerCenter < bodyRect.right - 80) {
+                        return true;
+                      }
+
+                      scrollBody.scrollLeft += headerCenter - (bodyRect.left + bodyRect.width * 0.55);
+                      scrollBody.dispatchEvent(new Event('scroll', { bubbles: true }));
+                      return true;
+                    }
+                    """
+                )
+            )
+        except (Error, TimeoutError):
+            return False
+
+    @staticmethod
+    def commit_property_selection(page: Page) -> None:
+        try:
+            page.wait_for_timeout(150)
+            page.keyboard.press("Enter")
+            page.wait_for_timeout(150)
+            page.keyboard.press("Tab")
+            page.wait_for_timeout(250)
+        except (Error, TimeoutError):
+            try:
+                page.mouse.click(20, 20)
+                page.wait_for_timeout(150)
+            except (Error, TimeoutError):
+                pass
+
+    @staticmethod
+    def _commit_row_property_selection(page: Page, row: Locator) -> None:
+        identity = ApprovalWriter._row_identity(row)
+        try:
+            page.evaluate(
+                """
+                ({ rowKey, top, height }) => {
+                  const visible = (node) => {
+                    const rect = node.getBoundingClientRect();
+                    const style = window.getComputedStyle(node);
+                    return rect.width > 0 && rect.height > 0
+                      && style.visibility !== 'hidden'
+                      && style.display !== 'none';
+                  };
+                  const rowCenter = Number.isFinite(top)
+                    ? top + (Number.isFinite(height) ? height / 2 : 0)
+                    : null;
+                  const sameRow = (tr) => {
+                    if (!tr) return false;
+                    if (rowKey && tr.getAttribute('data-row-key') === rowKey) return true;
+                    if (Number.isFinite(rowCenter)) {
+                      const rect = tr.getBoundingClientRect();
+                      return Math.abs((rect.top + rect.height / 2) - rowCenter) < 12;
+                    }
+                    return false;
+                  };
+                  const rowNode = Array.from(document.querySelectorAll('tbody tr.ant-table-row')).find(sameRow);
+                  const input = rowNode
+                    ? Array.from(rowNode.querySelectorAll('input[role="combobox"], .ant-select-selection-search-input')).find(visible)
+                    : null;
+                  if (input) {
+                    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+                    input.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', bubbles: true, cancelable: true }));
+                    input.blur();
+                  }
+                  const active = document.activeElement;
+                  if (active && active.blur) active.blur();
+                  document.body.click();
+                }
+                """,
+                identity,
+            )
+            page.wait_for_timeout(300)
+        except (Error, TimeoutError):
+            try:
+                page.keyboard.press("Enter")
+                page.wait_for_timeout(150)
+                page.mouse.click(20, 20)
+                page.wait_for_timeout(150)
+            except (Error, TimeoutError):
+                pass
+
+    @staticmethod
+    def _row_property_selection_matches(page: Page, row: Locator, candidate_name: str) -> bool:
+        identity = ApprovalWriter._row_identity(row)
+        try:
+            for _ in range(8):
+                matched = bool(
+                    page.evaluate(
+                        """
+                        ({ rowKey, top, height, candidateName }) => {
+                          const visible = (node) => {
+                            const rect = node.getBoundingClientRect();
+                            const style = window.getComputedStyle(node);
+                            return rect.width > 0 && rect.height > 0
+                              && style.visibility !== 'hidden'
+                              && style.display !== 'none';
+                          };
+                          const text = (node) => (node.innerText || node.textContent || '').replace(/\\s+/g, ' ').trim();
+                          const rowCenter = Number.isFinite(top)
+                            ? top + (Number.isFinite(height) ? height / 2 : 0)
+                            : null;
+                          const sameRow = (tr) => {
+                            if (!tr) return false;
+                            if (rowKey && tr.getAttribute('data-row-key') === rowKey) return true;
+                            if (Number.isFinite(rowCenter)) {
+                              const rect = tr.getBoundingClientRect();
+                              return Math.abs((rect.top + rect.height / 2) - rowCenter) < 12;
+                            }
+                            return false;
+                          };
+                          const rows = Array.from(document.querySelectorAll('tbody tr.ant-table-row')).filter(sameRow);
+                          for (const tr of rows) {
+                            const selects = Array.from(tr.querySelectorAll('.ant-select')).filter(visible);
+                            for (const select of selects) {
+                              const selected = text(select);
+                              if (selected && selected.includes(candidateName) && !selected.includes('选择搜索')) {
+                                return true;
+                              }
+                            }
+                            const rowText = text(tr);
+                            if (rowText.includes(candidateName) && !rowText.includes('选择搜索')) {
+                              return true;
+                            }
+                          }
+                          return false;
+                        }
+                        """,
+                        {**identity, "candidateName": candidate_name},
+                    )
+                )
+                if matched:
+                    return True
+                page.wait_for_timeout(150)
+        except (Error, TimeoutError):
+            return False
         return False
 
     @staticmethod
