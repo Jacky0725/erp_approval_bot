@@ -472,6 +472,9 @@ class RuleEngine:
         if category == "不建议接收类":
             hits.extend(RuleEngine._reject_metal_name_hits(reagent_info))
 
+        if category == "\u91cd\u91d1\u5c5e\u7c7b":
+            hits.extend(RuleEngine._heavy_metal_name_hits(reagent_info))
+
         if category == "\u7279\u6b8a\u9178" and RuleEngine._is_hydrochloride_salt(reagent_info):
             return []
 
@@ -502,6 +505,20 @@ class RuleEngine:
         for token in ("铅", "汞", "铊", "铍"):
             if token in name_text:
                 hits.append(f"含{token}")
+        return list(dict.fromkeys(hits))
+
+    @staticmethod
+    def _heavy_metal_name_hits(reagent_info: dict[str, Any]) -> list[str]:
+        parts = []
+        for key in ("name", "reagent_name", "chemical_name", "standard_name", "cleaned_name"):
+            value = reagent_info.get(key)
+            if value:
+                parts.append(str(value))
+        name_text = "".join(parts)
+        hits = []
+        for token in ("\u9521", "\u954d", "\u94b4", "\u9511", "\u516d\u4ef7\u94ec", "\u9549", "\u94cb"):
+            if token in name_text:
+                hits.append(f"\u542b{token}")
         return list(dict.fromkeys(hits))
 
     @staticmethod

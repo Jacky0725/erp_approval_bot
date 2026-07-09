@@ -1123,6 +1123,7 @@ def import_approval_suggestions_to_memory(root_dir: Path = ROOT_DIR) -> dict[str
         "candidate_unmapped_category": 0,
         "skipped_missing_identity": 0,
         "skipped_duplicate_source_row": 0,
+        "skipped_memory_source": 0,
         "errors": [],
         "files": [],
         "scanned": 0,
@@ -1148,6 +1149,10 @@ def import_approval_suggestions_to_memory(root_dir: Path = ROOT_DIR) -> dict[str
             cleaned_name = str(suggestion.get("清洗后名称") or "").strip()
             standard_name = str(suggestion.get("标准化名称") or "").strip()
             cas = str(suggestion.get("CAS号") or "").strip()
+            query_source = str(suggestion.get("\u67e5\u8be2\u6765\u6e90") or "").strip()
+            if query_source == "reagent_memory":
+                stats["skipped_memory_source"] += 1
+                continue
             source_key = (cas.lower(), standard_name.lower(), cleaned_name.lower(), raw_name.lower(), final_category)
 
             if source_key in seen_source_rows:

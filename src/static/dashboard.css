@@ -1025,6 +1025,54 @@ tr:last-child td {
   font-size: 12px;
 }
 
+.memory-table tbody tr.memory-row-dirty {
+  background: #fff9ed;
+}
+
+.memory-action-cell {
+  position: sticky;
+  right: 0;
+  z-index: 1;
+  min-width: 132px;
+  background: #fff;
+  box-shadow: -8px 0 14px rgba(35, 54, 72, 0.06);
+}
+
+tbody tr:hover .memory-action-cell,
+.memory-row-dirty .memory-action-cell {
+  background: inherit;
+}
+
+.memory-action-cell button {
+  width: 96px;
+  min-width: 96px;
+  height: 32px;
+  margin-bottom: 6px;
+  padding: 0 10px;
+  white-space: nowrap;
+}
+
+.memory-row-status {
+  display: block;
+  min-height: 16px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.3;
+}
+
+.memory-row-status.unsaved {
+  color: #a66a00;
+}
+
+.memory-row-status.saved {
+  color: var(--green);
+}
+
+.memory-row-status.failed {
+  color: var(--red);
+}
+
 .mini-check {
   display: flex;
   grid-template-columns: none;

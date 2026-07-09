@@ -315,13 +315,14 @@ class ApprovalFlowMixin:
                     }
                 for key in write_result.get("attempted", set()):
                     write_attempts_by_key[key] = write_attempts_by_key.get(key, 0) + 1
-                handled_reagent_keys.update(write_result.get("handled", set()))
-                for key in write_result.get("failed", set()):
+                failed_keys = set(write_result.get("failed", set()))
+                handled_reagent_keys.update(set(write_result.get("handled", set())) - failed_keys)
+                for key in failed_keys:
                     if write_attempts_by_key.get(key, 0) >= self.max_reagent_write_attempts():
                         handled_reagent_keys.add(key)
                         print(f"Write retry limit reached for reagent key: {key}")
 
-                if write_result.get("failed"):
+                if failed_keys:
                     print(
                         "Multi-page mode will re-read the current reagent page after write failure "
                         "before moving to the next page."
@@ -338,6 +339,17 @@ class ApprovalFlowMixin:
                         print(
                             "Multi-page mode stopped because the physicochemical property header "
                             f"was not available after write recovery: {error}"
+                        )
+                        break
+                    continue
+                if self.approval_write_mode() == "multi_page" and write_result.get("attempted"):
+                    print("Multi-page mode saved one reagent; re-sorting and re-reading the current page.")
+                    try:
+                        self.sort_property_column_until_unmatched_visible(page)
+                    except Exception as error:
+                        print(
+                            "Multi-page mode stopped because sorting after a successful save failed: "
+                            f"{error}"
                         )
                         break
                     continue
@@ -995,6 +1007,22 @@ class ApprovalFlowMixin:
         rule_engine: RuleEngine,
     ) -> dict[str, Any] | None:
         reagent_name = reagent.get("\u8bd5\u5242\u540d\u79f0", "")
+        ambiguous_acid_reason = self.ambiguous_acid_reason(reagent_name)
+        if ambiguous_acid_reason:
+            classification = {
+                "final_category": "\u5e38\u89c4\u9178",
+                "matched_categories": ["\u5e38\u89c4\u9178"],
+                "reason": ambiguous_acid_reason,
+                "confidence": 1.0,
+                "need_manual_review": False,
+            }
+            return self._direct_business_suggestion(
+                reagent,
+                reagent_name,
+                classification,
+                ambiguous_acid_reason,
+            )
+
         kit_reason = self.product_kit_normal_reason(reagent_name)
         if kit_reason:
             classification = {
@@ -1004,7 +1032,7 @@ class ApprovalFlowMixin:
                 "confidence": 0.9,
                 "need_manual_review": False,
             }
-            return self._direct_normal_suggestion(reagent, reagent_name, classification, kit_reason)
+            return self._direct_business_suggestion(reagent, reagent_name, classification, kit_reason)
 
         classification = rule_engine.classify(
             {
@@ -1019,12 +1047,23 @@ class ApprovalFlowMixin:
             return None
         if "\u836f\u5178\u8272\u5ea6" not in str(classification.get("reason", "")):
             return None
-        return self._direct_normal_suggestion(
+        return self._direct_business_suggestion(
             reagent,
             reagent_name,
             classification,
             "\u547d\u4e2d\u836f\u5178\u8272\u5ea6\u6807\u51c6\u54c1\u4e1a\u52a1\u89c4\u5219",
         )
+
+    @staticmethod
+    def ambiguous_acid_reason(reagent_name: str) -> str:
+        normalized = str(reagent_name or "").replace(" ", "").lower()
+        if not normalized:
+            return ""
+        has_uncertain_prefix = any(token in normalized for token in ("\u7591\u4f3c", "\u53ef\u80fd", "\u6216", "/"))
+        has_common_acid = "\u786b\u9178" in normalized or "\u78f7\u9178" in normalized
+        if has_uncertain_prefix and has_common_acid:
+            return "\u8bd5\u5242\u540d\u79f0\u5305\u542b\u201c\u7591\u4f3c/\u53ef\u80fd/\u6216\u201d\u4e14\u6307\u5411\u786b\u9178\u6216\u78f7\u9178\uff0c\u6309\u4e1a\u52a1\u89c4\u5219\u76f4\u63a5\u5224\u5b9a\u4e3a\u5e38\u89c4\u9178\u3002"
+        return ""
 
     @staticmethod
     def product_kit_normal_reason(reagent_name: str) -> str:
@@ -1059,7 +1098,7 @@ class ApprovalFlowMixin:
             return "\u8bd5\u5242\u540d\u79f0\u547d\u4e2d\u8bd5\u5242\u76d2/\u6807\u51c6\u6db2/\u5546\u54c1\u8bd5\u5242\u4e1a\u52a1\u89c4\u5219\uff0c\u6309\u666e\u901a\u7c7b\u5904\u7406\u3002"
         return ""
 
-    def _direct_normal_suggestion(
+    def _direct_business_suggestion(
         self,
         reagent: dict[str, str],
         reagent_name: str,
@@ -1087,7 +1126,7 @@ class ApprovalFlowMixin:
             "name_normalization": name_result,
         }
         extracted = {
-            "suggested_categories": ["\u666e\u901a\u7c7b"],
+            "suggested_categories": [classification.get("final_category", "")],
             "evidence": [classification.get("reason", "")],
             "confidence": 0.95,
         }
@@ -1196,7 +1235,11 @@ class ApprovalFlowMixin:
         elif mode in {"single_page", "generate_library"}:
             pass
         elif mode == "multi_page":
-            print(f"Multi-page write mode will process all {len(candidates)} writable candidate(s) on this page.")
+            print(
+                "Multi-page write mode uses single-row transactions; "
+                f"1 of {len(candidates)} writable candidate(s) will be saved before re-reading the page."
+            )
+            candidates = candidates[:1]
         else:
             print(f"Unknown APPROVAL_WRITE_MODE={mode}; no webpage fields will be changed.")
             return result
@@ -1333,11 +1376,16 @@ class ApprovalFlowMixin:
             if verified:
                 result["handled"].add(work_key)
                 consecutive_failures = 0
-                if writer.any_row_is_editing(page):
-                    writer.cancel_any_edit(page)
+                if not self.settle_after_successful_write(page, writer, sequence):
+                    result["failed"].add(work_key)
+                    print(
+                        f"Page edit state did not settle after saving sequence {sequence}; "
+                        "the current page will be stabilized before continuing."
+                    )
+                    if mode == "multi_page":
+                        break
             else:
                 result["failed"].add(work_key)
-                result["handled"].add(work_key)
                 self.add_manual_review_item_from_write_failure(
                     suggestion,
                     last_failure_detail or f"could not write {category}",
@@ -1345,8 +1393,8 @@ class ApprovalFlowMixin:
                 consecutive_failures += 1
                 if mode == "multi_page":
                     print(
-                        "Stopping this multi-page write round after queueing the failed reagent for manual review; "
-                        "the page will be re-sorted and re-read."
+                        "Stopping this multi-page write round after a failed webpage write; "
+                        "the failed reagent was recorded according to its suggestion confidence and the page will be re-sorted/re-read."
                     )
                     if not self.stabilize_reagent_detail_after_write_failure(page):
                         print("Stopping this multi-page write round because the page could not be stabilized.")
@@ -1460,6 +1508,22 @@ class ApprovalFlowMixin:
         if writer.cancel_any_edit(page):
             return True
         return self.recover_reagent_detail_page_after_write_failure(page, "existing edit row before write")
+
+    def settle_after_successful_write(self, page: Page, writer: ApprovalWriter, sequence: str) -> bool:
+        writer.dismiss_open_dropdown(page)
+        try:
+            self.wait_for_reagent_table_ready(page)
+        except Exception as error:
+            print(f"Reagent table was not ready immediately after saving sequence {sequence}: {error}")
+        page.wait_for_timeout(500)
+        for _ in range(10):
+            if not writer.any_row_is_editing(page):
+                return True
+            page.wait_for_timeout(250)
+        print(f"Edit controls are still visible after saving sequence {sequence}; cancelling before next row.")
+        writer.cancel_any_edit(page)
+        page.wait_for_timeout(300)
+        return not writer.any_row_is_editing(page)
 
     def cleanup_failed_write(
         self,

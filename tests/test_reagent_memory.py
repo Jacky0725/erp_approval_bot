@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 import tempfile
 import unittest
+from contextlib import closing
 from pathlib import Path
 
 
@@ -83,6 +84,106 @@ class ReagentMemoryTest(unittest.TestCase):
                 )
             )
             self.assertIsNone(memory.lookup(raw_name="same"))
+
+    def test_placeholder_cas_does_not_match_unrelated_memory(self) -> None:
+        tmp, memory = self.make_memory()
+        with tmp:
+            memory.add_record(
+                raw_name="PMSF solution",
+                cleaned_name="PMSF solution",
+                standard_name="PMSF",
+                cas="-",
+                final_category="test-category",
+                confidence=0.95,
+            )
+
+            self.assertIsNone(memory.lookup(cas="-", raw_name="unknown bottle"))
+            self.assertIsNone(memory.lookup(cas="-"))
+            self.assertEqual(memory.lookup(raw_name="PMSF solution")["standard_name"], "PMSF")
+
+    def test_duplicate_identity_updates_existing_record(self) -> None:
+        tmp, memory = self.make_memory()
+        with tmp:
+            self.assertTrue(
+                memory.add_record(
+                    raw_name="old reagent name",
+                    cleaned_name="old clean",
+                    standard_name="old standard",
+                    cas="123-45-6",
+                    final_category="normal",
+                    confidence=0.85,
+                    reason="first",
+                    source="unit_test",
+                )
+            )
+            self.assertTrue(
+                memory.add_record(
+                    raw_name="new reagent name",
+                    cleaned_name="new clean",
+                    standard_name="new standard",
+                    cas="123-45-6",
+                    final_category="normal",
+                    confidence=0.95,
+                    reason="second",
+                    source="unit_test_2",
+                )
+            )
+
+            self.assertEqual(memory.count_records(), 1)
+            row = memory.lookup(cas="123-45-6")
+            assert row is not None
+            self.assertEqual(row["raw_name"], "new reagent name")
+            self.assertEqual(row["standard_name"], "new standard")
+            self.assertEqual(row["confidence"], 0.95)
+            self.assertIn("first", row["reason"])
+            self.assertIn("second", row["reason"])
+
+    def test_duplicate_name_without_cas_updates_existing_record(self) -> None:
+        tmp, memory = self.make_memory()
+        with tmp:
+            memory.add_record(
+                raw_name="name only",
+                cleaned_name="shared clean",
+                standard_name="shared standard",
+                final_category="normal",
+                confidence=0.9,
+            )
+            memory.add_record(
+                raw_name="name only changed",
+                cleaned_name="shared clean",
+                standard_name="shared standard",
+                final_category="normal",
+                confidence=0.91,
+            )
+
+            self.assertEqual(memory.count_records(), 1)
+            row = memory.lookup(standard_name="shared standard")
+            assert row is not None
+            self.assertEqual(row["raw_name"], "name only changed")
+
+    def test_conflicting_identity_keeps_real_category_conflict(self) -> None:
+        tmp, memory = self.make_memory()
+        with tmp:
+            self.assertTrue(
+                memory.add_record(
+                    raw_name="same cas one",
+                    cas="456-78-9",
+                    final_category="normal",
+                    confidence=0.9,
+                )
+            )
+            self.assertFalse(
+                memory.add_record(
+                    raw_name="same cas two",
+                    cas="456-78-9",
+                    final_category="flammable",
+                    confidence=0.9,
+                )
+            )
+
+            self.assertEqual(memory.count_records(), 2)
+            self.assertEqual(memory.count_conflicting_records(), 2)
+            self.assertIsNone(memory.lookup(cas="456-78-9"))
 
     def test_list_and_update_record_refresh_lookup_keys(self) -> None:
         tmp, memory = self.make_memory()
@@ -172,6 +273,25 @@ class ReagentMemoryTest(unittest.TestCase):
             self.assertEqual(row["conflict"], 0)
             self.assertIsNotNone(memory.lookup(raw_name="Lot#L2107277"))
 
+    def test_generic_unknown_name_is_reusable_unknown_class(self) -> None:
+        tmp, memory = self.make_memory()
+        with tmp:
+            memory.add_record(
+                raw_name="\u672a\u77e5\u7c89\u72b6\u7269",
+                cleaned_name="\u672a\u77e5\u7c89\u72b6\u7269",
+                standard_name="\u672a\u77e5\u7c89\u72b6\u7269",
+                cas="-",
+                final_category="\u666e\u901a\u7c7b",
+                confidence=0.95,
+                reason="old imported result",
+            )
+            row = memory.find_any(raw_name="\u672a\u77e5\u7c89\u72b6\u7269")
+
+            self.assertEqual(row["final_category"], "\u672a\u77e5\u7c7b")
+            self.assertEqual(row["reusable"], 1)
+            self.assertEqual(row["need_manual_review"], 0)
+            self.assertEqual(row["conflict"], 0)
+
     def test_update_record_keeps_unknown_packaging_names_reusable(self) -> None:
         tmp, memory = self.make_memory()
         with tmp:
@@ -237,6 +357,46 @@ class ReagentMemoryTest(unittest.TestCase):
             self.assertIsNone(memory.find_any(raw_name="delete-me"))
             self.assertIsNone(memory.find_any(raw_name="keep-confirmed"))
             self.assertIsNotNone(memory.find_any(raw_name="keep-normal"))
+
+    def test_deduplicate_conflicting_records_keeps_true_conflicts_only(self) -> None:
+        tmp, memory = self.make_memory()
+        with tmp:
+            memory.add_record(raw_name="dup-a", cas="111-22-3", final_category="普通类", confidence=0.9)
+            memory.add_record(raw_name="dup-b", cas="111-22-3", final_category="易燃类", confidence=0.9)
+            with closing(memory._connect()) as conn:  # noqa: SLF001 - focused database cleanup regression test.
+                with conn:
+                    base = conn.execute(
+                        "SELECT * FROM reagent_memory WHERE cas_key = ? AND final_category = ? LIMIT 1",
+                        ("111-22-3", "普通类"),
+                    ).fetchone()
+                    assert base is not None
+                    values = dict(base)
+                    values.pop("id")
+                    columns = ", ".join(values)
+                    placeholders = ", ".join("?" for _ in values)
+                    conn.execute(
+                        f"INSERT INTO reagent_memory ({columns}) VALUES ({placeholders})",
+                        list(values.values()),
+                    )
+
+            result = memory.deduplicate_conflicting_records()
+
+            self.assertEqual(result["deleted"], 1)
+            self.assertEqual(result["cleared"], 0)
+            self.assertEqual(memory.count_records(), 2)
+            self.assertEqual(memory.count_conflicting_records(), 2)
+
+            memory.delete_conflicting_records()
+            memory.add_record(raw_name="false-conflict", cas="222-33-4", final_category="普通类", confidence=0.9)
+            row = memory.lookup(cas="222-33-4")
+            assert row is not None
+            memory.update_record(row["id"], {"conflict": True, "reusable": False})
+
+            result = memory.deduplicate_conflicting_records()
+
+            self.assertEqual(result["cleared"], 1)
+            self.assertEqual(memory.count_conflicting_records(), 0)
+            self.assertIsNotNone(memory.lookup(cas="222-33-4"))
 
 
 if __name__ == "__main__":

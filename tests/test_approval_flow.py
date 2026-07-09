@@ -362,6 +362,26 @@ class ApprovalFlowTodoLoopTest(unittest.TestCase):
         self.assertFalse(suggestion["\u9700\u4eba\u5de5\u590d\u6838"])
         self.assertEqual(suggestion["\u67e5\u8be2\u6765\u6e90"], "business_rule")
 
+    def test_direct_business_rule_suggestion_maps_ambiguous_sulfuric_or_phosphoric_acid(self) -> None:
+        bot = Bot()
+        engine = RuleEngine.from_excel(ROOT_DIR / "config" / "rules.xlsx")
+
+        suggestion = bot.direct_business_rule_suggestion(
+            {
+                "\u5e8f\u53f7": "87",
+                "\u8bd5\u5242\u540d\u79f0": "\u7591\u4f3c\u786b\u9178\u6216\u78f7\u9178",
+                "CAS\u53f7": "7664-93-9/7664-38-2",
+            },
+            engine,
+        )
+
+        self.assertIsNotNone(suggestion)
+        assert suggestion is not None
+        self.assertEqual(suggestion["\u6700\u7ec8\u5efa\u8bae\u7c7b\u522b"], "\u5e38\u89c4\u9178")
+        self.assertEqual(suggestion["\u7f6e\u4fe1\u5ea6"], 1.0)
+        self.assertFalse(suggestion["\u9700\u4eba\u5de5\u590d\u6838"])
+        self.assertIn("\u786b\u9178\u6216\u78f7\u9178", suggestion["\u89c4\u5219\u539f\u56e0"])
+
     def test_direct_business_rule_suggestion_allows_product_kit_without_search(self) -> None:
         bot = Bot()
         engine = RuleEngine.from_excel(ROOT_DIR / "config" / "rules.xlsx")
@@ -981,6 +1001,64 @@ class ApprovalFlowTodoLoopTest(unittest.TestCase):
 
         self.assertEqual(bot.apply_calls, 2)
         self.assertEqual([row["\u5e8f\u53f7"] for row in result], ["1"])
+
+    def test_multi_page_mode_retries_failed_item_even_if_returned_as_handled(self) -> None:
+        class RetryBot(Bot):
+            def __init__(self) -> None:
+                self.settings = {"approval": {"write_mode": "multi_page", "write_max_attempts": 2}}
+                self.stage_logger = StageLogger()
+                self.apply_calls = 0
+
+            def goto_first_reagent_page(self, page: object) -> bool:
+                return True
+
+            def sort_property_column_until_unmatched_visible(self, page: object) -> bool:
+                return True
+
+            def stabilize_reagent_detail_after_write_failure(self, page: object) -> bool:
+                return True
+
+            def current_reagent_page_number(self, page: object) -> str:
+                return "1"
+
+            def current_page_unmatched_reagents(self, page: object) -> list[dict[str, str]]:
+                return [
+                    {
+                        "\u5e8f\u53f7": "1",
+                        "\u8bd5\u5242\u540d\u79f0": "retry-me",
+                        "CAS\u53f7": "-",
+                        "\u7269\u5316\u7279\u6027": "-",
+                    }
+                ]
+
+            def process_current_unmatched_reagent_page(self, *args: object, **kwargs: object) -> list[dict[str, object]]:
+                return [
+                    {
+                        "\u5e8f\u53f7": "1",
+                        "\u8bd5\u5242\u540d\u79f0": "retry-me",
+                        "CAS\u53f7": "-",
+                        "\u6700\u7ec8\u5efa\u8bae\u7c7b\u522b": "\u666e\u901a\u7c7b",
+                    }
+                ]
+
+            def apply_approval_write_mode(self, page: object, suggestions: list[dict[str, object]]) -> dict[str, set[str]]:
+                self.apply_calls += 1
+                key = self.suggestion_work_key(suggestions[0])
+                if self.apply_calls == 1:
+                    return {"attempted": {key}, "handled": {key}, "failed": {key}}
+                return {"attempted": {key}, "handled": {key}, "failed": set()}
+
+            def write_partial_approval_suggestions(self, suggestions: list[dict[str, object]]) -> None:
+                return None
+
+            def click_next_reagent_page(self, page: object) -> tuple[bool, bool]:
+                return False, True
+
+        bot = RetryBot()
+
+        bot.process_unmatched_reagent_pages(object(), None, None, {})
+
+        self.assertEqual(bot.apply_calls, 2)
 
 
 if __name__ == "__main__":

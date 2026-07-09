@@ -331,13 +331,28 @@ class WebReviewConfirmationTest(unittest.TestCase):
                     }
                 ]
             ).to_excel(log_dir / "approval_suggestions_20260616_110830.xlsx", index=False)
+            pd.DataFrame(
+                [
+                    {
+                        "\u8bd5\u5242\u540d\u79f0": "memory sourced",
+                        "\u6e05\u6d17\u540e\u540d\u79f0": "wrong clean",
+                        "\u6807\u51c6\u5316\u540d\u79f0": "wrong standard",
+                        "CAS\u53f7": "-",
+                        "\u6700\u7ec8\u5efa\u8bae\u7c7b\u522b": "\u666e\u901a\u7c7b",
+                        "\u7f6e\u4fe1\u5ea6": "0.95",
+                        "\u9700\u4eba\u5de5\u590d\u6838": "False",
+                        "\u67e5\u8be2\u6765\u6e90": "reagent_memory",
+                    }
+                ]
+            ).to_excel(log_dir / "approval_suggestions_memory_source.xlsx", index=False)
 
             stats = import_approval_suggestions_to_memory(root)
 
-            self.assertEqual(stats["scanned"], 4)
+            self.assertEqual(stats["scanned"], 5)
             self.assertEqual(stats["imported"], 2)
             self.assertEqual(stats["candidate_manual_review"], 1)
             self.assertEqual(stats["candidate_low_confidence"], 1)
+            self.assertEqual(stats["skipped_memory_source"], 1)
             self.assertEqual(memory_summary(query="可信试剂", root_dir=root)["rows"], 1)
             self.assertEqual(memory_summary(query="历史时间戳试剂", root_dir=root)["rows"], 1)
             manual_candidate = memory_summary(query="人工复核试剂", root_dir=root)["preview"][0]

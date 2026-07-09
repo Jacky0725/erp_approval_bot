@@ -114,6 +114,19 @@ class StructuredRulesTest(unittest.TestCase):
 
         self.assertEqual(result["final_category"], "\u6eb4\u7898\u7c7b")
 
+    def test_tin_compound_matches_heavy_metal_class(self) -> None:
+        result = self.engine.classify(
+            {
+                "reagent_name": "\u4e09\u6c1f\u7532\u78fa\u9178\u9521",
+                "standard_name": "\u4e09\u6c1f\u7532\u78fa\u9178\u9521(II)",
+                "text": "\u4e09\u6c1f\u7532\u78fa\u9178\u9521",
+                "allow_default_normal": True,
+            }
+        )
+
+        self.assertEqual(result["final_category"], "\u91cd\u91d1\u5c5e\u7c7b")
+        self.assertFalse(result["need_manual_review"])
+
     def test_indole_derivative_matches_odor_class(self) -> None:
         result = self.engine.classify(
             {

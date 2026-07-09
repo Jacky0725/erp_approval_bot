@@ -7,6 +7,7 @@ from typing import Any
 UNKNOWN_CATEGORY = "未知类"
 
 UNKNOWN_REAGENT_NAME_PATTERNS = (
+    "\u672a\u77e5",
     "未知药品",
     "未知成分",
     "自制化学品",

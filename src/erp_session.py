@@ -162,6 +162,7 @@ class ErpSessionMixin:
             print("Table loading state was not fully settled; capturing current page.")
 
     def click_visible_text(self, page: Page, text: str) -> None:
+        self.dismiss_transient_overlays(page)
         candidates = [
             page.get_by_text(text, exact=True),
             page.locator(f"span:has-text('{text}')"),
@@ -176,12 +177,82 @@ class ErpSessionMixin:
                 for index in range(count):
                     item = locator.nth(index)
                     if item.is_visible():
-                        item.click()
+                        item.click(timeout=3000)
                         return
             except Exception:
                 continue
 
+        if self.click_text_by_dom(page, text):
+            return
+
         raise RuntimeError(f"Could not find visible text to click: {text}")
+
+    @staticmethod
+    def dismiss_transient_overlays(page: Page) -> None:
+        try:
+            page.keyboard.press("Escape")
+            page.wait_for_timeout(120)
+        except Exception:
+            pass
+        try:
+            page.evaluate(
+                """
+                () => {
+                  const visible = (node) => {
+                    const rect = node.getBoundingClientRect();
+                    const style = window.getComputedStyle(node);
+                    return rect.width > 0 && rect.height > 0
+                      && style.visibility !== 'hidden'
+                      && style.display !== 'none';
+                  };
+                  for (const node of document.querySelectorAll('.ant-drawer-close, .ant-modal-close')) {
+                    if (visible(node)) node.click();
+                  }
+                }
+                """
+            )
+            page.wait_for_timeout(150)
+        except Exception:
+            pass
+
+    @staticmethod
+    def click_text_by_dom(page: Page, text: str) -> bool:
+        try:
+            box = page.evaluate(
+                """
+                (wanted) => {
+                  const visible = (node) => {
+                    const rect = node.getBoundingClientRect();
+                    const style = window.getComputedStyle(node);
+                    return rect.width > 0 && rect.height > 0
+                      && style.visibility !== 'hidden'
+                      && style.display !== 'none';
+                  };
+                  const textOf = (node) => (node.innerText || node.textContent || '').replace(/\\s+/g, ' ').trim();
+                  const nodes = Array.from(document.querySelectorAll('li, a, span, div, button'))
+                    .filter((node) => visible(node) && textOf(node).includes(wanted));
+                  nodes.sort((a, b) => {
+                    const at = textOf(a) === wanted ? 0 : 1;
+                    const bt = textOf(b) === wanted ? 0 : 1;
+                    if (at !== bt) return at - bt;
+                    return a.getBoundingClientRect().width - b.getBoundingClientRect().width;
+                  });
+                  const node = nodes[0];
+                  if (!node) return null;
+                  node.scrollIntoView({block: 'center', inline: 'center'});
+                  const rect = node.getBoundingClientRect();
+                  return {x: rect.left + rect.width / 2, y: rect.top + rect.height / 2, text: textOf(node)};
+                }
+                """,
+                text,
+            )
+            if not box:
+                return False
+            page.mouse.click(float(box["x"]), float(box["y"]))
+            page.wait_for_timeout(250)
+            return True
+        except Exception:
+            return False
 
     def login(self, page: Page, username: str, password: str, log_dir: Path) -> None:
         selectors = self.settings.get("selectors", {})

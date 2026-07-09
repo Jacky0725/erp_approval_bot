@@ -1039,8 +1039,8 @@
           <td>${escapeHtml(row.id)}</td>
           <td><input class="memory-cas" value="${escapeHtml(row.cas)}"></td>
           <td><input class="memory-raw-name" value="${escapeHtml(row.raw_name)}"></td>
-          <td><input class="memory-cleaned-name" value="${escapeHtml(row.cleaned_name)}"></td>
-          <td><input class="memory-standard-name" value="${escapeHtml(row.standard_name)}"></td>
+          <td><input class="memory-cleaned-name" title="可直接修改，保存后用于后续记忆库匹配" value="${escapeHtml(row.cleaned_name)}"></td>
+          <td><input class="memory-standard-name" title="可直接修改，保存后用于后续记忆库匹配" value="${escapeHtml(row.standard_name)}"></td>
           <td><select class="memory-category">${categoryOptions}</select></td>
           <td><input class="memory-confidence" value="${escapeHtml(row.confidence)}"></td>
           <td>
@@ -1049,13 +1049,24 @@
             <label class="mini-check"><input type="checkbox" class="memory-manual" ${boolValue(row.manual_verified) ? "checked" : ""}>人工确认</label>
           </td>
           <td><textarea class="memory-reason">${escapeHtml(row.reason)}</textarea></td>
-          <td>
+          <td class="memory-action-cell">
             <button type="button" class="memory-save">保存</button>
             <button type="button" class="memory-delete danger-button">删除</button>
+            <span class="memory-row-status"></span>
           </td>
         `;
         tr.querySelector(".memory-save").addEventListener("click", () => saveMemoryRow(tr));
         tr.querySelector(".memory-delete").addEventListener("click", () => deleteMemoryRow(tr));
+        tr.querySelectorAll("input, select, textarea").forEach((field) => {
+          field.addEventListener("input", () => markMemoryRowDirty(tr));
+          field.addEventListener("change", () => markMemoryRowDirty(tr));
+          field.addEventListener("keydown", (event) => {
+            if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
+              event.preventDefault();
+              saveMemoryRow(tr);
+            }
+          });
+        });
         const reusableCheck = tr.querySelector(".memory-reusable");
         reusableCheck.addEventListener("change", () => {
           if (!reusableCheck.checked) return;
@@ -1095,6 +1106,11 @@
     async function saveMemoryRow(tr) {
       const recordId = tr.dataset.id;
       const payload = memoryRowPayload(tr);
+      const button = tr.querySelector(".memory-save");
+      const status = tr.querySelector(".memory-row-status");
+      button.disabled = true;
+      status.textContent = "保存中...";
+      status.className = "memory-row-status";
       const response = await fetch(`/api/memory/${recordId}`, {
         method: "POST",
         headers: {"Content-Type": "application/json"},
@@ -1102,11 +1118,28 @@
       });
       const result = await response.json();
       if (!response.ok || !result.updated) {
+        button.disabled = false;
+        status.textContent = "保存失败";
+        status.className = "memory-row-status failed";
         alert(result.detail || "记忆库保存失败。");
         return false;
       }
+      status.textContent = "已保存";
+      status.className = "memory-row-status saved";
+      tr.classList.remove("memory-row-dirty");
       await refreshMemory();
       return true;
+    }
+
+    function markMemoryRowDirty(tr) {
+      tr.classList.add("memory-row-dirty");
+      const status = tr.querySelector(".memory-row-status");
+      if (status) {
+        status.textContent = "未保存";
+        status.className = "memory-row-status unsaved";
+      }
+      const button = tr.querySelector(".memory-save");
+      if (button) button.disabled = false;
     }
 
     function memoryRowPayload(tr) {
