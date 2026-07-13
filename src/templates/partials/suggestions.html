@@ -1,0 +1,50 @@
+    <section class="panel suggestions-panel" id="suggestions">
+      <div class="panel-title">
+        <div>
+          <h2>审批建议结果</h2>
+          <p id="suggestionMeta">读取 data/logs/approval_suggestions.xlsx</p>
+        </div>
+        <div id="categoryTags" class="tag-row"></div>
+      </div>
+      <div class="table-wrap suggestion-table-wrap">
+        <table class="suggestion-table">
+          <thead>
+            <tr>
+              <th>序号</th>
+              <th>试剂名称</th>
+              <th>CAS号</th>
+              <th>标准名称</th>
+              <th>查询来源</th>
+              <th>建议类别</th>
+              <th>置信度</th>
+              <th>复核</th>
+            </tr>
+          </thead>
+          <tbody id="suggestionTable">
+            <tr class="table-empty-row">
+              <td colspan="8">
+                <div class="table-empty-state">
+                  <strong>暂无建议结果</strong>
+                  <span>生成审批建议后，结果会显示在这里。</span>
+                </div>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="workspace-grid">
+<section class="panel inspector" id="evidence">
+        <div class="panel-title">
+          <div>
+            <h2>判定证据</h2>
+            <p>点击审批建议表中的任意记录，在这里查看网站、LLM 与规则判定摘要。</p>
+          </div>
+        </div>
+        <div id="evidenceBox" class="evidence-box">
+          <p>暂无建议结果。</p>
+        </div>
+      </section>
+
+</section>

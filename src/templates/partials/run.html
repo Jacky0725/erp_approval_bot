@@ -1,0 +1,96 @@
+    <section class="workspace-grid">
+      <section class="panel run-panel" id="run">
+        <div class="panel-title">
+          <div>
+            <h2>运行控制</h2>
+            <p>启动任务会打开 Playwright 浏览器；保存模式会写入网页，但不会点击顶部“通过”，除非 AUTO_PASS 安全门全部满足。</p>
+          </div>
+        </div>
+        <form id="runForm">
+          <input type="hidden" name="target_list_numbers" value="">
+          <div class="run-step">
+            <div class="run-step-index">1</div>
+            <div>
+              <h3>选择待办清单</h3>
+              <p>先读取 ERP 待办，再选择本次要处理的清单。</p>
+            </div>
+          </div>
+          <div class="todo-picker">
+            <div class="todo-picker-head">
+              <div>
+                <strong>待办清单</strong>
+                <span id="todoMeta">点击“获取最新清单号”读取 ERP 待审批列表。</span>
+              </div>
+              <div class="button-row compact">
+                <button type="button" data-action="todo_export" class="primary todo-fetch-button">获取最新清单号</button>
+                <button type="button" id="selectAllTodos">全选</button>
+                <button type="button" id="clearTodos">清空</button>
+              </div>
+            </div>
+            <div id="todoListPicker" class="todo-list-picker">
+              <p>暂无待办清单缓存。</p>
+            </div>
+          </div>
+          <div class="run-step">
+            <div class="run-step-index">2</div>
+            <div>
+              <h3>设置执行参数</h3>
+              <p>控制写入范围、置信度门槛和安全开关。</p>
+            </div>
+          </div>
+          <div class="run-options">
+            <div class="form-row">
+              <label>
+                写入模式
+                <select name="approval_write_mode">
+                  <option value="disabled">disabled - 只生成建议</option>
+                  <option value="test_one">test_one - 单条填写测试</option>
+                  <option value="save_one">save_one - 单条保存</option>
+                  <option value="single_page">single_page - 当前页保存</option>
+                  <option value="multi_page">multi_page - 全清单分页保存</option>
+                  <option value="generate_library">generate_library - 保存并生成试剂库</option>
+                </select>
+              </label>
+              <label>
+                最低置信度
+                <input name="approval_write_min_confidence" value="{{ runtime.approval_write_min_confidence }}">
+              </label>
+            </div>
+            <div class="switches">
+              <label class="check"><input type="checkbox" name="process_all_todos" value="true"> 未勾选清单时处理全部待办</label>
+              <label class="inline-field">最多处理 <input class="small-input" name="process_all_todos_max" value="50"></label>
+              <label class="check danger-check"><input type="checkbox" name="auto_pass" value="true"> AUTO_PASS</label>
+            </div>
+          </div>
+          <div class="run-step">
+            <div class="run-step-index">3</div>
+            <div>
+              <h3>启动任务</h3>
+              <p>主操作用于生成建议；运行控制和调试采集分组放置。</p>
+            </div>
+          </div>
+          <div class="run-actions">
+            <div class="run-action-group run-action-primary">
+              <span>主操作</span>
+              <div class="button-row">
+                <button type="button" data-action="suggestions" class="primary">生成审批建议</button>
+              </div>
+            </div>
+            <div class="run-action-group">
+              <span>运行控制</span>
+              <div class="button-row">
+                <button type="button" id="stopRunButton" class="danger-button">停止运行</button>
+                <button type="button" id="restartRunButton">重启程序</button>
+              </div>
+            </div>
+            <div class="run-action-group">
+              <span>调试采集</span>
+              <div class="button-row">
+                <button type="button" data-action="judgement_capture">采集试剂判定页</button>
+                <button type="button" data-action="debug_capture">采集首页</button>
+              </div>
+            </div>
+          </div>
+        </form>
+      </section>
+    </section>

@@ -43,21 +43,132 @@ app = FastAPI(title="试剂审批自动化控制台")
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 templates = Jinja2Templates(directory=TEMPLATES_DIR)
 
+PAGE_DEFS = {
+    "overview": {
+        "path": "/",
+        "label": "总览",
+        "title": "试剂判定工作台",
+        "description": "查看关键指标、流程进度和当前运行摘要。",
+    },
+    "run": {
+        "path": "/run",
+        "label": "运行控制",
+        "title": "运行控制",
+        "description": "启动自动化任务，查看运行状态和判定证据。",
+    },
+    "settings": {
+        "path": "/settings",
+        "label": "基础设置",
+        "title": "基础设置",
+        "description": "维护 ERP、LLM、写入模式和默认安全选项。",
+    },
+    "suggestions": {
+        "path": "/suggestions",
+        "label": "审批建议",
+        "title": "审批建议",
+        "description": "查看建议结果，并核对网站、LLM 与规则判定证据。",
+    },
+    "review": {
+        "path": "/review",
+        "label": "人工复核",
+        "title": "人工复核",
+        "description": "处理需要人工确认的审批建议。",
+    },
+    "memory": {
+        "path": "/memory",
+        "label": "试剂记忆库",
+        "title": "试剂记忆库",
+        "description": "搜索、修正和复用高可信历史判定。",
+    },
+    "artifacts": {
+        "path": "/artifacts",
+        "label": "产物下载",
+        "title": "产物下载",
+        "description": "下载截图、HTML、Excel 和运行产物。",
+    },
+    "logs": {
+        "path": "/logs",
+        "label": "运行日志",
+        "title": "运行日志",
+        "description": "查看最近的任务输出和诊断信息。",
+    },
+}
 
-@app.get("/", response_class=HTMLResponse)
-def dashboard(request: Request) -> HTMLResponse:
+
+def dashboard_context(request: Request, active_page: str) -> dict:
+    page = PAGE_DEFS.get(active_page, PAGE_DEFS["overview"])
+    runtime = runtime_config_snapshot()
+    return {
+        "request": request,
+        "active_page": active_page,
+        "page": page,
+        "pages": PAGE_DEFS,
+        "runtime": runtime,
+        "status": manager.status(),
+        "approval": approval_summary(),
+        "artifacts": artifact_summary(),
+        "review_queue": review_queue_summary(),
+        "todo_tasks": todo_tasks_summary(),
+        "dashboard_data": {
+            "activePage": active_page,
+            "runtime": runtime,
+            "reviewDecisionOptions": runtime.get("review_decision_options") or [],
+            "llmProviderOptions": runtime.get("llm_provider_options") or [],
+            "currentLlm": {
+                "provider": runtime.get("llm_provider") or "",
+                "baseUrl": runtime.get("llm_base_url") or "",
+                "model": runtime.get("llm_model") or "",
+            },
+        },
+    }
+
+
+def render_dashboard(request: Request, active_page: str) -> HTMLResponse:
     return templates.TemplateResponse(
         request=request,
         name="dashboard.html",
-        context={
-            "runtime": runtime_config_snapshot(),
-            "status": manager.status(),
-            "approval": approval_summary(),
-            "artifacts": artifact_summary(),
-            "review_queue": review_queue_summary(),
-            "todo_tasks": todo_tasks_summary(),
-        },
+        context=dashboard_context(request, active_page),
     )
+
+
+@app.get("/", response_class=HTMLResponse)
+def dashboard(request: Request) -> HTMLResponse:
+    return render_dashboard(request, "overview")
+
+
+@app.get("/run", response_class=HTMLResponse)
+def run_page(request: Request) -> HTMLResponse:
+    return render_dashboard(request, "run")
+
+
+@app.get("/settings", response_class=HTMLResponse)
+def settings_page(request: Request) -> HTMLResponse:
+    return render_dashboard(request, "settings")
+
+
+@app.get("/suggestions", response_class=HTMLResponse)
+def suggestions_page(request: Request) -> HTMLResponse:
+    return render_dashboard(request, "suggestions")
+
+
+@app.get("/review", response_class=HTMLResponse)
+def review_page(request: Request) -> HTMLResponse:
+    return render_dashboard(request, "review")
+
+
+@app.get("/memory", response_class=HTMLResponse)
+def memory_page(request: Request) -> HTMLResponse:
+    return render_dashboard(request, "memory")
+
+
+@app.get("/artifacts", response_class=HTMLResponse)
+def artifacts_page(request: Request) -> HTMLResponse:
+    return render_dashboard(request, "artifacts")
+
+
+@app.get("/logs", response_class=HTMLResponse)
+def logs_page(request: Request) -> HTMLResponse:
+    return render_dashboard(request, "logs")
 
 
 @app.get("/api/status")

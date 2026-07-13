@@ -1,0 +1,84 @@
+    <section class="panel settings-panel" id="settings">
+      <div class="panel-title">
+        <div>
+          <h2>配置项</h2>
+          <p>保存后写入 `.env` 和 `config/settings.yaml`。密码和 API Key 留空时会保留原值。</p>
+        </div>
+        <span id="settingsSaveState" class="save-state">未保存</span>
+      </div>
+      <form id="settingsForm" class="settings-form">
+        <section class="settings-section">
+          <div class="settings-section-head">
+            <div>
+              <h3>基础连接</h3>
+              <p>ERP 登录地址、账号与凭据。</p>
+            </div>
+          </div>
+          <div class="settings-grid settings-grid-connection">
+            <label>ERP 登录地址 <input name="erp_url" value="{{ runtime.erp_url }}" placeholder="https://..."></label>
+            <label>ERP 账号 <input name="erp_username" value="{{ runtime.erp_username }}" autocomplete="username"></label>
+            <label>ERP 密码 <input name="erp_password" type="password" placeholder="留空则不修改" autocomplete="new-password"></label>
+          </div>
+        </section>
+
+        <section class="settings-section">
+          <div class="settings-section-head">
+            <div>
+              <h3>LLM 配置</h3>
+              <p>模型服务、连接地址、模型名称与调用容错。</p>
+            </div>
+          </div>
+          <div class="settings-grid settings-grid-llm">
+            <label>LLM API Key <input name="llm_api_key" type="password" placeholder="留空则不修改"></label>
+            <label>
+              LLM Provider
+              <select name="llm_provider" id="llmProviderSelect"></select>
+            </label>
+            <label>LLM Base URL <input name="llm_base_url" id="llmBaseUrlInput" value="{{ runtime.llm_base_url }}"></label>
+            <label class="settings-field-wide">
+              LLM Model
+              <div class="model-picker">
+                <select name="llm_model" id="llmModelSelect"></select>
+                <button type="button" id="refreshLlmModels">获取模型</button>
+              </div>
+              <span id="llmModelStatus" class="field-note">填入 API Key 后可自动读取该平台模型列表。</span>
+            </label>
+            <label>LLM 超时秒数 <input name="llm_timeout_seconds" value="{{ runtime.llm_timeout_seconds }}"></label>
+            <label>LLM 重试次数 <input name="llm_max_retries" value="{{ runtime.llm_max_retries }}"></label>
+          </div>
+        </section>
+
+        <section class="settings-section">
+          <div class="settings-section-head">
+            <div>
+              <h3>运行安全策略</h3>
+              <p>默认写入模式、置信度阈值、并发与自动通过策略。</p>
+            </div>
+          </div>
+          <div class="settings-grid settings-grid-policy">
+            <label>
+              默认写入模式
+              <select name="approval_write_mode">
+                <option value="disabled">disabled</option>
+                <option value="test_one">test_one</option>
+                <option value="save_one">save_one</option>
+                <option value="single_page">single_page</option>
+                <option value="multi_page">multi_page</option>
+                <option value="generate_library">generate_library</option>
+              </select>
+            </label>
+            <label>默认最低置信度 <input name="approval_write_min_confidence" value="{{ runtime.approval_write_min_confidence }}"></label>
+            <label>查询/LLM worker 数 <input name="approval_parallel_workers" value="{{ runtime.approval_parallel_workers }}"></label>
+          </div>
+          <div class="switches settings-policy-strip">
+            <label class="check"><input type="checkbox" name="process_all_todos" value="true"> 默认处理全部待办</label>
+            <label class="inline-field">最多处理 <input class="small-input" name="process_all_todos_max" value="50"></label>
+            <label class="check danger-check"><input type="checkbox" name="auto_pass" value="true"> 默认 AUTO_PASS</label>
+          </div>
+        </section>
+
+        <div class="settings-actions">
+          <button type="submit" class="primary">保存设置</button>
+        </div>
+      </form>
+    </section>
