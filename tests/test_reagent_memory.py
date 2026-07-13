@@ -359,6 +359,24 @@ class ReagentMemoryTest(unittest.TestCase):
             self.assertEqual(biology_row["need_manual_review"], 0)
             self.assertEqual(biology_row["conflict"], 0)
 
+            memory.add_record(
+                raw_name="\u672a\u77e5\u4e00\u6b21\u6027\u75c5\u6bd2\u91c7\u6837\u7ba1",
+                cleaned_name="\u672a\u77e5\u4e00\u6b21\u6027\u75c5\u6bd2\u91c7\u6837\u7ba1",
+                standard_name="\u672a\u77e5\u4e00\u6b21\u6027\u75c5\u6bd2\u91c7\u6837\u7ba1",
+                cas="-",
+                final_category="\u666e\u901a\u7c7b",
+                confidence=0.95,
+                reason="business normal keyword",
+            )
+            disposable_virus_row = memory.find_any(
+                raw_name="\u672a\u77e5\u4e00\u6b21\u6027\u75c5\u6bd2\u91c7\u6837\u7ba1"
+            )
+
+            self.assertEqual(disposable_virus_row["final_category"], "\u666e\u901a\u7c7b")
+            self.assertEqual(disposable_virus_row["reusable"], 1)
+            self.assertEqual(disposable_virus_row["need_manual_review"], 0)
+            self.assertEqual(disposable_virus_row["conflict"], 0)
+
     def test_update_record_keeps_unknown_packaging_names_reusable(self) -> None:
         tmp, memory = self.make_memory()
         with tmp:

@@ -28,6 +28,7 @@ BUSINESS_NORMAL_NAME_PATTERNS = (
     "\u7f13\u51b2\u6db2",
     "\u86cb\u767d",
     "\u7ec6\u80de",
+    "\u75c5\u6bd2",
     "\u514d\u75ab",
     "\u6297\u4f53",
     "\u67d3\u8272",
@@ -35,6 +36,7 @@ BUSINESS_NORMAL_NAME_PATTERNS = (
     "\u6807\u5b9a",
     "\u6821\u51c6",
     "\u836f\u7269",
+    "\u4e00\u6b21\u6027",
 )
 
 PHARMACEUTICAL_NORMAL_NAME_PATTERNS = (
@@ -57,8 +59,8 @@ def business_normal_name_reason(raw_name: str, *extra_values: Any) -> str:
             return (
                 "\u8bd5\u5242\u540d\u79f0\u547d\u4e2d\u666e\u901a\u7c7b\u4e1a\u52a1\u5173\u952e\u8bcd"
                 "\uff08\u6e05\u6d17\u6db2/\u6807\u51c6/\u6807\u51c6\u6db2/\u6807\u51c6\u6eb6\u6db2/ICP/"
-                "\u8bd5\u5242/\u7f13\u51b2\u6db2/\u86cb\u767d/\u7ec6\u80de/\u514d\u75ab/\u6297\u4f53/"
-                "\u67d3\u8272/\u6807\u6db2/\u6807\u5b9a/\u6821\u51c6/\u836f\u7269\uff09\uff0c\u6309\u666e\u901a\u7c7b\u5904\u7406\u3002"
+                "\u8bd5\u5242/\u7f13\u51b2\u6db2/\u86cb\u767d/\u7ec6\u80de/\u75c5\u6bd2/\u514d\u75ab/\u6297\u4f53/"
+                "\u67d3\u8272/\u6807\u6db2/\u6807\u5b9a/\u6821\u51c6/\u836f\u7269/\u4e00\u6b21\u6027\uff09\uff0c\u6309\u666e\u901a\u7c7b\u5904\u7406\u3002"
             )
     for pattern in PHARMACEUTICAL_NORMAL_NAME_PATTERNS:
         if pattern.lower() in normalized:
