@@ -17,6 +17,7 @@ from dotenv import load_dotenv
 
 from llm_providers import fetch_provider_models, provider_options
 from scheduler import ApprovalScheduler
+from update_checker import check_for_update, current_process_is_frozen, download_update, launch_installer
 from web_runner import (
     ENV_PATH,
     ROOT_DIR,
@@ -139,6 +140,10 @@ def dashboard_context(request: Request, active_page: str) -> dict:
                 "model": runtime.get("llm_model") or "",
             },
             "scheduler": scheduler.status(),
+            "updates": {
+                "currentVersion": runtime.get("app_version") or "",
+                "frozen": runtime.get("app_frozen") or False,
+            },
         },
     }
 
@@ -202,6 +207,41 @@ def api_status() -> JSONResponse:
             "review_queue": review_queue_summary(),
             "todo_tasks": todo_tasks_summary(),
             "scheduler": scheduler.status(),
+        }
+    )
+
+
+@app.get("/api/update/check")
+def api_update_check() -> JSONResponse:
+    return JSONResponse(check_for_update().as_dict())
+
+
+@app.post("/api/update/install")
+def api_update_install() -> JSONResponse:
+    if manager.status().get("running"):
+        raise HTTPException(status_code=409, detail="当前自动化任务正在运行，请停止或等待结束后再更新程序。")
+    info = check_for_update()
+    if not info.ok:
+        raise HTTPException(status_code=502, detail=info.error or "检查更新失败。")
+    if not info.update_available or info.asset is None:
+        return JSONResponse({"started": False, "message": "当前已经是最新版本。", **info.as_dict()})
+    if not current_process_is_frozen():
+        return JSONResponse(
+            {
+                "started": False,
+                "message": "当前是源码开发模式，不能自动安装 setup.exe。请在正式安装版中使用在线更新。",
+                **info.as_dict(),
+            }
+        )
+    installer = download_update(info.asset)
+    launch_installer(installer)
+    threading.Thread(target=delayed_exit, name="web-ui-update-exit", daemon=True).start()
+    return JSONResponse(
+        {
+            "started": True,
+            "message": "已下载更新包并启动安装器，当前程序即将退出。",
+            "installer": str(installer),
+            **info.as_dict(),
         }
     )
 
@@ -312,6 +352,7 @@ def api_settings(
     dingtalk_webhook: Annotated[str, Form()] = "",
     dingtalk_secret: Annotated[str, Form()] = "",
     dingtalk_at_all: Annotated[str, Form()] = "",
+    update_token: Annotated[str, Form()] = "",
     llm_provider: Annotated[str, Form()] = "siliconflow",
     llm_base_url: Annotated[str, Form()] = "",
     llm_model: Annotated[str, Form()] = "",
@@ -348,6 +389,7 @@ def api_settings(
             "dingtalk_webhook": dingtalk_webhook,
             "dingtalk_secret": dingtalk_secret,
             "dingtalk_at_all": normalize_checkbox(dingtalk_at_all),
+            "update_token": update_token,
             "llm_provider": llm_provider,
             "llm_base_url": llm_base_url,
             "llm_model": llm_model,
@@ -517,6 +559,11 @@ def schedule_web_ui_restart() -> None:
         os._exit(0)
 
     threading.Thread(target=restart_process, name="web-ui-restart", daemon=True).start()
+
+
+def delayed_exit() -> None:
+    time.sleep(1.5)
+    os._exit(0)
 
 
 if __name__ == "__main__":

@@ -180,6 +180,31 @@
       setTimeout(() => window.location.reload(), 4500);
     });
 
+    let lastUpdateInfo = null;
+
+    on("#checkUpdateButton", "click", async () => {
+      await checkForUpdate();
+    });
+
+    on("#installUpdateButton", "click", async () => {
+      if (!lastUpdateInfo?.update_available) {
+        alert("当前没有可安装的更新。");
+        return;
+      }
+      if (!confirm(`确认下载并安装 ${lastUpdateInfo.latest_version}？程序会自动退出并启动安装器。`)) return;
+      setUpdateMessage("正在下载更新包并启动安装器，请稍候...");
+      setDisabled("#installUpdateButton", true);
+      const response = await fetch("/api/update/install", { method: "POST" });
+      const payload = await response.json();
+      if (!response.ok || !payload.started) {
+        setUpdateMessage(payload.detail || payload.message || "更新未启动。");
+        setDisabled("#installUpdateButton", !lastUpdateInfo?.update_available);
+        return;
+      }
+      setText("#updateStateText", "安装器已启动");
+      setUpdateMessage(payload.message || "安装器已启动，当前程序即将退出。");
+    });
+
     on("#selectAllTodos", "click", () => {
       todoState.selected = new Set(todoState.tasks.map((task) => task.list_number).filter(Boolean));
       renderTodoTasks({ tasks: todoState.tasks, exists: todoState.tasks.length > 0 });
@@ -333,6 +358,55 @@
       apply();
     }
 
+    function setUpdateMessage(message) {
+      const target = document.querySelector("#updateMessage");
+      if (target) target.textContent = message || "";
+    }
+
+    async function checkForUpdate() {
+      const button = document.querySelector("#checkUpdateButton");
+      const installButton = document.querySelector("#installUpdateButton");
+      if (!button) return;
+      button.disabled = true;
+      if (installButton) installButton.disabled = true;
+      setText("#updateStateText", "检查中");
+      setUpdateMessage("正在连接 GitHub Releases...");
+      try {
+        const response = await fetch("/api/update/check");
+        const payload = await response.json();
+        lastUpdateInfo = payload;
+        setText("#currentVersionText", payload.current_version || initialRuntime.app_version || "-");
+        setText("#latestVersionText", payload.latest_version || "-");
+        const releaseLink = document.querySelector("#releaseLink");
+        if (releaseLink && payload.release_url) {
+          releaseLink.href = payload.release_url;
+          releaseLink.hidden = false;
+        }
+        if (!response.ok || !payload.ok) {
+          setText("#updateStateText", "检查失败");
+          setUpdateMessage(payload.detail || payload.error || "检查更新失败。");
+          return;
+        }
+        if (payload.update_available) {
+          setText("#updateStateText", "发现新版本");
+          const assetSize = payload.asset?.size ? `${Math.ceil(payload.asset.size / 1024 / 1024)} MB` : "";
+          setUpdateMessage(`发现 ${payload.latest_version}，安装包 ${assetSize}。`);
+          if (installButton) installButton.disabled = !initialRuntime.app_frozen;
+          if (!initialRuntime.app_frozen) {
+            setUpdateMessage(`发现 ${payload.latest_version}，但当前是源码模式，请在正式安装版中自动更新。`);
+          }
+        } else {
+          setText("#updateStateText", "已是最新");
+          setUpdateMessage(payload.error || "当前已经是最新版本。");
+        }
+      } catch (error) {
+        setText("#updateStateText", "检查失败");
+        setUpdateMessage(String(error));
+      } finally {
+        button.disabled = false;
+      }
+    }
+
     settingsForm?.addEventListener("submit", async (event) => {
       event.preventDefault();
       const state = document.querySelector("#settingsSaveState");
@@ -351,6 +425,7 @@
       settingsForm.querySelector('[name="llm_api_key"]').value = "";
       settingsForm.querySelector('[name="dingtalk_webhook"]').value = "";
       settingsForm.querySelector('[name="dingtalk_secret"]').value = "";
+      settingsForm.querySelector('[name="update_token"]').value = "";
       await refreshStatus({forceReview: true});
     });
 
@@ -1284,6 +1359,8 @@
       setText("#schedulerNextRun", safe(scheduler.next_run_at));
       setText("#schedulerLastRun", safe(scheduler.last_run_at));
       setText("#schedulerLastResult", safe(scheduler.last_result));
+      setText("#currentVersionText", safe(runtime.app_version));
+      setText("#appModeText", runtime.app_frozen ? "安装版" : "源码模式");
 
       renderTags(approval.categories || {});
       renderSuggestions(approval.preview || []);

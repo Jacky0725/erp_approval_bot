@@ -146,6 +146,30 @@
           </div>
         </section>
 
+        <section class="settings-section update-section">
+          <div class="settings-section-head">
+            <div>
+              <h3>程序更新</h3>
+              <p>通过 GitHub Releases 检查新版安装包，下载后自动覆盖安装并保留本地配置与数据库。</p>
+            </div>
+          </div>
+          <div class="update-panel">
+            <div class="update-status-grid">
+              <span>当前版本 <strong id="currentVersionText">{{ runtime.app_version }}</strong></span>
+              <span>最新版本 <strong id="latestVersionText">-</strong></span>
+              <span>运行模式 <strong id="appModeText">{{ "安装版" if runtime.app_frozen else "源码模式" }}</strong></span>
+              <span>更新状态 <strong id="updateStateText">未检查</strong></span>
+            </div>
+            <label>GitHub 更新 Token <input name="update_token" type="password" placeholder="{% if runtime.update_token_configured %}已配置，留空则不修改{% else %}私有仓库需要 fine-grained read token{% endif %}"></label>
+            <div class="update-actions">
+              <button type="button" id="checkUpdateButton">检查更新</button>
+              <button type="button" id="installUpdateButton" class="primary" disabled>下载并安装</button>
+              <a id="releaseLink" class="ghost-link" href="#" target="_blank" rel="noreferrer" hidden>查看 Release</a>
+            </div>
+            <p id="updateMessage" class="field-note">正式安装版可在这里在线更新；源码模式只检查版本，不自动覆盖安装。</p>
+          </div>
+        </section>
+
         <div class="settings-actions">
           <button type="submit" class="primary">保存设置</button>
         </div>

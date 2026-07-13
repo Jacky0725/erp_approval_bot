@@ -106,6 +106,24 @@ def create_shortcuts(target: Path) -> None:
         }}
         """
     )
+
+
+def start_installed_app(target: Path) -> None:
+    exe = target / "ReagentApprovalBot.exe"
+    if not exe.exists():
+        return
+    creationflags = 0
+    if os.name == "nt":
+        creationflags = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
+    subprocess.Popen(
+        [str(exe)],
+        cwd=str(target),
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        creationflags=creationflags,
+        close_fds=True,
+    )
     subprocess.run(
         ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps],
         check=True,
@@ -142,6 +160,8 @@ def main() -> int:
         restore_existing(target, backup)
         write_uninstaller(target)
         create_shortcuts(target)
+        if os.getenv("REAGENT_APPROVAL_START_AFTER_INSTALL", "").strip().lower() in {"1", "true", "yes", "on"}:
+            start_installed_app(target)
 
     print("Installation complete.")
     print("Open Reagent Approval Bot from the desktop shortcut or Start Menu.")

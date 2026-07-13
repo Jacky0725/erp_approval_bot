@@ -37,6 +37,7 @@ $addData = @(
     "$RepoRoot\src;app\src",
     "$RepoRoot\config;app\config",
     "$RepoRoot\.env.example;app",
+    "$RepoRoot\VERSION;app",
     "$RepoRoot\requirements.txt;app",
     "$RepoRoot\README.md;app",
     "$RepoRoot\AGENTS.md;app",

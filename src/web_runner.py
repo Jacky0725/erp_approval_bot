@@ -37,6 +37,7 @@ from category_mapper import (
     to_erp_property,
     to_rule_category,
 )
+from app_info import app_version
 from reagent_memory import ReagentMemory
 from runtime_paths import ensure_runtime_layout, runtime_root, source_root
 from scheduler import scheduler_config
@@ -1320,6 +1321,13 @@ def runtime_config_snapshot() -> dict[str, Any]:
         or provider_default_model(provider.id)
     )
     return {
+        "app_version": app_version(),
+        "app_frozen": bool(getattr(sys, "frozen", False)),
+        "update_token_configured": bool(
+            os.getenv("REAGENT_APPROVAL_UPDATE_TOKEN", "").strip()
+            or os.getenv("GITHUB_TOKEN", "").strip()
+            or os.getenv("GH_TOKEN", "").strip()
+        ),
         "erp_url_configured": bool(os.getenv("ERP_URL", "").strip()),
         "erp_url": os.getenv("ERP_URL", ""),
         "erp_username_configured": bool(os.getenv("ERP_USERNAME", "").strip()),
@@ -1390,6 +1398,9 @@ def save_runtime_config(form: dict[str, str]) -> dict[str, Any]:
         "LLM_BASE_URL": llm_base_url,
         "LLM_MODEL": llm_model,
     }
+    update_token = form.get("update_token", "").strip()
+    if update_token:
+        env_updates["REAGENT_APPROVAL_UPDATE_TOKEN"] = update_token
     if provider.id == "siliconflow":
         env_updates["SILICONFLOW_BASE_URL"] = llm_base_url
         env_updates["SILICONFLOW_MODEL"] = llm_model
