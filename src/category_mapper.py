@@ -16,6 +16,8 @@ DEFAULT_ERP_PROPERTY_OPTIONS = [
     "强反应",
     "刺激性",
     "易燃类",
+    "拒收类",
+    "未知类",
 ]
 
 DEFAULT_RULE_TO_ERP_ALIASES = {
@@ -25,9 +27,10 @@ DEFAULT_RULE_TO_ERP_ALIASES = {
     "易燃类": ["易燃液体"],
     "拒收类": ["不建议接收类"],
     "不建议接收类": ["拒收类"],
+    "未知类": ["未知类"],
 }
 
-NON_WRITABLE_RULE_CATEGORIES = {"不建议接收类", "拒收类", "未知类", "剧毒品"}
+NON_WRITABLE_RULE_CATEGORIES = {"剧毒品"}
 
 
 def erp_property_options(settings: dict[str, Any] | None = None) -> list[str]:

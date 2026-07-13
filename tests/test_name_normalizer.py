@@ -57,6 +57,14 @@ class NameNormalizerTest(unittest.TestCase):
         self.assertLess(result["confidence"], 0.8)
         self.assertTrue(result["need_manual_review"])
 
+    def test_internal_code_suffix_after_colon_is_removed(self) -> None:
+        result = self.normalizer.normalize(raw_name="卡马西平：AC-O-11-01")
+
+        self.assertEqual(result["raw_name"], "卡马西平：AC-O-11-01")
+        self.assertEqual(result["cleaned_name"], "卡马西平")
+        self.assertEqual(result["standard_name"], "卡马西平")
+        self.assertIn("Cleaned name by rules", result["reason"])
+
     def test_update_aliases_after_approval(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             aliases_path = Path(temp_dir) / "name_aliases.yaml"

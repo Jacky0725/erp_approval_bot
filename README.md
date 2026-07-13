@@ -83,6 +83,17 @@ http://127.0.0.1:8000
 
 后续如果审批模块、规则模块、查询模块或人工复核模块发生变化，需要同步维护 `src/web_app.py`、`src/web_runner.py`、`src/templates/dashboard.html` 和 `src/static/dashboard.css` 中对应的入口、状态展示和说明。
 
+## 记忆库维护
+
+`data/reagent_memory.sqlite` 是本地运行数据，不会提交到 Git。迁移到其他电脑或安装包环境后，如果需要复现“删除全部冲突记忆记录”的维护动作，可以运行：
+
+```powershell
+python scripts/cleanup_reagent_memory_conflicts.py --dry-run
+python scripts/cleanup_reagent_memory_conflicts.py --yes
+```
+
+脚本会先备份 SQLite 到 `data/logs/`，然后删除所有 `conflict=1` 的试剂记忆记录。
+
 ## 安全约束
 
 - 开发阶段使用 headed 浏览器。

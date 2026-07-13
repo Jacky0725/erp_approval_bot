@@ -3,6 +3,7 @@ from __future__ import annotations
 import contextlib
 import io
 import os
+import shutil
 import subprocess
 import sys
 import threading
@@ -11,6 +12,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterator
+from collections.abc import Callable
 
 import pandas as pd
 import yaml
@@ -23,6 +25,11 @@ from llm_providers import (
     provider_default_model,
     provider_options,
 )
+from dingtalk_notifier import (
+    build_task_result_message,
+    dingtalk_notification_config,
+    send_task_result_notification,
+)
 from category_mapper import (
     category_mapping_summary,
     erp_property_options,
@@ -32,6 +39,7 @@ from category_mapper import (
 )
 from reagent_memory import ReagentMemory
 from runtime_paths import ensure_runtime_layout, runtime_root, source_root
+from scheduler import scheduler_config
 
 
 ensure_runtime_layout()
@@ -163,6 +171,7 @@ class AutomationJobManager:
     _last_action: str = ""
     _last_options: dict[str, str] = field(default_factory=dict)
     _lock: threading.RLock = field(default_factory=threading.RLock)
+    _completion_callbacks: list[Callable[..., None]] = field(default_factory=list)
 
     def start(self, action: str, options: dict[str, str] | None = None) -> dict[str, Any]:
         options = options or {}
@@ -263,6 +272,29 @@ class AutomationJobManager:
                 self.success = success
                 self.error = error
                 self._persist_state()
+            self._notify_completion_callbacks(action=action, success=success, error=error, options=options)
+            self._notify_task_result(action=action, success=success, error=error)
+
+    def add_completion_callback(self, callback: Callable[..., None]) -> None:
+        with self._lock:
+            if callback not in self._completion_callbacks:
+                self._completion_callbacks.append(callback)
+
+    def _notify_completion_callbacks(
+        self,
+        *,
+        action: str,
+        success: bool,
+        error: str,
+        options: dict[str, str],
+    ) -> None:
+        with self._lock:
+            callbacks = list(self._completion_callbacks)
+        for callback in callbacks:
+            try:
+                callback(action=action, success=success, error=error, options=dict(options))
+            except Exception as exc:  # noqa: BLE001 - callbacks must not block automation cleanup
+                self._record_notification_failure(f"Automation completion callback failed: {exc}")
 
     def _persist_state(self) -> None:
         WEB_RUN_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -387,6 +419,8 @@ class AutomationJobManager:
             "APPROVAL_WRITE_MODE",
             "APPROVAL_WRITE_MIN_CONFIDENCE",
             "AUTO_PASS",
+            "SCHEDULED_RUN",
+            "SCHEDULED_SKIP_MANUAL_REVIEW_LISTS",
         }
         return {
             key: value
@@ -394,6 +428,34 @@ class AutomationJobManager:
             if key in allowed_keys and value is not None
         }
 
+    def _notify_task_result(self, *, action: str, success: bool, error: str) -> None:
+        try:
+            settings = load_settings()
+            load_dotenv(ENV_PATH)
+            message = build_task_result_message(
+                action=action,
+                success=success,
+                started_at=self.started_at,
+                finished_at=self.finished_at,
+                error=error,
+                approval=approval_summary(self.root_dir),
+                review_queue=review_queue_summary(self.root_dir),
+            )
+            result = send_task_result_notification(settings, message)
+            if result.get("sent") or result.get("skipped"):
+                return
+            self._record_notification_failure(f"DingTalk notification failed: {result.get('error') or result}")
+        except Exception as exc:  # noqa: BLE001 - notification must not block automation
+            self._record_notification_failure(f"DingTalk notification failed: {exc}")
+
+    def _record_notification_failure(self, message: str) -> None:
+        self.lines.append(message)
+        try:
+            with (LOG_DIR / "web_run_stdout.txt").open("a", encoding="utf-8") as file:
+                file.write(message + "\n")
+        except OSError:
+            pass
+        self._persist_state()
 
 @contextlib.contextmanager
 def temporary_env(overrides: dict[str, str]) -> Iterator[None]:
@@ -927,6 +989,37 @@ def confirm_review_item(payload: dict[str, Any], root_dir: Path = ROOT_DIR) -> d
     }
 
 
+def delete_review_item(payload: dict[str, Any], root_dir: Path = ROOT_DIR) -> dict[str, Any]:
+    path = root_dir / "data" / "review_queue.xlsx"
+    if not path.exists():
+        return {"deleted": False, "message": "review_queue.xlsx does not exist."}
+
+    frame = pd.read_excel(path, dtype=str).fillna("")
+    if frame.empty:
+        return {"deleted": False, "message": "review_queue.xlsx is empty."}
+
+    if "_review_key" not in frame.columns:
+        frame["_review_key"] = frame.apply(review_queue_row_key, axis=1)
+
+    review_key = str(payload.get("review_key") or "").strip()
+    matched_index: int | None = None
+    if review_key:
+        matches = frame.index[frame["_review_key"].astype(str) == review_key].tolist()
+        if matches:
+            matched_index = matches[-1]
+
+    if matched_index is None:
+        matched_index = match_review_item_by_fields(frame, payload)
+
+    if matched_index is None:
+        return {"deleted": False, "message": "没有找到对应的人工复核记录，可能已被处理或文件已刷新。"}
+
+    frame = frame.drop(index=matched_index).drop(columns=["_review_key"], errors="ignore")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    frame.to_excel(path, index=False)
+    return {"deleted": True, "message": "已删除该人工复核项。"}
+
+
 def match_review_item_by_fields(frame: pd.DataFrame, payload: dict[str, Any]) -> int | None:
     list_number = str(payload.get("list_number") or "").strip()
     reagent_name = str(payload.get("reagent_name") or "").strip()
@@ -972,24 +1065,41 @@ def memory_summary(
     category: str = "",
     reusable: str = "",
     conflict: str = "",
-    limit: int = 200,
+    limit: int = 20,
+    page: int = 1,
+    per_page: int | None = None,
     root_dir: Path = ROOT_DIR,
 ) -> dict[str, Any]:
     settings = load_settings()
     memory = ReagentMemory.from_settings(settings, root_dir)
     mapping = category_mapping_summary(settings, root_dir)
+    safe_per_page = max(1, min(100, int(per_page or limit or 20)))
+    total = memory.count_records(
+        query=query,
+        category=category,
+        reusable=reusable,
+        conflict=conflict,
+    )
+    pages = max(1, (total + safe_per_page - 1) // safe_per_page)
+    safe_page = max(1, min(pages, int(page or 1)))
+    offset = (safe_page - 1) * safe_per_page
     rows = memory.list_records(
         query=query,
         category=category,
         reusable=reusable,
         conflict=conflict,
-        limit=limit,
+        limit=safe_per_page,
+        offset=offset,
     )
-    categories = sorted({str(row.get("final_category") or "") for row in rows if str(row.get("final_category") or "")})
+    categories = memory.list_categories()
     return {
         "exists": memory.path.exists(),
         "path": str(memory.path),
-        "rows": len(rows),
+        "rows": total,
+        "page_rows": len(rows),
+        "page": safe_page,
+        "pages": pages,
+        "per_page": safe_per_page,
         "categories": categories,
         "erp_property_options": mapping["erp_property_options"],
         "review_decision_options": mapping["review_decision_options"],
@@ -1002,6 +1112,12 @@ def memory_summary(
 
 def update_memory_record(record_id: int, payload: dict[str, Any], root_dir: Path = ROOT_DIR) -> dict[str, Any]:
     settings = load_settings()
+    payload = dict(payload)
+    if truthy_value(payload.get("reusable")):
+        payload["reusable"] = True
+        payload["conflict"] = False
+        payload["need_manual_review"] = False
+        payload["manual_verified"] = True
     final_category = str(payload.get("final_category") or "").strip()
     if final_category:
         options = erp_property_options(settings)
@@ -1028,6 +1144,25 @@ def delete_memory_record(record_id: int, root_dir: Path = ROOT_DIR) -> dict[str,
     return {"deleted": deleted}
 
 
+def delete_conflicting_memory(root_dir: Path = ROOT_DIR) -> dict[str, Any]:
+    settings = load_settings()
+    memory = ReagentMemory.from_settings(settings, root_dir)
+    delete_count = memory.count_conflicting_records()
+    backup_path = ""
+    if delete_count and memory.path.exists():
+        log_dir = root_dir / "data" / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        backup = log_dir / f"reagent_memory_backup_before_delete_conflicting_{datetime.now():%Y%m%d_%H%M%S}.sqlite"
+        shutil.copy2(memory.path, backup)
+        backup_path = str(backup)
+    deleted = memory.delete_conflicting_records()
+    return {
+        "deleted": deleted,
+        "candidate_count": delete_count,
+        "backup": backup_path,
+    }
+
+
 def import_approval_suggestions_to_memory(root_dir: Path = ROOT_DIR) -> dict[str, Any]:
     settings = load_settings()
     memory = ReagentMemory.from_settings(settings, root_dir)
@@ -1049,6 +1184,7 @@ def import_approval_suggestions_to_memory(root_dir: Path = ROOT_DIR) -> dict[str
         "candidate_unmapped_category": 0,
         "skipped_missing_identity": 0,
         "skipped_duplicate_source_row": 0,
+        "skipped_memory_source": 0,
         "errors": [],
         "files": [],
         "scanned": 0,
@@ -1074,6 +1210,10 @@ def import_approval_suggestions_to_memory(root_dir: Path = ROOT_DIR) -> dict[str
             cleaned_name = str(suggestion.get("清洗后名称") or "").strip()
             standard_name = str(suggestion.get("标准化名称") or "").strip()
             cas = str(suggestion.get("CAS号") or "").strip()
+            query_source = str(suggestion.get("\u67e5\u8be2\u6765\u6e90") or "").strip()
+            if query_source == "reagent_memory":
+                stats["skipped_memory_source"] += 1
+                continue
             source_key = (cas.lower(), standard_name.lower(), cleaned_name.lower(), raw_name.lower(), final_category)
 
             if source_key in seen_source_rows:
@@ -1165,6 +1305,8 @@ def runtime_config_snapshot() -> dict[str, Any]:
     load_dotenv(ENV_PATH)
     settings = load_settings()
     approval = settings.get("approval", {}) or {}
+    schedule = scheduler_config(settings)
+    dingtalk = dingtalk_notification_config(settings)
     llm = settings.get("llm", {}) or {}
     mapping = category_mapping_summary(settings, ROOT_DIR)
     provider = get_llm_provider(os.getenv("LLM_PROVIDER") or llm.get("provider") or "siliconflow")
@@ -1188,6 +1330,7 @@ def runtime_config_snapshot() -> dict[str, Any]:
         "auto_pass": os.getenv("AUTO_PASS", "false"),
         "target_list_number": os.getenv("TARGET_LIST_NUMBER", ""),
         "process_all_todos": os.getenv("PROCESS_ALL_TODOS", "false"),
+        "process_all_todos_max": os.getenv("PROCESS_ALL_TODOS_MAX", "50"),
         "approval_write_mode": os.getenv(
             "APPROVAL_WRITE_MODE",
             str(approval.get("write_mode", "disabled")),
@@ -1200,6 +1343,20 @@ def runtime_config_snapshot() -> dict[str, Any]:
             "APPROVAL_PARALLEL_WORKERS",
             str(approval.get("parallel_workers", 3)),
         ),
+        "scheduler_enabled": "true" if schedule.get("enabled") else "false",
+        "scheduler_mode": schedule.get("mode", "interval"),
+        "scheduler_interval_hours": str(schedule.get("interval_hours", 6)),
+        "scheduler_daily_time": schedule.get("daily_time", "16:00"),
+        "scheduler_use_default_run_policy": "true" if schedule.get("use_default_run_policy", True) else "false",
+        "scheduler_process_all_todos_max": str(schedule.get("process_all_todos_max", 50)),
+        "scheduler_approval_write_mode": schedule.get("approval_write_mode", "multi_page"),
+        "scheduler_approval_write_min_confidence": str(schedule.get("approval_write_min_confidence", "0.8")),
+        "scheduler_auto_pass": "true" if schedule.get("auto_pass") else "false",
+        "scheduler_skip_manual_review_lists": "true" if schedule.get("skip_manual_review_lists", True) else "false",
+        "dingtalk_notification_enabled": "true" if dingtalk.get("enabled") else "false",
+        "dingtalk_webhook_configured": bool(os.getenv("DINGTALK_ROBOT_WEBHOOK", "").strip()),
+        "dingtalk_secret_configured": bool(os.getenv("DINGTALK_ROBOT_SECRET", "").strip()),
+        "dingtalk_at_all": "true" if dingtalk.get("at_all", True) else "false",
         "llm_provider": provider.id,
         "llm_provider_label": provider.label,
         "llm_provider_options": provider_options(),
@@ -1246,6 +1403,13 @@ def save_runtime_config(form: dict[str, str]) -> dict[str, Any]:
         env_updates["LLM_API_KEY"] = api_key
         env_updates[provider.api_key_env] = api_key
 
+    dingtalk_webhook = form.get("dingtalk_webhook", "").strip()
+    if dingtalk_webhook:
+        env_updates["DINGTALK_ROBOT_WEBHOOK"] = dingtalk_webhook
+    dingtalk_secret = form.get("dingtalk_secret", "").strip()
+    if dingtalk_secret:
+        env_updates["DINGTALK_ROBOT_SECRET"] = dingtalk_secret
+
     update_env_file(ENV_PATH, env_updates)
 
     settings = load_settings()
@@ -1266,6 +1430,42 @@ def save_runtime_config(form: dict[str, str]) -> dict[str, Any]:
         form.get("approval_parallel_workers", ""),
         approval.get("parallel_workers", 3),
     )
+
+    scheduler = settings.setdefault("scheduler", {})
+    scheduler["enabled"] = form.get("scheduler_enabled", "false").strip().lower() == "true"
+    scheduler["mode"] = form.get("scheduler_mode", "interval").strip() or "interval"
+    scheduler["interval_hours"] = coerce_int(
+        form.get("scheduler_interval_hours", ""),
+        scheduler.get("interval_hours", 6),
+    )
+    scheduler["daily_time"] = form.get("scheduler_daily_time", "").strip() or scheduler.get("daily_time", "16:00")
+    scheduler["use_default_run_policy"] = (
+        form.get("scheduler_use_default_run_policy", "false").strip().lower() == "true"
+    )
+    scheduler["process_all_todos_max"] = coerce_int(
+        form.get("scheduler_process_all_todos_max", ""),
+        scheduler.get("process_all_todos_max", 50),
+    )
+    scheduler["approval_write_mode"] = (
+        form.get("scheduler_approval_write_mode", "").strip()
+        or scheduler.get("approval_write_mode", "multi_page")
+    )
+    scheduler["approval_write_min_confidence"] = (
+        form.get("scheduler_approval_write_min_confidence", "").strip()
+        or scheduler.get("approval_write_min_confidence", "0.8")
+    )
+    scheduler["auto_pass"] = form.get("scheduler_auto_pass", "false").strip().lower() == "true"
+    scheduler["skip_manual_review_lists"] = (
+        form.get("scheduler_skip_manual_review_lists", "false").strip().lower() == "true"
+    )
+
+    notification = settings.setdefault("notification", {})
+    dingtalk = notification.setdefault("dingtalk", {})
+    dingtalk["enabled"] = form.get("dingtalk_notification_enabled", "false").strip().lower() == "true"
+    dingtalk["webhook_env"] = "DINGTALK_ROBOT_WEBHOOK"
+    dingtalk["secret_env"] = "DINGTALK_ROBOT_SECRET"
+    dingtalk["at_all"] = form.get("dingtalk_at_all", "false").strip().lower() == "true"
+
     save_settings(settings)
 
     return runtime_config_snapshot()

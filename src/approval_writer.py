@@ -5,7 +5,7 @@ from typing import Any
 
 from playwright.sync_api import Error, Locator, Page, TimeoutError
 
-from category_mapper import erp_candidates_for_rule_category
+from category_mapper import erp_candidates_for_rule_category, erp_property_options
 
 
 @dataclass
@@ -14,13 +14,29 @@ class ApprovalWriter:
 
     def row_is_editing(self, page: Page, row: Locator) -> bool:
         try:
-            if row.locator(".ant-select, input[role='combobox']").count():
+            if self._locator_has_visible(
+                row.locator(".ant-select-open, .ant-select-focused, input[role='combobox']")
+            ):
                 return True
-            if row.locator("button, a").filter(has_text="\u4fdd\u5b58").count():
+            if self._locator_has_visible(row.locator("button, a").filter(has_text="\u4fdd\u5b58")):
                 return True
         except (Error, TimeoutError):
             pass
         return self._row_peer_is_editing(page, row)
+
+    @staticmethod
+    def _locator_has_visible(locator: Locator, limit: int = 12) -> bool:
+        try:
+            count = min(locator.count(), limit)
+        except (Error, TimeoutError):
+            return False
+        for index in range(count):
+            try:
+                if locator.nth(index).is_visible(timeout=250):
+                    return True
+            except (Error, TimeoutError):
+                continue
+        return False
 
     def open_technical_judgement(self, row: Locator, page: Page | None = None) -> bool:
         if page is not None and self.row_is_editing(page, row):
@@ -45,8 +61,21 @@ class ApprovalWriter:
             self.dismiss_open_dropdown(page)
             if not self._open_property_dropdown(page, row):
                 continue
-            if self._select_property_option(page, candidate_name):
-                return True
+            if self._select_property_option(page, candidate_name, row):
+                self.commit_property_selection(page)
+                if row is None or self._row_property_selection_matches(page, row, candidate_name):
+                    return True
+                self._commit_row_property_selection(page, row)
+                if self._row_property_selection_matches(page, row, candidate_name):
+                    return True
+            if self._direct_input_property_value(page, candidate_name, row):
+                self.commit_property_selection(page)
+                if row is None or self._row_property_selection_matches(page, row, candidate_name):
+                    return True
+                if row is not None:
+                    self._commit_row_property_selection(page, row)
+                    if self._row_property_selection_matches(page, row, candidate_name):
+                        return True
         self.dismiss_open_dropdown(page)
         return False
 
@@ -100,7 +129,9 @@ class ApprovalWriter:
                       const text = (node) => (node.innerText || node.textContent || '').replace(/\\s+/g, ' ').trim();
                       const rows = Array.from(document.querySelectorAll('tbody tr.ant-table-row')).filter(visible);
                       return rows.some((tr) => {
-                        const hasEditor = Array.from(tr.querySelectorAll('.ant-select, input[role="combobox"]')).some(visible);
+                        const hasEditor = Array.from(
+                          tr.querySelectorAll('.ant-select-open, .ant-select-focused, input[role="combobox"]')
+                        ).some(visible);
                         const hasSave = Array.from(tr.querySelectorAll('button, a')).some(
                           (node) => visible(node) && text(node).includes('\u4fdd\u5b58')
                         );
@@ -120,6 +151,7 @@ class ApprovalWriter:
         selectors = (self.settings or {}).get("selectors", {})
         configured = str(selectors.get("property_select", "") or "").strip()
         candidates = []
+        self._scroll_property_column_into_view(page)
         if row is not None:
             candidates.extend(
                 [
@@ -154,21 +186,121 @@ class ApprovalWriter:
             return self._visible_property_dropdown(page)
         return False
 
-    @staticmethod
-    def _select_property_option(page: Page, candidate_name: str) -> bool:
+    def _select_property_option(self, page: Page, candidate_name: str, row: Locator | None = None) -> bool:
         if ApprovalWriter._click_property_option(page, candidate_name):
+            return True
+        if ApprovalWriter._type_property_search_text_real(page, candidate_name, row):
+            page.wait_for_timeout(300)
+            if ApprovalWriter._click_property_option(page, candidate_name):
+                return True
+            if ApprovalWriter._confirm_property_option_by_keyboard(page, candidate_name):
+                return True
+        if self._scroll_dropdown_to_configured_option(page, candidate_name):
+            page.wait_for_timeout(180)
+            if ApprovalWriter._click_property_option(page, candidate_name):
+                return True
+        if self._select_property_option_by_keyboard_order(page, candidate_name, row):
             return True
         if ApprovalWriter._type_property_search_text(page, candidate_name):
             page.wait_for_timeout(250)
             if ApprovalWriter._click_property_option(page, candidate_name):
                 return True
+            if self._scroll_dropdown_to_configured_option(page, candidate_name):
+                page.wait_for_timeout(180)
+                if ApprovalWriter._click_property_option(page, candidate_name):
+                    return True
+            if self._select_property_option_by_keyboard_order(page, candidate_name, row):
+                return True
             if ApprovalWriter._confirm_property_option_by_keyboard(page, candidate_name):
                 return True
         return False
 
+    def _scroll_dropdown_to_configured_option(self, page: Page, candidate_name: str) -> bool:
+        option_names = erp_property_options(self.settings or {})
+        return self._scroll_dropdown_to_option(page, candidate_name, option_names)
+
+    def _select_property_option_by_keyboard_order(
+        self, page: Page, candidate_name: str, row: Locator | None = None
+    ) -> bool:
+        option_names = erp_property_options(self.settings or {})
+        return self._select_property_option_by_keyboard(page, candidate_name, option_names, row)
+
+    @staticmethod
+    def _direct_input_property_value(page: Page, candidate_name: str, row: Locator | None = None) -> bool:
+        identity = ApprovalWriter._row_identity(row) if row is not None else {}
+        try:
+            return bool(
+                page.evaluate(
+                    """
+                    ({ candidateName, rowKey, top, height }) => {
+                      const visible = (node) => {
+                        const rect = node.getBoundingClientRect();
+                        const style = window.getComputedStyle(node);
+                        return rect.width > 0 && rect.height > 0
+                          && style.visibility !== 'hidden'
+                          && style.display !== 'none';
+                      };
+                      const rowCenter = Number.isFinite(top)
+                        ? top + (Number.isFinite(height) ? height / 2 : 0)
+                        : null;
+                      const sameRow = (tr) => {
+                        if (!tr) return false;
+                        if (rowKey && tr.getAttribute('data-row-key') === rowKey) return true;
+                        if (Number.isFinite(rowCenter)) {
+                          const rect = tr.getBoundingClientRect();
+                          return Math.abs((rect.top + rect.height / 2) - rowCenter) < 14;
+                        }
+                        return false;
+                      };
+                      const rowNode = rowKey || Number.isFinite(rowCenter)
+                        ? Array.from(document.querySelectorAll('tbody tr.ant-table-row')).find(sameRow)
+                        : null;
+                      const inputs = rowNode
+                        ? Array.from(rowNode.querySelectorAll('input[role="combobox"], .ant-select-selection-search-input')).filter(visible)
+                        : Array.from(document.querySelectorAll('input[role="combobox"], .ant-select-selection-search-input')).filter(visible);
+                      const active = document.activeElement;
+                      const input = inputs.find((node) => node === active)
+                        || inputs.find((node) => node.closest('.ant-select-focused'))
+                        || inputs[inputs.length - 1];
+                      if (!input) return false;
+
+                      input.focus();
+                      input.click();
+                      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
+                      const setValue = (value) => {
+                        if (setter) setter.call(input, value);
+                        else input.value = value;
+                        input.dispatchEvent(new Event('input', { bubbles: true }));
+                        input.dispatchEvent(new Event('change', { bubbles: true }));
+                      };
+                      setValue('');
+                      setValue(candidateName);
+                      for (const key of ['Enter', 'Enter', 'Tab']) {
+                        input.dispatchEvent(new KeyboardEvent('keydown', { key, code: key, bubbles: true, cancelable: true }));
+                        input.dispatchEvent(new KeyboardEvent('keyup', { key, code: key, bubbles: true, cancelable: true }));
+                      }
+                      input.blur();
+                      return true;
+                    }
+                    """,
+                    {**identity, "candidateName": candidate_name},
+                )
+            )
+        except (Error, TimeoutError):
+            try:
+                page.keyboard.press("Control+A")
+                page.keyboard.type(candidate_name, delay=20)
+                page.keyboard.press("Enter")
+                page.keyboard.press("Tab")
+                return True
+            except (Error, TimeoutError):
+                return False
+
     @staticmethod
     def _click_property_option(page: Page, candidate_name: str) -> bool:
         for _ in range(8):
+            if ApprovalWriter._click_property_option_by_mouse(page, candidate_name):
+                return True
             if ApprovalWriter._click_property_option_in_active_dropdown(page, candidate_name):
                 return True
             candidates = [
@@ -190,6 +322,228 @@ class ApprovalWriter:
 
             if not ApprovalWriter._scroll_open_dropdown(page):
                 break
+        return False
+
+    @staticmethod
+    def _click_property_option_by_mouse(page: Page, candidate_name: str) -> bool:
+        try:
+            rect = page.evaluate(
+                """
+                (candidateName) => {
+                  const visible = (node) => {
+                    const rect = node.getBoundingClientRect();
+                    const style = window.getComputedStyle(node);
+                    return rect.width > 0 && rect.height > 0
+                      && style.visibility !== 'hidden'
+                      && style.display !== 'none';
+                  };
+                  const text = (node) => (node.innerText || node.textContent || '').replace(/\\s+/g, ' ').trim();
+                  const active = document.activeElement;
+                  const activeControls = active?.getAttribute?.('aria-controls') || '';
+                  const dropdowns = Array.from(document.querySelectorAll(
+                    '.ant-select-dropdown:not(.ant-select-dropdown-hidden)'
+                  )).filter(visible);
+                  const ordered = dropdowns
+                    .map((dropdown, index) => ({
+                      dropdown,
+                      index,
+                      activeScore: activeControls && dropdown.id === activeControls ? 0 : 1,
+                    }))
+                    .sort((a, b) => a.activeScore - b.activeScore || a.index - b.index)
+                    .map((item) => item.dropdown);
+                  for (const dropdown of ordered) {
+                    const options = Array.from(dropdown.querySelectorAll('.ant-select-item-option')).filter(visible);
+                    const option = options.find((node) => text(node) === candidateName)
+                      || options.find((node) => text(node).includes(candidateName));
+                    if (!option) continue;
+                    option.scrollIntoView({ block: 'center', inline: 'center' });
+                    const target = option.querySelector('.ant-select-item-option-content') || option;
+                    const box = target.getBoundingClientRect();
+                    if (box.width <= 0 || box.height <= 0) continue;
+                    return {
+                      x: box.left + Math.min(Math.max(box.width / 2, 12), box.width - 4),
+                      y: box.top + box.height / 2,
+                    };
+                  }
+                  return null;
+                }
+                """,
+                candidate_name,
+            )
+            if not rect:
+                return False
+            page.mouse.move(float(rect["x"]), float(rect["y"]))
+            page.wait_for_timeout(80)
+            page.mouse.down()
+            page.wait_for_timeout(40)
+            page.mouse.up()
+            page.wait_for_timeout(250)
+            return True
+        except (Error, TimeoutError, KeyError, TypeError, ValueError):
+            return False
+
+    @staticmethod
+    def _scroll_property_column_into_view(page: Page) -> bool:
+        try:
+            return bool(
+                page.evaluate(
+                    """
+                    () => {
+                      const wantedHeader = '物化特性';
+                      const visible = (node) => {
+                        const rect = node.getBoundingClientRect();
+                        const style = window.getComputedStyle(node);
+                        return rect.width > 0 && rect.height > 0
+                          && style.visibility !== 'hidden'
+                          && style.display !== 'none';
+                      };
+                      const text = (node) => (node.innerText || node.textContent || '').replace(/\\s+/g, '').trim();
+                      const header = Array.from(document.querySelectorAll('thead th'))
+                        .filter((node) => text(node).includes(wantedHeader))
+                        .sort((a, b) => b.getBoundingClientRect().width - a.getBoundingClientRect().width)[0];
+                      const scrollBody = Array.from(document.querySelectorAll('.ant-table-body'))
+                        .filter(visible)
+                        .sort((a, b) => b.getBoundingClientRect().width - a.getBoundingClientRect().width)[0];
+                      if (!header || !scrollBody) return false;
+
+                      const bodyRect = scrollBody.getBoundingClientRect();
+                      const headerRect = header.getBoundingClientRect();
+                      const headerCenter = headerRect.left + headerRect.width / 2;
+                      if (headerCenter > bodyRect.left + 80 && headerCenter < bodyRect.right - 80) {
+                        return true;
+                      }
+
+                      scrollBody.scrollLeft += headerCenter - (bodyRect.left + bodyRect.width * 0.55);
+                      scrollBody.dispatchEvent(new Event('scroll', { bubbles: true }));
+                      return true;
+                    }
+                    """
+                )
+            )
+        except (Error, TimeoutError):
+            return False
+
+    @staticmethod
+    def commit_property_selection(page: Page) -> None:
+        try:
+            page.wait_for_timeout(150)
+            page.keyboard.press("Enter")
+            page.wait_for_timeout(150)
+            page.keyboard.press("Tab")
+            page.wait_for_timeout(250)
+        except (Error, TimeoutError):
+            try:
+                page.mouse.click(20, 20)
+                page.wait_for_timeout(150)
+            except (Error, TimeoutError):
+                pass
+
+    @staticmethod
+    def _commit_row_property_selection(page: Page, row: Locator) -> None:
+        identity = ApprovalWriter._row_identity(row)
+        try:
+            page.evaluate(
+                """
+                ({ rowKey, top, height }) => {
+                  const visible = (node) => {
+                    const rect = node.getBoundingClientRect();
+                    const style = window.getComputedStyle(node);
+                    return rect.width > 0 && rect.height > 0
+                      && style.visibility !== 'hidden'
+                      && style.display !== 'none';
+                  };
+                  const rowCenter = Number.isFinite(top)
+                    ? top + (Number.isFinite(height) ? height / 2 : 0)
+                    : null;
+                  const sameRow = (tr) => {
+                    if (!tr) return false;
+                    if (rowKey && tr.getAttribute('data-row-key') === rowKey) return true;
+                    if (Number.isFinite(rowCenter)) {
+                      const rect = tr.getBoundingClientRect();
+                      return Math.abs((rect.top + rect.height / 2) - rowCenter) < 12;
+                    }
+                    return false;
+                  };
+                  const rowNode = Array.from(document.querySelectorAll('tbody tr.ant-table-row')).find(sameRow);
+                  const input = rowNode
+                    ? Array.from(rowNode.querySelectorAll('input[role="combobox"], .ant-select-selection-search-input')).find(visible)
+                    : null;
+                  if (input) {
+                    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+                    input.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', bubbles: true, cancelable: true }));
+                    input.blur();
+                  }
+                  const active = document.activeElement;
+                  if (active && active.blur) active.blur();
+                  document.body.click();
+                }
+                """,
+                identity,
+            )
+            page.wait_for_timeout(300)
+        except (Error, TimeoutError):
+            try:
+                page.keyboard.press("Enter")
+                page.wait_for_timeout(150)
+                page.mouse.click(20, 20)
+                page.wait_for_timeout(150)
+            except (Error, TimeoutError):
+                pass
+
+    @staticmethod
+    def _row_property_selection_matches(page: Page, row: Locator, candidate_name: str) -> bool:
+        identity = ApprovalWriter._row_identity(row)
+        try:
+            for _ in range(8):
+                matched = bool(
+                    page.evaluate(
+                        """
+                        ({ rowKey, top, height, candidateName }) => {
+                          const visible = (node) => {
+                            const rect = node.getBoundingClientRect();
+                            const style = window.getComputedStyle(node);
+                            return rect.width > 0 && rect.height > 0
+                              && style.visibility !== 'hidden'
+                              && style.display !== 'none';
+                          };
+                          const text = (node) => (node.innerText || node.textContent || '').replace(/\\s+/g, ' ').trim();
+                          const rowCenter = Number.isFinite(top)
+                            ? top + (Number.isFinite(height) ? height / 2 : 0)
+                            : null;
+                          const sameRow = (tr) => {
+                            if (!tr) return false;
+                            if (rowKey && tr.getAttribute('data-row-key') === rowKey) return true;
+                            if (Number.isFinite(rowCenter)) {
+                              const rect = tr.getBoundingClientRect();
+                              return Math.abs((rect.top + rect.height / 2) - rowCenter) < 12;
+                            }
+                            return false;
+                          };
+                          const rows = Array.from(document.querySelectorAll('tbody tr.ant-table-row')).filter(sameRow);
+                          for (const tr of rows) {
+                            const selects = Array.from(tr.querySelectorAll('.ant-select')).filter(visible);
+                            for (const select of selects) {
+                              const selected = text(select);
+                              if (selected && selected.includes(candidateName) && !selected.includes('选择搜索')) {
+                                return true;
+                              }
+                            }
+                            const rowText = text(tr);
+                            if (rowText.includes(candidateName) && !rowText.includes('选择搜索')) {
+                              return true;
+                            }
+                          }
+                          return false;
+                        }
+                        """,
+                        {**identity, "candidateName": candidate_name},
+                    )
+                )
+                if matched:
+                    return True
+                page.wait_for_timeout(150)
+        except (Error, TimeoutError):
+            return False
         return False
 
     @staticmethod
@@ -305,6 +659,75 @@ class ApprovalWriter:
                 return False
 
     @staticmethod
+    def _type_property_search_text_real(
+        page: Page, candidate_name: str, row: Locator | None = None
+    ) -> bool:
+        try:
+            row_inputs: list[Locator] = []
+            if row is not None:
+                row_locator = row.locator(
+                    ".ant-select-open input[role='combobox'], "
+                    ".ant-select-focused input[role='combobox'], "
+                    "input[role='combobox']"
+                )
+                row_count = min(row_locator.count(), 8)
+                for index in range(row_count):
+                    candidate = row_locator.nth(index)
+                    try:
+                        if candidate.is_visible(timeout=150):
+                            row_inputs.append(candidate)
+                    except (Error, TimeoutError):
+                        continue
+
+            input_locator = page.locator(
+                ".ant-select-open input[role='combobox'], "
+                ".ant-select-focused input[role='combobox'], "
+                "input[role='combobox']"
+            )
+            count = min(input_locator.count(), 12)
+            candidates: list[Locator] = row_inputs[:]
+            for index in range(count):
+                candidate = input_locator.nth(index)
+                try:
+                    if candidate.is_visible(timeout=150):
+                        candidates.append(candidate)
+                except (Error, TimeoutError):
+                    continue
+            if not candidates:
+                return False
+
+            active_index = page.evaluate(
+                """
+                () => {
+                  const active = document.activeElement;
+                  const inputs = Array.from(document.querySelectorAll('input[role="combobox"]'));
+                  return inputs.indexOf(active);
+                }
+                """
+            )
+            input_box = candidates[-1]
+            if isinstance(active_index, int) and active_index >= 0:
+                all_inputs = page.locator("input[role='combobox']")
+                try:
+                    active_input = all_inputs.nth(active_index)
+                    if active_input.is_visible(timeout=150):
+                        input_box = active_input
+                except (Error, TimeoutError):
+                    pass
+
+            input_box.click(timeout=1000)
+            try:
+                input_box.fill(candidate_name, timeout=1000)
+            except (Error, TimeoutError):
+                page.keyboard.press("Control+A")
+                page.keyboard.press("Backspace")
+                page.keyboard.insert_text(candidate_name)
+            page.wait_for_timeout(250)
+            return True
+        except (Error, TimeoutError):
+            return False
+
+    @staticmethod
     def _confirm_property_option_by_keyboard(page: Page, candidate_name: str) -> bool:
         try:
             before_text = ApprovalWriter._selected_option_text(page)
@@ -314,6 +737,89 @@ class ApprovalWriter:
             page.wait_for_timeout(250)
             after_text = ApprovalWriter._selected_option_text(page)
             return bool(after_text and after_text != before_text and candidate_name in after_text)
+        except (Error, TimeoutError):
+            return False
+
+    @staticmethod
+    def _focus_row_combobox(row: Locator) -> bool:
+        try:
+            inputs = row.locator(
+                ".ant-select-open input[role='combobox'], "
+                ".ant-select-focused input[role='combobox'], "
+                "input[role='combobox']"
+            )
+            count = min(inputs.count(), 8)
+            for index in range(count):
+                input_box = inputs.nth(index)
+                try:
+                    if input_box.is_visible(timeout=150):
+                        input_box.click(timeout=1000)
+                        return True
+                except (Error, TimeoutError):
+                    continue
+        except (Error, TimeoutError):
+            return False
+        return False
+
+    @staticmethod
+    def _select_property_option_by_keyboard(
+        page: Page,
+        candidate_name: str,
+        option_names: list[str],
+        row: Locator | None = None,
+    ) -> bool:
+        try:
+            option_names = [str(name or "").strip() for name in option_names if str(name or "").strip()]
+            target_index = option_names.index(candidate_name)
+        except ValueError:
+            return False
+
+        try:
+            if row is not None and ApprovalWriter._focus_row_combobox(row):
+                focused = True
+            else:
+                focused = bool(
+                    page.evaluate(
+                    """
+                    () => {
+                      const visible = (node) => {
+                        const rect = node.getBoundingClientRect();
+                        const style = window.getComputedStyle(node);
+                        return rect.width > 0 && rect.height > 0
+                          && style.visibility !== 'hidden'
+                          && style.display !== 'none';
+                      };
+                      const dropdown = Array.from(document.querySelectorAll(
+                        '.ant-select-dropdown:not(.ant-select-dropdown-hidden)'
+                      )).find(visible);
+                      if (!dropdown) return false;
+                      const inputs = Array.from(document.querySelectorAll(
+                        'input[role="combobox"], .ant-select-selection-search-input'
+                      )).filter(visible);
+                      const active = document.activeElement;
+                      const input = inputs.find((node) => node === active)
+                        || inputs.find((node) => dropdown.id && node.getAttribute('aria-controls') === dropdown.id)
+                        || inputs[inputs.length - 1];
+                      if (!input) return false;
+                      input.focus();
+                      input.click();
+                      return true;
+                    }
+                    """
+                    )
+                )
+            if not focused:
+                return False
+
+            page.keyboard.press("Home")
+            page.wait_for_timeout(100)
+            for _ in range(target_index):
+                page.keyboard.press("ArrowDown")
+                page.wait_for_timeout(35)
+            page.keyboard.press("Enter")
+            page.wait_for_timeout(300)
+            text = ApprovalWriter._selected_option_text(page)
+            return bool(candidate_name in text or not ApprovalWriter._visible_property_dropdown(page))
         except (Error, TimeoutError):
             return False
 
@@ -385,6 +891,37 @@ class ApprovalWriter:
     @staticmethod
     def _scroll_open_dropdown(page: Page) -> bool:
         try:
+            scrolled = bool(
+                page.evaluate(
+                    """
+                    () => {
+                      const visible = (node) => {
+                        const rect = node.getBoundingClientRect();
+                        const style = window.getComputedStyle(node);
+                        return rect.width > 0 && rect.height > 0
+                          && style.visibility !== 'hidden'
+                          && style.display !== 'none';
+                      };
+                      const dropdown = Array.from(document.querySelectorAll(
+                        '.ant-select-dropdown:not(.ant-select-dropdown-hidden)'
+                      )).find(visible);
+                      if (!dropdown) return false;
+                      const holder = dropdown.querySelector('.rc-virtual-list-holder');
+                      if (!holder) return false;
+                      holder.scrollTop += 224;
+                      holder.dispatchEvent(new Event('scroll', { bubbles: true }));
+                      holder.dispatchEvent(new WheelEvent('wheel', { deltaY: 224, bubbles: true, cancelable: true }));
+                      return true;
+                    }
+                    """
+                )
+            )
+            if scrolled:
+                page.wait_for_timeout(160)
+                return True
+        except (Error, TimeoutError):
+            pass
+        try:
             dropdown = page.locator(".ant-select-dropdown:not(.ant-select-dropdown-hidden)").first
             if not dropdown.count() or not dropdown.is_visible():
                 return False
@@ -395,6 +932,68 @@ class ApprovalWriter:
             page.mouse.wheel(0, 220)
             page.wait_for_timeout(120)
             return True
+        except (Error, TimeoutError):
+            return False
+
+    @staticmethod
+    def _scroll_dropdown_to_option(page: Page, candidate_name: str, option_names: list[str]) -> bool:
+        try:
+            return bool(
+                page.evaluate(
+                    """
+                    ({ candidateName, optionNames }) => {
+                      const visible = (node) => {
+                        const rect = node.getBoundingClientRect();
+                        const style = window.getComputedStyle(node);
+                        return rect.width > 0 && rect.height > 0
+                          && style.visibility !== 'hidden'
+                          && style.display !== 'none';
+                      };
+                      const text = (node) => (node.innerText || node.textContent || '').replace(/\\s+/g, ' ').trim();
+                      const dropdown = Array.from(document.querySelectorAll(
+                        '.ant-select-dropdown:not(.ant-select-dropdown-hidden)'
+                      )).find(visible);
+                      if (!dropdown) return false;
+                      if (Array.from(dropdown.querySelectorAll('.ant-select-item-option')).some(
+                        (node) => visible(node) && text(node).includes(candidateName)
+                      )) {
+                        return true;
+                      }
+                      const holder = dropdown.querySelector('.rc-virtual-list-holder');
+                      if (!holder) return false;
+                      const index = optionNames.findIndex((name) => name === candidateName);
+                      const itemHeight = 32;
+                      const maxScroll = Math.max(holder.scrollHeight || 0, optionNames.length * itemHeight);
+                      const target = index >= 0 ? Math.max(0, index * itemHeight - itemHeight) : maxScroll;
+                      const positions = [
+                        target,
+                        Math.max(0, target - itemHeight * 3),
+                        Math.min(maxScroll, target + itemHeight * 3),
+                        maxScroll,
+                      ];
+                      let changed = false;
+                      for (const position of positions) {
+                        const before = holder.scrollTop;
+                        holder.scrollTop = position;
+                        holder.dispatchEvent(new Event('scroll', { bubbles: true }));
+                        holder.dispatchEvent(new WheelEvent('wheel', {
+                          deltaY: position - before || itemHeight * 4,
+                          bubbles: true,
+                          cancelable: true,
+                        }));
+                        changed = changed || Math.abs(holder.scrollTop - before) > 1;
+                        if (Array.from(dropdown.querySelectorAll('.ant-select-item-option')).some(
+                          (node) => visible(node) && text(node).includes(candidateName)
+                        )) {
+                          return true;
+                        }
+                      }
+                      return changed;
+                    }
+                    """,
+                    {"candidateName": candidate_name, "optionNames": option_names},
+                )
+            )
         except (Error, TimeoutError):
             return False
 
@@ -624,7 +1223,9 @@ class ApprovalWriter:
                         return false;
                       };
                       const rows = Array.from(document.querySelectorAll('tbody tr.ant-table-row')).filter(sameRow);
-                      if (rows.some((tr) => Array.from(tr.querySelectorAll('.ant-select, input[role="combobox"]')).some(visible))) {
+                      if (rows.some((tr) => Array.from(
+                        tr.querySelectorAll('.ant-select-open, .ant-select-focused, input[role="combobox"]')
+                      ).some(visible))) {
                         return true;
                       }
                       const actions = Array.from(document.querySelectorAll('button, a'))

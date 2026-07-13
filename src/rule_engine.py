@@ -36,7 +36,7 @@ class RuleEngine:
     rules: list[Rule]
     priority: list[str]
     manual_review_categories: set[str] = field(
-        default_factory=lambda: {UNKNOWN_CATEGORY, "不建议接收类", "拒收类"}
+        default_factory=lambda: {UNKNOWN_CATEGORY}
     )
 
     @classmethod
@@ -73,7 +73,8 @@ class RuleEngine:
             and str(row.get("default_manual_review", "")).strip().lower()
             in {"true", "1", "yes", "y", "on"}
         }
-        manual_review_categories.update({UNKNOWN_CATEGORY, "不建议接收类", "拒收类"})
+        manual_review_categories.update({UNKNOWN_CATEGORY})
+        manual_review_categories.difference_update({"不建议接收类", "拒收类"})
 
         rule_entries: list[Rule] = []
         for category in priority:
@@ -175,11 +176,11 @@ class RuleEngine:
         if not text:
             return self._manual_result("无法判断：试剂信息为空。")
 
-        if self._is_pharmacopoeia_color_standard(reagent_info):
+        if self._is_business_normal_name(reagent_info):
             return {
                 "final_category": NORMAL_CATEGORY,
                 "matched_categories": [NORMAL_CATEGORY],
-                "reason": "试剂名称命中“药典色度标准品/色度标准溶液”业务规则，按普通类处理。",
+                "reason": "试剂名称命中普通类业务关键词或药物/API类名称规则，按普通类处理。",
                 "confidence": 0.95,
                 "need_manual_review": False,
             }
@@ -190,6 +191,10 @@ class RuleEngine:
                 explanation_hits = []
             else:
                 explanation_hits = self._hits(rule.explanation_keywords, text)
+            if rule.category == NORMAL_CATEGORY:
+                explanation_hits = [
+                    hit for hit in explanation_hits if not self._is_non_decision_normal_hint(hit)
+                ]
             example_hits = self._specific_example_hits(rule.example_keywords, reagent_info)
             category_hits = self._category_suggestion_hits(rule.category, reagent_info)
             halogen_hits = self._bromine_iodine_hits(rule.category, reagent_info)
@@ -349,9 +354,20 @@ class RuleEngine:
         hits = []
         for keyword in keywords:
             normalized = RuleEngine._normalize_text(keyword)
-            if normalized and normalized in text and keyword not in hits:
+            if RuleEngine._keyword_matches_normalized_text(normalized, text) and keyword not in hits:
                 hits.append(keyword)
         return hits
+
+    @staticmethod
+    def _keyword_matches_normalized_text(normalized_keyword: str, normalized_text: str) -> bool:
+        if not normalized_keyword:
+            return False
+        if normalized_keyword in normalized_text:
+            return True
+        if normalized_keyword.endswith("类") and len(normalized_keyword) >= 3:
+            base_keyword = normalized_keyword[:-1]
+            return bool(base_keyword and base_keyword in normalized_text)
+        return False
 
     @staticmethod
     def _category_suggestion_hits(category: str, reagent_info: dict[str, Any]) -> list[str]:
@@ -400,6 +416,16 @@ class RuleEngine:
         return hits
 
     @staticmethod
+    def _is_non_decision_normal_hint(hit: str) -> bool:
+        normalized = RuleEngine._normalize_text(hit)
+        non_decision_fragments = (
+            "含氟氯溴碘类",
+            "卤代烃及衍生物除外",
+            "价格翻倍",
+        )
+        return any(fragment in normalized for fragment in non_decision_fragments)
+
+    @staticmethod
     def _bromine_iodine_hits(category: str, reagent_info: dict[str, Any]) -> list[str]:
         if category != "\u6eb4\u7898\u7c7b":
             return []
@@ -446,6 +472,12 @@ class RuleEngine:
         if category == "不建议接收类":
             hits.extend(RuleEngine._reject_metal_name_hits(reagent_info))
 
+        if category == "\u91cd\u91d1\u5c5e\u7c7b":
+            hits.extend(RuleEngine._heavy_metal_name_hits(reagent_info))
+
+        if category == "\u5f02\u5473":
+            hits.extend(RuleEngine._indole_name_hits(reagent_info))
+
         if category == "\u7279\u6b8a\u9178" and RuleEngine._is_hydrochloride_salt(reagent_info):
             return []
 
@@ -476,6 +508,38 @@ class RuleEngine:
         for token in ("铅", "汞", "铊", "铍"):
             if token in name_text:
                 hits.append(f"含{token}")
+        return list(dict.fromkeys(hits))
+
+    @staticmethod
+    def _heavy_metal_name_hits(reagent_info: dict[str, Any]) -> list[str]:
+        parts = []
+        for key in ("name", "reagent_name", "chemical_name", "standard_name", "cleaned_name"):
+            value = reagent_info.get(key)
+            if value:
+                parts.append(str(value))
+        name_text = "".join(parts)
+        hits = []
+        for token in ("\u9521", "\u954d", "\u94b4", "\u9511", "\u516d\u4ef7\u94ec", "\u9549", "\u94cb"):
+            if token in name_text:
+                hits.append(f"\u542b{token}")
+        return list(dict.fromkeys(hits))
+
+    @staticmethod
+    def _indole_name_hits(reagent_info: dict[str, Any]) -> list[str]:
+        parts = []
+        for key in ("name", "reagent_name", "chemical_name", "standard_name", "cleaned_name", "english_name"):
+            value = reagent_info.get(key)
+            if value:
+                parts.append(str(value))
+        name_text = "".join(parts).lower()
+        hits = []
+        for token, label in (
+            ("\u5432\u54da", "\u542b\u5432\u54da"),
+            ("indole", "indole"),
+            ("isoindole", "isoindole"),
+        ):
+            if token in name_text:
+                hits.append(label)
         return list(dict.fromkeys(hits))
 
     @staticmethod
@@ -614,6 +678,53 @@ class RuleEngine:
             "europeanpharmacopoeiacolorstandardsolution",
         )
         return any(RuleEngine._normalize_text(token) in name_text for token in tokens)
+
+    @staticmethod
+    def _is_business_normal_name(reagent_info: dict[str, Any]) -> bool:
+        name_text = RuleEngine._normalize_text(
+            " ".join(
+                str(reagent_info.get(key) or "")
+                for key in (
+                    "name",
+                    "reagent_name",
+                    "chemical_name",
+                    "standard_name",
+                    "cleaned_name",
+                    "english_name",
+                )
+            )
+        )
+        if any(token in name_text for token in ("\u65e0\u6807\u7b7e", "\u6a21\u62df\u8bd5\u5242", "\u5b8c\u5168\u4e0d\u5b58\u5728")):
+            return False
+        tokens = (
+            "\u6e05\u6d17\u6db2",
+            "\u6807\u51c6",
+            "\u6807\u51c6\u6db2",
+            "\u6807\u51c6\u6eb6\u6db2",
+            "icp",
+            "\u8bd5\u5242",
+            "\u7f13\u51b2\u6db2",
+            "\u86cb\u767d",
+            "\u7ec6\u80de",
+            "\u75c5\u6bd2",
+            "\u514d\u75ab",
+            "\u6297\u4f53",
+            "\u67d3\u8272",
+            "\u6807\u6db2",
+            "\u6807\u5b9a",
+            "\u6821\u51c6",
+            "\u836f\u7269",
+            "\u4e00\u6b21\u6027",
+            "\u5361\u9a6c\u897f\u5e73",
+            "\u6587\u62c9\u6cd5\u8f9b",
+            "\u76d0\u9178\u6587\u62c9\u6cd5\u8f9b",
+            "carbamazepine",
+            "venlafaxine",
+            "venlafaxinehydrochloride",
+        )
+        return RuleEngine._is_pharmacopoeia_color_standard(reagent_info) or any(
+            RuleEngine._normalize_text(token) in name_text for token in tokens
+        )
 
     @staticmethod
     def _is_hydrochloride_salt(reagent_info: dict[str, Any]) -> bool:

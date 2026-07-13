@@ -32,6 +32,9 @@ NOISE_PATTERN = re.compile(
     r"(?:纯度|含量|浓度|规格|包装|原装|进口|国产|现货|危化品|易制毒|易制爆)"
 )
 BRACKET_PATTERN = re.compile(r"[\[\]【】()（）{}]")
+INTERNAL_CODE_SUFFIX_PATTERN = re.compile(
+    r"^(.+?)\s*[:：]\s*([A-Za-z0-9][A-Za-z0-9_.\-/\\ ]{1,})$"
+)
 
 
 DEFAULT_RESULT = {
@@ -446,6 +449,7 @@ class NameNormalizer:
 
     def _clean_name(self, raw_name: str) -> str:
         text = unicodedata.normalize("NFKC", raw_name or "")
+        text = self._strip_internal_code_suffix(text)
         text = CAS_PATTERN.sub(" ", text)
         for pattern in CONCENTRATION_PATTERNS:
             text = pattern.sub(" ", text)
@@ -456,6 +460,19 @@ class NameNormalizer:
         text = re.sub(r"[，,;；:：|]+", " ", text)
         text = re.sub(r"\s+", " ", text).strip(" -_/")
         return text
+
+    @staticmethod
+    def _strip_internal_code_suffix(text: str) -> str:
+        match = INTERNAL_CODE_SUFFIX_PATTERN.match(text.strip())
+        if not match:
+            return text
+        suffix = match.group(2).strip()
+        is_code_like = bool(re.search(r"\d", suffix)) and bool(
+            re.search(r"[-_/\\]|[A-Za-z].*\d|\d.*[A-Za-z]", suffix)
+        )
+        if not is_code_like:
+            return text
+        return match.group(1).strip()
 
     @staticmethod
     def _extract_concentration(text: str) -> str:

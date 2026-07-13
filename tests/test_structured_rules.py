@@ -48,7 +48,7 @@ class StructuredRulesTest(unittest.TestCase):
                 )
 
                 self.assertEqual(result["final_category"], "不建议接收类")
-                self.assertTrue(result["need_manual_review"])
+                self.assertFalse(result["need_manual_review"])
 
     def test_reject_examples_from_structured_rules(self) -> None:
         for name in ["黑索今", "RDX", "太安", "PETN", "奥克托今", "HMX", "医疗废物", "放射性元素", "氚", "镭", "铀"]:
@@ -62,7 +62,7 @@ class StructuredRulesTest(unittest.TestCase):
                 )
 
                 self.assertEqual(result["final_category"], "不建议接收类")
-                self.assertTrue(result["need_manual_review"])
+                self.assertFalse(result["need_manual_review"])
 
     def test_lead_mercury_thallium_beryllium_examples_are_reject_class(self) -> None:
         for name in [
@@ -91,7 +91,7 @@ class StructuredRulesTest(unittest.TestCase):
                 )
 
                 self.assertEqual(result["final_category"], "不建议接收类")
-                self.assertTrue(result["need_manual_review"])
+                self.assertFalse(result["need_manual_review"])
 
     def test_perchloric_acid_concentration_rules(self) -> None:
         low = self.engine.classify({"reagent_name": "70%\u9ad8\u6c2f\u9178", "allow_default_normal": True})
@@ -114,6 +114,89 @@ class StructuredRulesTest(unittest.TestCase):
 
         self.assertEqual(result["final_category"], "\u6eb4\u7898\u7c7b")
 
+    def test_tin_compound_matches_heavy_metal_class(self) -> None:
+        result = self.engine.classify(
+            {
+                "reagent_name": "\u4e09\u6c1f\u7532\u78fa\u9178\u9521",
+                "standard_name": "\u4e09\u6c1f\u7532\u78fa\u9178\u9521(II)",
+                "text": "\u4e09\u6c1f\u7532\u78fa\u9178\u9521",
+                "allow_default_normal": True,
+            }
+        )
+
+        self.assertEqual(result["final_category"], "\u91cd\u91d1\u5c5e\u7c7b")
+        self.assertFalse(result["need_manual_review"])
+
+    def test_business_normal_keywords_override_risk_classes(self) -> None:
+        names = [
+            "\u94c5ICP\u6807\u51c6\u6eb6\u6db2",
+            "\u94cdICP\u6807\u51c6\u6db2",
+            "\u6e05\u6d17\u6db2",
+            "\u94c5\u6807\u6db2",
+            "\u94cd\u6821\u51c6\u6db2",
+            "\u94c5\u6807\u51c6\u54c1",
+            "\u6c2f\u5316\u94cd\u6807\u5b9a\u6eb6\u6db2",
+            "\u5432\u54da\u6807\u51c6\u6eb6\u6db2",
+            "3-Bromo-6-nitroindole \u8bd5\u5242",
+            "\u78f7\u9178\u7f13\u51b2\u6db2",
+            "\u86cb\u767d\u514d\u75ab\u6297\u4f53\u8bd5\u5242",
+            "\u672a\u77e5\u7ec6\u80de\u57f9\u517b\u6db2",
+            "\u4e00\u6b21\u6027\u75c5\u6bd2\u91c7\u6837\u7ba1",
+            "\u75c5\u6bd2\u4fdd\u5b58\u6db2",
+            "\u82cf\u6728\u7d20\u67d3\u8272\u6db2",
+            "\u5361\u9a6c\u897f\u5e73\u836f\u7269\u5bf9\u7167\u54c1",
+            "\u76d0\u9178\u6587\u62c9\u6cd5\u8f9b",
+        ]
+        for name in names:
+            with self.subTest(name=name):
+                result = self.engine.classify(
+                    {
+                        "reagent_name": name,
+                        "standard_name": name,
+                        "text": "\u8fd9\u91cc\u7684\u8bc1\u636e\u63d0\u5230\u542b\u94c5\u3001\u6eb4\u548c\u5432\u54da",
+                        "allow_default_normal": True,
+                    }
+                )
+
+                self.assertEqual(result["final_category"], "\u666e\u901a\u7c7b")
+                self.assertFalse(result["need_manual_review"])
+
+    def test_indole_derivative_matches_odor_class(self) -> None:
+        result = self.engine.classify(
+            {
+                "reagent_name": "4-\u6c28\u57fa-N-\u7532\u57fa\u5432\u54da",
+                "standard_name": "4-amino-1-methylindole",
+                "text": "Chemsrc matched 4-amino-1-methylindole. Flash point 152.2 C.",
+                "allow_default_normal": True,
+            }
+        )
+
+        self.assertEqual(result["final_category"], "\u5f02\u5473")
+        self.assertFalse(result["need_manual_review"])
+
+    def test_indole_names_prefer_odor_class(self) -> None:
+        for name in [
+            "\u5432\u54da",
+            "\u5f02\u5432\u54da",
+            "indole",
+            "isoindole",
+            "3-Bromo-6-nitroindole",
+            "7-\u6eb4-5-\u6c1f-1H-\u5432\u54da-2,3-\u4e8c\u916e",
+        ]:
+            with self.subTest(name=name):
+                result = self.engine.classify(
+                    {
+                        "reagent_name": name,
+                        "standard_name": name,
+                        "english_name": name,
+                        "text": name,
+                        "allow_default_normal": True,
+                    }
+                )
+
+                self.assertEqual(result["final_category"], "\u5f02\u5473")
+                self.assertFalse(result["need_manual_review"])
+
     def test_bromine_iodine_does_not_match_raw_text_noise(self) -> None:
         result = self.engine.classify(
             {
@@ -127,6 +210,17 @@ class StructuredRulesTest(unittest.TestCase):
         )
 
         self.assertNotEqual(result["final_category"], "\u6eb4\u7898\u7c7b")
+
+    def test_normal_category_ignores_halogen_price_note(self) -> None:
+        result = self.engine.classify(
+            {
+                "reagent_name": "\u672a\u77e5\u4e2d\u95f4\u4f53",
+                "text": "\u666e\u901a\u7c7b\u89e3\u91ca\u5907\u6ce8\uff1a\u542b\u6c1f\u6c2f\u6eb4\u7898\u7c7b\uff08\u5364\u4ee3\u70c3\u53ca\u884d\u751f\u7269\u9664\u5916\uff09\u4ef7\u683c\u7ffb\u500d",
+                "allow_default_normal": False,
+            }
+        )
+
+        self.assertNotEqual(result["final_category"], "\u666e\u901a\u7c7b")
 
     def test_hydrochloride_salt_does_not_match_special_acid(self) -> None:
         result = self.engine.classify(

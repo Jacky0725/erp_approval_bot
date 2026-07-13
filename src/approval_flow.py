@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import os
+import re
 from typing import Any
 
 from playwright.sync_api import Error, Locator, Page
@@ -13,6 +14,7 @@ from category_mapper import to_erp_property
 from chemical_searcher import ChemicalSearcher
 from llm_extractor import LlmExtractor
 from name_normalizer import NameNormalizer
+from reagent_name_rules import UNKNOWN_CATEGORY, unknown_reagent_name_reason
 from reagent_memory import ReagentMemory
 from rule_engine import RuleEngine
 from rule_maintainer import RuleMaintainer
@@ -168,8 +170,11 @@ class ApprovalFlowMixin:
         try:
             self.enter_reagent_judgement_page(page)
             tasks = self.read_all_todo_tasks(page)
-            list_numbers = self.todo_list_numbers(tasks)
-            print(f"Todo list refresh: {len(list_numbers)} total task(s) across all visible todo pages.")
+            all_list_numbers = self.todo_list_numbers(tasks)
+            list_numbers = self.filter_scheduled_todo_list_numbers(all_list_numbers)
+            print(f"Todo list refresh: {len(all_list_numbers)} total task(s) across all visible todo pages.")
+            if len(list_numbers) != len(all_list_numbers):
+                print(f"Scheduled review filter kept {len(list_numbers)} task(s) for automatic approval.")
 
             for list_number in list_numbers:
                 if len(processed_list_numbers) >= max_todos:
@@ -236,6 +241,38 @@ class ApprovalFlowMixin:
             print(f"Invalid PROCESS_ALL_TODOS_MAX={value}; using 50.")
             return 50
         return max(1, max_count)
+
+    def filter_scheduled_todo_list_numbers(self, list_numbers: list[str]) -> list[str]:
+        if not self.scheduled_manual_review_skip_enabled():
+            return list_numbers
+
+        filtered = []
+        skipped = []
+        for list_number in list_numbers:
+            has_manual_review, reason = self.current_list_has_manual_review_item(list_number)
+            if has_manual_review:
+                skipped.append(list_number)
+                print(
+                    "Scheduled approval skipped list with pending manual review: "
+                    f"{list_number}. {reason}"
+                )
+                continue
+            filtered.append(list_number)
+
+        if skipped:
+            print(f"Scheduled approval skipped {len(skipped)} manual-review blocked list(s): {', '.join(skipped)}")
+        return filtered
+
+    def scheduled_manual_review_skip_enabled(self) -> bool:
+        scheduled = os.getenv("SCHEDULED_RUN", "").strip().lower() in {"1", "true", "yes", "y", "on"}
+        skip = os.getenv("SCHEDULED_SKIP_MANUAL_REVIEW_LISTS", "true").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "y",
+            "on",
+        }
+        return scheduled and skip
 
     def process_unmatched_reagent_pages(
         self,
@@ -313,18 +350,43 @@ class ApprovalFlowMixin:
                     }
                 for key in write_result.get("attempted", set()):
                     write_attempts_by_key[key] = write_attempts_by_key.get(key, 0) + 1
-                handled_reagent_keys.update(write_result.get("handled", set()))
-                for key in write_result.get("failed", set()):
+                failed_keys = set(write_result.get("failed", set()))
+                handled_reagent_keys.update(set(write_result.get("handled", set())) - failed_keys)
+                for key in failed_keys:
                     if write_attempts_by_key.get(key, 0) >= self.max_reagent_write_attempts():
                         handled_reagent_keys.add(key)
                         print(f"Write retry limit reached for reagent key: {key}")
 
-                if write_result.get("failed"):
+                if failed_keys:
                     print(
                         "Multi-page mode will re-read the current reagent page after write failure "
                         "before moving to the next page."
                     )
-                    self.sort_property_column_until_unmatched_visible(page)
+                    if not self.stabilize_reagent_detail_after_write_failure(page):
+                        print(
+                            "Multi-page mode stopped because the reagent detail page could not be "
+                            "stabilized after a write failure."
+                        )
+                        break
+                    try:
+                        self.sort_property_column_until_unmatched_visible(page)
+                    except Exception as error:
+                        print(
+                            "Multi-page mode stopped because the physicochemical property header "
+                            f"was not available after write recovery: {error}"
+                        )
+                        break
+                    continue
+                if self.approval_write_mode() == "multi_page" and write_result.get("attempted"):
+                    print("Multi-page mode saved one reagent; re-sorting and re-reading the current page.")
+                    try:
+                        self.sort_property_column_until_unmatched_visible(page)
+                    except Exception as error:
+                        print(
+                            "Multi-page mode stopped because sorting after a successful save failed: "
+                            f"{error}"
+                        )
+                        break
                     continue
             else:
                 write_result = {"attempted": set(), "handled": set(), "failed": set()}
@@ -339,7 +401,11 @@ class ApprovalFlowMixin:
                 else:
                     print("Multi-page mode stopped because next-page navigation could not be verified.")
                 break
-            self.sort_property_column_until_unmatched_visible(page)
+            try:
+                self.sort_property_column_until_unmatched_visible(page)
+            except Exception as error:
+                print(f"Multi-page mode stopped because sorting after next-page navigation failed: {error}")
+                break
 
             if visited_steps >= 200:
                 raise RuntimeError("Stopped multi-page approval after 200 pages; page navigation may be stuck.")
@@ -466,15 +532,38 @@ class ApprovalFlowMixin:
                 progress = f"page {page_label} {progress}"
             stage_logger.event(f"Processing reagent {progress}: {reagent_name} / {cas}")
 
-            memory_match = memory.lookup(cas=cas, raw_name=reagent_name)
-            if memory_match:
-                suggestion = self.reagent_memory_suggestion(reagent, memory_match)
+            unknown_reason = unknown_reagent_name_reason(
+                reagent_name,
+                reagent.get("\u89c4\u683c", ""),
+                reagent.get("\u89c4\u683c\u5355\u4f4d", ""),
+            )
+            if unknown_reason:
+                suggestion = self.unknown_reagent_suggestion(reagent, unknown_reason)
                 suggestions_by_index[index] = suggestion
+                self.remember_erp_suggestion(memory, suggestion)
                 print(
-                    "Reagent memory suggestion: "
-                    f"{reagent.get('\u5e8f\u53f7', '')} {reagent_name} -> {memory_match.get('final_category', '')}"
+                    "Direct unknown reagent rule suggestion: "
+                    f"{reagent.get('\u5e8f\u53f7', '')} {reagent_name} -> {UNKNOWN_CATEGORY}"
                 )
                 continue
+
+            memory_match = memory.lookup(cas=cas, raw_name=reagent_name)
+            if memory_match:
+                if not self.memory_match_is_safe(reagent, memory_match, rule_engine=rule_engine):
+                    self.disable_unsafe_memory_match(memory, memory_match, reagent)
+                else:
+                    suggestion = self.reagent_memory_suggestion(reagent, memory_match)
+                    suggestions_by_index[index] = suggestion
+                    self.queue_manual_review_if_suggestion_requires_it(
+                        reagent,
+                        suggestion,
+                        name_result={},
+                    )
+                    print(
+                        "Reagent memory suggestion: "
+                        f"{reagent.get('\u5e8f\u53f7', '')} {reagent_name} -> {memory_match.get('final_category', '')}"
+                    )
+                    continue
 
             direct_suggestion = self.direct_business_rule_suggestion(reagent, rule_engine)
             if direct_suggestion:
@@ -513,13 +602,21 @@ class ApprovalFlowMixin:
                 raw_name=reagent_name,
             )
             if memory_match:
-                suggestion = self.reagent_memory_suggestion(reagent, memory_match, name_result)
-                suggestions_by_index[index] = suggestion
-                print(
-                    "Reagent memory suggestion after normalization: "
-                    f"{reagent.get('\u5e8f\u53f7', '')} {reagent_name} -> {memory_match.get('final_category', '')}"
-                )
-                continue
+                if not self.memory_match_is_safe(reagent, memory_match, name_result, rule_engine=rule_engine):
+                    self.disable_unsafe_memory_match(memory, memory_match, reagent)
+                else:
+                    suggestion = self.reagent_memory_suggestion(reagent, memory_match, name_result)
+                    suggestions_by_index[index] = suggestion
+                    self.queue_manual_review_if_suggestion_requires_it(
+                        reagent,
+                        suggestion,
+                        name_result=name_result,
+                    )
+                    print(
+                        "Reagent memory suggestion after normalization: "
+                        f"{reagent.get('\u5e8f\u53f7', '')} {reagent_name} -> {memory_match.get('final_category', '')}"
+                    )
+                    continue
 
             pending_reagents.append({"index": index, "progress": progress, "reagent": reagent})
 
@@ -593,7 +690,79 @@ class ApprovalFlowMixin:
 
         return [suggestions_by_index[index] for index in sorted(suggestions_by_index)]
 
+    def queue_manual_review_if_suggestion_requires_it(
+        self,
+        reagent: dict[str, str],
+        suggestion: dict[str, Any],
+        name_result: dict[str, Any] | None = None,
+    ) -> None:
+        if not suggestion.get("\u9700\u4eba\u5de5\u590d\u6838"):
+            return
+        self.add_manual_review_item_from_suggestion(
+            reagent,
+            name_result or {
+                "raw_name": reagent.get("\u8bd5\u5242\u540d\u79f0", ""),
+                "cleaned_name": suggestion.get("\u6e05\u6d17\u540e\u540d\u79f0", ""),
+                "standard_name": suggestion.get("\u6807\u51c6\u5316\u540d\u79f0", ""),
+                "reason": suggestion.get("\u540d\u79f0\u6807\u51c6\u5316\u539f\u56e0", ""),
+            },
+            {
+                "source": suggestion.get("\u67e5\u8be2\u6765\u6e90", ""),
+                "url": suggestion.get("\u67e5\u8be2URL", ""),
+                "failure_reason": suggestion.get("\u67e5\u8be2\u5931\u8d25\u539f\u56e0", ""),
+                "raw_text": suggestion.get("\u8bc1\u636e", ""),
+            },
+            {
+                "evidence": [suggestion.get("\u8bc1\u636e", "")]
+                if suggestion.get("\u8bc1\u636e")
+                else [],
+            },
+            {
+                "reason": suggestion.get("\u89c4\u5219\u539f\u56e0", ""),
+                "need_manual_review": True,
+            },
+            suggestion,
+        )
+
+    def unknown_reagent_suggestion(self, reagent: dict[str, Any], reason: str) -> dict[str, Any]:
+        name = str(reagent.get("\u8bd5\u5242\u540d\u79f0", "") or "").strip()
+        cas = str(reagent.get("CAS\u53f7", "") or "").strip()
+        return {
+            "\u8bd5\u5242\u6e05\u5355\u53f7": self.current_detail_list_number(),
+            "\u5e8f\u53f7": reagent.get("\u5e8f\u53f7", ""),
+            "\u8bd5\u5242\u540d\u79f0": name,
+            "CAS\u53f7": cas,
+            "\u89c4\u683c": reagent.get("\u89c4\u683c", ""),
+            "\u89c4\u683c\u5355\u4f4d": reagent.get("\u89c4\u683c\u5355\u4f4d", ""),
+            "\u8bd5\u5242\u6570\u91cf": reagent.get("\u8bd5\u5242\u6570\u91cf", ""),
+            "\u6807\u51c6\u5316\u540d\u79f0": name,
+            "\u82f1\u6587\u540d\u79f0": "",
+            "\u6e05\u6d17\u540e\u540d\u79f0": name,
+            "\u6d53\u5ea6": "",
+            "\u540d\u79f0\u6807\u51c6\u5316\u7f6e\u4fe1\u5ea6": 1.0,
+            "\u540d\u79f0\u9700\u4eba\u5de5\u590d\u6838": False,
+            "\u540d\u79f0\u6807\u51c6\u5316\u539f\u56e0": reason,
+            "\u67e5\u8be2\u6765\u6e90": "business_rule_unknown_name",
+            "\u67e5\u8be2URL": "",
+            "\u67e5\u8be2\u9700\u4eba\u5de5": False,
+            "\u7f51\u7ad9\u5339\u914d\u540d\u79f0": "",
+            "\u540d\u79f0\u76f8\u4f3c\u5ea6": 1.0,
+            "\u67e5\u8be2\u76f8\u5173\u6027\u901a\u8fc7": True,
+            "\u8d44\u6599\u53ef\u4fe1\u5ea6": 1.0,
+            "\u8bc1\u636e\u8d28\u91cf": "unknown_name",
+            "\u67e5\u8be2\u5931\u8d25\u539f\u56e0": "",
+            "\u5927\u6a21\u578b\u5019\u9009\u7c7b\u522b": [UNKNOWN_CATEGORY],
+            "\u8bc1\u636e": reason,
+            "\u6700\u7ec8\u5efa\u8bae\u7c7b\u522b": UNKNOWN_CATEGORY,
+            "\u547d\u4e2d\u7c7b\u522b": [UNKNOWN_CATEGORY],
+            "\u89c4\u5219\u539f\u56e0": reason,
+            "\u7f6e\u4fe1\u5ea6": 1.0,
+            "\u9700\u4eba\u5de5\u590d\u6838": False,
+        }
+
     def remember_erp_suggestion(self, memory: ReagentMemory, suggestion: dict[str, Any]) -> bool:
+        if str(suggestion.get("查询来源") or "").strip() == "reagent_memory":
+            return False
         final_category = str(suggestion.get("最终建议类别") or "").strip()
         erp_category = to_erp_property(final_category, self.settings)
         if not erp_category:
@@ -601,6 +770,131 @@ class ApprovalFlowMixin:
         normalized = dict(suggestion)
         normalized["最终建议类别"] = erp_category
         return memory.remember_suggestion(normalized)
+
+    def memory_match_is_safe(
+        self,
+        reagent: dict[str, str],
+        memory_row: dict[str, Any],
+        name_result: dict[str, Any] | None = None,
+        rule_engine: RuleEngine | None = None,
+    ) -> bool:
+        final_category = str(memory_row.get("final_category") or "").strip()
+        if final_category != "普通类":
+            return True
+
+        raw_name = str(reagent.get("试剂名称", "") or "").strip()
+        memory_names = " ".join(
+            str(memory_row.get(key) or "")
+            for key in ("raw_name", "cleaned_name", "standard_name")
+        )
+        normalized_names = " ".join(
+            str((name_result or {}).get(key) or "")
+            for key in ("raw_name", "cleaned_name", "standard_name", "english_name")
+        )
+        actual_names = " ".join([raw_name, normalized_names])
+
+        if self._has_bromine_or_iodine(actual_names):
+            return False
+        if self._looks_like_pharmacopoeia_color(memory_names) and not self._looks_like_pharmacopoeia_color(actual_names):
+            return False
+        if rule_engine and self._ordinary_memory_conflicts_with_rules(
+            reagent,
+            memory_row,
+            name_result,
+            rule_engine,
+        ):
+            return False
+        return True
+
+    @staticmethod
+    def _ordinary_memory_conflicts_with_rules(
+        reagent: dict[str, str],
+        memory_row: dict[str, Any],
+        name_result: dict[str, Any] | None,
+        rule_engine: RuleEngine,
+    ) -> bool:
+        raw_name = str(reagent.get("试剂名称", "") or memory_row.get("raw_name") or "").strip()
+        cleaned_name = str(
+            (name_result or {}).get("cleaned_name")
+            or memory_row.get("cleaned_name")
+            or raw_name
+        ).strip()
+        standard_name = str(
+            (name_result or {}).get("standard_name")
+            or memory_row.get("standard_name")
+            or raw_name
+        ).strip()
+        classification = rule_engine.classify(
+            {
+                "reagent_name": raw_name,
+                "name": standard_name or raw_name,
+                "standard_name": standard_name,
+                "cleaned_name": cleaned_name,
+                "cas": reagent.get("CAS号", "") or memory_row.get("cas") or "",
+                "text": " ".join(value for value in (raw_name, cleaned_name, standard_name) if value),
+                "allow_default_normal": False,
+            }
+        )
+        category = str(classification.get("final_category") or "").strip()
+        return bool(category and category != "普通类")
+
+    def disable_unsafe_memory_match(
+        self,
+        memory: ReagentMemory,
+        memory_row: dict[str, Any],
+        reagent: dict[str, str],
+    ) -> None:
+        record_id = memory_row.get("id")
+        reagent_name = str(reagent.get("试剂名称", "") or "").strip()
+        message = (
+            "Unsafe reagent memory ignored: "
+            f"{reagent_name} matched memory id {record_id} -> {memory_row.get('final_category', '')}."
+        )
+        print(message)
+        if not record_id:
+            return
+        previous_reason = str(memory_row.get("reason") or "").strip()
+        reason = (
+            f"{previous_reason}\n"
+            f"自动停用：{reagent_name} 的本地记忆命中未通过安全校验，需人工确认后再复用。"
+        ).strip()
+        try:
+            memory.update_record(
+                int(record_id),
+                {
+                    "reusable": False,
+                    "conflict": True,
+                    "reason": reason,
+                },
+            )
+        except Exception as error:
+            print(f"Could not disable unsafe reagent memory id {record_id}: {error}")
+
+    @staticmethod
+    def _has_bromine_or_iodine(text: str) -> bool:
+        return bool(
+            re.search(
+                r"溴|碘|bromo|bromide|bromine|iodo|iodide|iodine",
+                str(text or ""),
+                flags=re.I,
+            )
+        )
+
+    @staticmethod
+    def _looks_like_pharmacopoeia_color(text: str) -> bool:
+        normalized = re.sub(r"\s+", "", str(text or "").lower())
+        tokens = (
+            "药典色度标准品",
+            "药典色度标准溶液",
+            "欧洲药典色度标准溶液",
+            "色度标准品",
+            "色度标准溶液",
+            "pharmacopoeiacolor",
+            "pharmacopoeialcolor",
+            "colourstandard",
+            "colorstandard",
+        )
+        return any(token in normalized for token in tokens)
 
     def add_manual_review_item_from_suggestion(
         self,
@@ -792,6 +1086,22 @@ class ApprovalFlowMixin:
         rule_engine: RuleEngine,
     ) -> dict[str, Any] | None:
         reagent_name = reagent.get("\u8bd5\u5242\u540d\u79f0", "")
+        ambiguous_acid_reason = self.ambiguous_acid_reason(reagent_name)
+        if ambiguous_acid_reason:
+            classification = {
+                "final_category": "\u5e38\u89c4\u9178",
+                "matched_categories": ["\u5e38\u89c4\u9178"],
+                "reason": ambiguous_acid_reason,
+                "confidence": 1.0,
+                "need_manual_review": False,
+            }
+            return self._direct_business_suggestion(
+                reagent,
+                reagent_name,
+                classification,
+                ambiguous_acid_reason,
+            )
+
         kit_reason = self.product_kit_normal_reason(reagent_name)
         if kit_reason:
             classification = {
@@ -801,7 +1111,7 @@ class ApprovalFlowMixin:
                 "confidence": 0.9,
                 "need_manual_review": False,
             }
-            return self._direct_normal_suggestion(reagent, reagent_name, classification, kit_reason)
+            return self._direct_business_suggestion(reagent, reagent_name, classification, kit_reason)
 
         classification = rule_engine.classify(
             {
@@ -814,14 +1124,25 @@ class ApprovalFlowMixin:
         )
         if classification.get("final_category") != "\u666e\u901a\u7c7b":
             return None
-        if "\u836f\u5178\u8272\u5ea6" not in str(classification.get("reason", "")):
+        if float(classification.get("confidence") or 0.0) < 0.9:
             return None
-        return self._direct_normal_suggestion(
+        return self._direct_business_suggestion(
             reagent,
             reagent_name,
             classification,
-            "\u547d\u4e2d\u836f\u5178\u8272\u5ea6\u6807\u51c6\u54c1\u4e1a\u52a1\u89c4\u5219",
+            str(classification.get("reason") or "\u547d\u4e2d\u666e\u901a\u7c7b\u4e1a\u52a1\u89c4\u5219"),
         )
+
+    @staticmethod
+    def ambiguous_acid_reason(reagent_name: str) -> str:
+        normalized = str(reagent_name or "").replace(" ", "").lower()
+        if not normalized:
+            return ""
+        has_uncertain_prefix = any(token in normalized for token in ("\u7591\u4f3c", "\u53ef\u80fd", "\u6216", "/"))
+        has_common_acid = "\u786b\u9178" in normalized or "\u78f7\u9178" in normalized
+        if has_uncertain_prefix and has_common_acid:
+            return "\u8bd5\u5242\u540d\u79f0\u5305\u542b\u201c\u7591\u4f3c/\u53ef\u80fd/\u6216\u201d\u4e14\u6307\u5411\u786b\u9178\u6216\u78f7\u9178\uff0c\u6309\u4e1a\u52a1\u89c4\u5219\u76f4\u63a5\u5224\u5b9a\u4e3a\u5e38\u89c4\u9178\u3002"
+        return ""
 
     @staticmethod
     def product_kit_normal_reason(reagent_name: str) -> str:
@@ -856,7 +1177,7 @@ class ApprovalFlowMixin:
             return "\u8bd5\u5242\u540d\u79f0\u547d\u4e2d\u8bd5\u5242\u76d2/\u6807\u51c6\u6db2/\u5546\u54c1\u8bd5\u5242\u4e1a\u52a1\u89c4\u5219\uff0c\u6309\u666e\u901a\u7c7b\u5904\u7406\u3002"
         return ""
 
-    def _direct_normal_suggestion(
+    def _direct_business_suggestion(
         self,
         reagent: dict[str, str],
         reagent_name: str,
@@ -884,7 +1205,7 @@ class ApprovalFlowMixin:
             "name_normalization": name_result,
         }
         extracted = {
-            "suggested_categories": ["\u666e\u901a\u7c7b"],
+            "suggested_categories": [classification.get("final_category", "")],
             "evidence": [classification.get("reason", "")],
             "confidence": 0.95,
         }
@@ -898,11 +1219,25 @@ class ApprovalFlowMixin:
     ) -> dict[str, Any]:
         confidence = float(memory_row.get("confidence") or 0.0)
         final_category = str(memory_row.get("final_category") or "").strip()
+        memory_url = str(memory_row.get("url") or "").strip()
+        erp_cas = str(reagent.get("CAS\u53f7", "") or "").strip()
+        memory_cas = str(memory_row.get("cas") or "").strip()
+        url_cas = self.extract_cas_from_url(memory_url)
+        authoritative_cas = url_cas or memory_cas or erp_cas
+        cas_conflict = bool(erp_cas and authoritative_cas and self.normalize_cas(erp_cas) != self.normalize_cas(authoritative_cas))
+        suggestion_reagent = dict(reagent)
+        if cas_conflict:
+            suggestion_reagent["CAS\u53f7"] = ""
+            print(
+                "Reagent memory CAS conflict; using memory URL/CAS and dropping ERP CAS from suggestion: "
+                f"{reagent.get('\u5e8f\u53f7', '')} {reagent.get('\u8bd5\u5242\u540d\u79f0', '')} "
+                f"ERP CAS={erp_cas}, memory CAS={authoritative_cas}, url={memory_url}"
+            )
         name_result = dict(name_result or {})
         name_result.setdefault("raw_name", reagent.get("\u8bd5\u5242\u540d\u79f0", ""))
         name_result.setdefault("cleaned_name", memory_row.get("cleaned_name") or reagent.get("\u8bd5\u5242\u540d\u79f0", ""))
         name_result.setdefault("standard_name", memory_row.get("standard_name") or reagent.get("\u8bd5\u5242\u540d\u79f0", ""))
-        name_result.setdefault("cas", memory_row.get("cas") or reagent.get("CAS\u53f7", ""))
+        name_result["cas"] = authoritative_cas
         name_result.setdefault("confidence", confidence)
         name_result.setdefault("need_manual_review", False)
         name_result.setdefault(
@@ -911,11 +1246,17 @@ class ApprovalFlowMixin:
         )
 
         reason = str(memory_row.get("reason") or "Matched reusable local reagent memory.").strip()
+        if cas_conflict:
+            reason = (
+                f"{reason}\n"
+                f"ERP CAS {erp_cas} conflicts with local memory URL/CAS {authoritative_cas}; "
+                "the ERP CAS was removed from this suggestion and the memory URL/CAS was used as evidence."
+            ).strip()
         search_result = {
             "name": memory_row.get("standard_name") or reagent.get("\u8bd5\u5242\u540d\u79f0", ""),
-            "cas": memory_row.get("cas") or reagent.get("CAS\u53f7", ""),
+            "cas": authoritative_cas,
             "source": "reagent_memory",
-            "url": memory_row.get("url") or "",
+            "url": memory_url,
             "raw_text": reason,
             "hazard_keywords": [],
             "need_manual_review": False,
@@ -938,7 +1279,16 @@ class ApprovalFlowMixin:
             "confidence": confidence,
             "need_manual_review": False,
         }
-        return self._approval_suggestion_row(reagent, name_result, search_result, extracted, classification)
+        return self._approval_suggestion_row(suggestion_reagent, name_result, search_result, extracted, classification)
+
+    @staticmethod
+    def extract_cas_from_url(url: str) -> str:
+        match = re.search(r"(?<!\d)(\d{2,7}-\d{2}-\d)(?!\d)", str(url or ""))
+        return match.group(1) if match else ""
+
+    @staticmethod
+    def normalize_cas(cas: str) -> str:
+        return re.sub(r"\s+", "", str(cas or "").strip())
 
     def apply_approval_write_mode(self, page: Page, suggestions: list[dict[str, Any]]) -> dict[str, set[str]]:
         result: dict[str, set[str]] = {"attempted": set(), "handled": set(), "failed": set()}
@@ -964,7 +1314,11 @@ class ApprovalFlowMixin:
         elif mode in {"single_page", "generate_library"}:
             pass
         elif mode == "multi_page":
-            print(f"Multi-page write mode will process all {len(candidates)} writable candidate(s) on this page.")
+            print(
+                "Multi-page write mode uses single-row transactions; "
+                f"1 of {len(candidates)} writable candidate(s) will be saved before re-reading the page."
+            )
+            candidates = candidates[:1]
         else:
             print(f"Unknown APPROVAL_WRITE_MODE={mode}; no webpage fields will be changed.")
             return result
@@ -973,12 +1327,25 @@ class ApprovalFlowMixin:
         consecutive_failures = 0
         for row_index, suggestion in enumerate(candidates, start=1):
             sequence = str(suggestion.get("\u5e8f\u53f7") or "").strip()
-            category = str(suggestion.get("\u6700\u7ec8\u5efa\u8bae\u7c7b\u522b") or "").strip()
+            rule_category = str(
+                suggestion.get("\u89c4\u5219\u5224\u5b9a\u7c7b\u522b")
+                or suggestion.get("\u6700\u7ec8\u5efa\u8bae\u7c7b\u522b")
+                or ""
+            ).strip()
+            category = to_erp_property(rule_category, self.settings) or str(
+                suggestion.get("\u6700\u7ec8\u5efa\u8bae\u7c7b\u522b") or ""
+            ).strip()
             reagent_name = str(suggestion.get("\u8bd5\u5242\u540d\u79f0") or "").strip()
             cas = str(suggestion.get("CAS\u53f7") or "").strip()
             work_key = self.suggestion_work_key(suggestion)
             result["attempted"].add(work_key)
-            print(f"Approval write candidate {row_index}/{len(candidates)}: {sequence} {reagent_name} -> {category}")
+            if category != rule_category:
+                print(
+                    f"Approval write candidate {row_index}/{len(candidates)}: "
+                    f"{sequence} {reagent_name} -> {rule_category} / ERP {category}"
+                )
+            else:
+                print(f"Approval write candidate {row_index}/{len(candidates)}: {sequence} {reagent_name} -> {category}")
 
             # In multi-page mode, ERP saves can re-render or re-sort the table.
             # Keep retries at the page-loop level so each retry starts from a
@@ -1019,7 +1386,26 @@ class ApprovalFlowMixin:
                     continue
 
                 page.wait_for_timeout(500)
-                selected = writer.choose_property(page, category, row)
+                selected_value = ""
+                selected = False
+                for selection_attempt in range(1, 3):
+                    if selection_attempt > 1:
+                        print(
+                            f"Retrying property dropdown selection for sequence {sequence}, "
+                            f"attempt {selection_attempt}/2."
+                        )
+                    selected = writer.choose_property(page, category, row)
+                    page.wait_for_timeout(500)
+                    if not selected:
+                        continue
+                    selected_value = self.read_reagent_property_by_sequence(page, sequence)
+                    if self.property_value_matches(selected_value, category, writer):
+                        break
+                    if selected_value in {"", "-", "\u9009\u62e9\u641c\u7d22"}:
+                        writer.dismiss_open_dropdown(page)
+                        page.wait_for_timeout(250)
+                        continue
+                    break
                 if not selected:
                     last_failure_detail = f"could not select {category}"
                     print(f"Could not select physicochemical property {category} for sequence: {sequence}")
@@ -1027,7 +1413,6 @@ class ApprovalFlowMixin:
                     self.cleanup_failed_write(page, writer, row, sequence, last_failure_detail)
                     continue
 
-                selected_value = self.read_reagent_property_by_sequence(page, sequence)
                 if not self.property_value_matches(selected_value, category, writer):
                     last_failure_detail = f"selected {category}, but row still shows {selected_value or '<empty>'}"
                     print(
@@ -1070,13 +1455,29 @@ class ApprovalFlowMixin:
             if verified:
                 result["handled"].add(work_key)
                 consecutive_failures = 0
-                if writer.any_row_is_editing(page):
-                    writer.cancel_any_edit(page)
+                if not self.settle_after_successful_write(page, writer, sequence):
+                    result["failed"].add(work_key)
+                    print(
+                        f"Page edit state did not settle after saving sequence {sequence}; "
+                        "the current page will be stabilized before continuing."
+                    )
+                    if mode == "multi_page":
+                        break
             else:
                 result["failed"].add(work_key)
+                self.add_manual_review_item_from_write_failure(
+                    suggestion,
+                    last_failure_detail or f"could not write {category}",
+                )
                 consecutive_failures += 1
                 if mode == "multi_page":
-                    print("Stopping this multi-page write round after a failed write; the page will be re-read.")
+                    print(
+                        "Stopping this multi-page write round after a failed webpage write; "
+                        "the failed reagent was recorded according to its suggestion confidence and the page will be re-sorted/re-read."
+                    )
+                    if not self.stabilize_reagent_detail_after_write_failure(page):
+                        print("Stopping this multi-page write round because the page could not be stabilized.")
+                        break
                     break
                 if consecutive_failures >= self.approval_write_failure_break_limit():
                     print("Stopping this write round after repeated save failures; the page will be re-read.")
@@ -1092,6 +1493,93 @@ class ApprovalFlowMixin:
 
         return result
 
+    def add_manual_review_item_from_write_failure(self, suggestion: dict[str, Any], reason: str) -> None:
+        if self.write_failure_can_skip_manual_review(suggestion):
+            memory = ReagentMemory.from_settings(self.settings, self.root_dir)
+            saved = self.remember_erp_suggestion(memory, suggestion)
+            category = suggestion.get("\u6700\u7ec8\u5efa\u8bae\u7c7b\u522b", "")
+            sequence = suggestion.get("\u5e8f\u53f7", "")
+            reagent_name = suggestion.get("\u8bd5\u5242\u540d\u79f0", "")
+            print(
+                "Web write failed, but classification is reusable; skipped manual review queue "
+                f"and recorded memory={saved}: {sequence} {reagent_name} -> {category}; reason={reason}"
+            )
+            return
+
+        reagent = {
+            "\u5e8f\u53f7": suggestion.get("\u5e8f\u53f7", ""),
+            "\u8bd5\u5242\u540d\u79f0": suggestion.get("\u8bd5\u5242\u540d\u79f0", ""),
+            "CAS\u53f7": suggestion.get("CAS\u53f7", ""),
+            "\u89c4\u683c": suggestion.get("\u89c4\u683c", ""),
+            "\u89c4\u683c\u5355\u4f4d": suggestion.get("\u89c4\u683c\u5355\u4f4d", ""),
+            "\u8bd5\u5242\u6570\u91cf": suggestion.get("\u8bd5\u5242\u6570\u91cf", ""),
+        }
+        name_result = {
+            "standard_name": suggestion.get("\u6807\u51c6\u5316\u540d\u79f0", ""),
+            "cleaned_name": suggestion.get("\u6e05\u6d17\u540e\u540d\u79f0", ""),
+        }
+        manual_reason = (
+            f"网页写入失败：{reason}。程序没有确认物化特性已成功写入 ERP 行内，"
+            "需要人工在网页端核对并处理该试剂。"
+        )
+        self.add_manual_review_item(reagent, name_result, reason=manual_reason)
+
+    def write_failure_can_skip_manual_review(self, suggestion: dict[str, Any]) -> bool:
+        rule_category = str(suggestion.get("\u6700\u7ec8\u5efa\u8bae\u7c7b\u522b") or "").strip()
+        if not rule_category or not to_erp_property(rule_category, self.settings):
+            return False
+        if str(suggestion.get("\u9700\u4eba\u5de5\u590d\u6838")).strip().lower() in {"true", "1", "yes"}:
+            return False
+        try:
+            confidence = float(suggestion.get("\u7f6e\u4fe1\u5ea6") or 0.0)
+        except (TypeError, ValueError):
+            confidence = 0.0
+        threshold = float(
+            os.getenv("APPROVAL_WRITE_MIN_CONFIDENCE")
+            or getattr(self, "settings", {}).get("approval", {}).get("write_min_confidence", 0.8)
+        )
+        return confidence >= threshold
+
+    def stabilize_reagent_detail_after_write_failure(self, page: Page) -> bool:
+        try:
+            self.wait_for_reagent_table_ready(page)
+            page.wait_for_timeout(800)
+        except Exception as error:
+            print(f"Reagent table was not ready while stabilizing after write failure: {error}")
+            return self.recover_reagent_detail_page_after_write_failure(page, "stabilize after write failure")
+
+        if self.reagent_property_header_available(page):
+            return True
+
+        print("Physicochemical property header is not visible after write failure; recovering detail page.")
+        return self.recover_reagent_detail_page_after_write_failure(page, "missing property header after write failure")
+
+    def reagent_property_header_available(self, page: Page) -> bool:
+        try:
+            header = page.locator("thead th").filter(has_text="\u7269\u5316\u7279\u6027").first
+            if header.count() and header.is_visible():
+                return True
+        except Exception:
+            pass
+        try:
+            return bool(
+                page.evaluate(
+                    """
+                    () => Array.from(document.querySelectorAll('thead th')).some((th) => {
+                      const rect = th.getBoundingClientRect();
+                      const style = window.getComputedStyle(th);
+                      const text = (th.innerText || th.textContent || '').replace(/\\s+/g, '');
+                      return rect.width > 0 && rect.height > 0
+                        && style.visibility !== 'hidden'
+                        && style.display !== 'none'
+                        && text.includes('\u7269\u5316\u7279\u6027');
+                    })
+                    """
+                )
+            )
+        except Exception:
+            return False
+
     def clear_existing_edit_state(self, page: Page, writer: ApprovalWriter, sequence: str) -> bool:
         if not writer.any_row_is_editing(page):
             return True
@@ -1099,6 +1587,22 @@ class ApprovalFlowMixin:
         if writer.cancel_any_edit(page):
             return True
         return self.recover_reagent_detail_page_after_write_failure(page, "existing edit row before write")
+
+    def settle_after_successful_write(self, page: Page, writer: ApprovalWriter, sequence: str) -> bool:
+        writer.dismiss_open_dropdown(page)
+        try:
+            self.wait_for_reagent_table_ready(page)
+        except Exception as error:
+            print(f"Reagent table was not ready immediately after saving sequence {sequence}: {error}")
+        page.wait_for_timeout(500)
+        for _ in range(10):
+            if not writer.any_row_is_editing(page):
+                return True
+            page.wait_for_timeout(250)
+        print(f"Edit controls are still visible after saving sequence {sequence}; cancelling before next row.")
+        writer.cancel_any_edit(page)
+        page.wait_for_timeout(300)
+        return not writer.any_row_is_editing(page)
 
     def cleanup_failed_write(
         self,
@@ -1117,10 +1621,10 @@ class ApprovalFlowMixin:
         return cleaned
 
     def recover_reagent_detail_page_after_write_failure(self, page: Page, reason: str) -> bool:
-        target_page = self.current_reagent_page_number(page)
+        target_list_number = self.current_detail_list_number() or str(getattr(self, "target_list_number", "") or "").strip()
         print(
             "Recovering reagent detail page after write-state failure"
-            f" ({reason}); target reagent page: {target_page or '<current>'}."
+            f" ({reason}); target list: {target_list_number or '<current>'}."
         )
         try:
             page.keyboard.press("Escape")
@@ -1131,16 +1635,78 @@ class ApprovalFlowMixin:
             page.reload(wait_until="domcontentloaded", timeout=60000)
         except Exception as error:
             print(f"Normal detail page reload failed; continuing with current page: {error}")
+
+        if self.current_page_is_target_detail(page, target_list_number):
+            try:
+                self.wait_for_reagent_table_ready(page)
+                page.wait_for_timeout(1000)
+                return True
+            except Exception as error:
+                print(f"Target detail page is visible, but reagent table was not ready after reload: {error}")
+
+        if target_list_number:
+            print(
+                "Detail page recovery will reopen the target list from the todo page "
+                "and let the next loop re-sort/re-read current '-' rows."
+            )
+            try:
+                opened = self.open_task_detail_by_list_number(page, target_list_number)
+            except Exception as error:
+                print(f"Could not reopen target detail {target_list_number}: {error}")
+                return False
+            if not opened:
+                print(f"Could not reopen target detail after write failure: {target_list_number}")
+                return False
+            try:
+                self.wait_for_reagent_table_ready(page)
+                page.wait_for_timeout(1000)
+                self._current_detail_info = self.read_detail_info(page)
+                return True
+            except Exception as error:
+                print(f"Reopened target detail, but reagent table was not ready: {error}")
+                return False
+
         try:
             self.wait_for_reagent_table_ready(page)
             page.wait_for_timeout(1000)
+            return True
         except Exception as error:
-            print(f"Reagent table was not ready after reload: {error}")
+            print(f"Reagent table was not ready after reload and no target list was known: {error}")
             return False
-        if target_page and not self.goto_reagent_page_number(page, target_page):
-            print(f"Could not return to reagent page {target_page} after recovery.")
+
+    def current_page_is_target_detail(self, page: Page, target_list_number: str = "") -> bool:
+        target_list_number = str(target_list_number or "").strip()
+        try:
+            detail_info = self.read_detail_info(page)
+        except Exception:
+            detail_info = {}
+        current_list_number = str(detail_info.get("\u5f53\u524d\u6e05\u5355\u53f7") or "").strip()
+        if target_list_number and current_list_number and current_list_number != target_list_number:
             return False
-        return True
+        if target_list_number and not current_list_number:
+            try:
+                body_text = str(page.locator("body").inner_text(timeout=3000) or "")
+            except Exception:
+                body_text = ""
+            if target_list_number not in body_text:
+                return False
+        if not target_list_number and not current_list_number:
+            try:
+                if not self.reagent_property_header_available(page):
+                    return False
+            except Exception:
+                return False
+        try:
+            records = self.read_current_page_reagents(page)
+        except Exception:
+            records = []
+        if any(str(record.get("\u5e8f\u53f7") or "").strip() for record in records):
+            return True
+        try:
+            row_count = page.locator("tbody tr.ant-table-row").count()
+            return bool(row_count and self.reagent_property_header_available(page))
+        except Exception:
+            return False
 
     def capture_write_failure(self, page: Page, sequence: str, attempt: int, reason: str) -> None:
         safe_sequence = "".join(ch for ch in str(sequence or "unknown") if ch.isalnum() or ch in {"-", "_"})
@@ -1225,8 +1791,12 @@ class ApprovalFlowMixin:
         threshold = float(os.getenv("APPROVAL_WRITE_MIN_CONFIDENCE") or getattr(self, "settings", {}).get("approval", {}).get("write_min_confidence", 0.8))
         output: list[dict[str, Any]] = []
         for suggestion in suggestions:
-            category = str(suggestion.get("\u6700\u7ec8\u5efa\u8bae\u7c7b\u522b") or "").strip()
-            if not category:
+            rule_category = str(suggestion.get("\u6700\u7ec8\u5efa\u8bae\u7c7b\u522b") or "").strip()
+            if not rule_category:
+                continue
+            erp_category = to_erp_property(rule_category, self.settings)
+            if not erp_category:
+                print(f"Skipping write candidate with no ERP property mapping: {rule_category}")
                 continue
             if str(suggestion.get("\u9700\u4eba\u5de5\u590d\u6838")).strip().lower() in {"true", "1", "yes"}:
                 continue
@@ -1236,7 +1806,11 @@ class ApprovalFlowMixin:
                 confidence = 0.0
             if confidence < threshold:
                 continue
-            output.append(suggestion)
+            normalized = dict(suggestion)
+            normalized["\u6700\u7ec8\u5efa\u8bae\u7c7b\u522b"] = erp_category
+            if erp_category != rule_category:
+                normalized["\u89c4\u5219\u5224\u5b9a\u7c7b\u522b"] = rule_category
+            output.append(normalized)
         return output
 
     def _classification_input(
@@ -1380,14 +1954,15 @@ class ApprovalFlowMixin:
         )
 
     def try_auto_pass_current_task(self, page: Page) -> None:
+        if not self.auto_pass_enabled():
+            print("Auto-pass skipped; AUTO_PASS is not true.")
+            return
+
         detail_info = self.read_detail_info(page)
         list_number = detail_info.get("\u5f53\u524d\u6e05\u5355\u53f7", "").strip()
         print(f"Auto-pass precheck for list: {list_number or '<unknown>'}")
 
         blocked_reasons: list[str] = []
-
-        if not self.auto_pass_enabled():
-            blocked_reasons.append("AUTO_PASS is not true.")
 
         if not self.auto_match_succeeded:
             blocked_reasons.append("Auto-match did not complete cleanly.")
@@ -1395,9 +1970,13 @@ class ApprovalFlowMixin:
         if not list_number:
             blocked_reasons.append("Current reagent list number could not be read.")
 
-        unmatched_records = self.find_unmatched_reagents_across_all_pages(page)
-        if not self.pagination_check_succeeded:
-            blocked_reasons.append("Sorted unmatched reagent pages could not be verified.")
+        unmatched_records: list[dict[str, str]] = []
+        try:
+            unmatched_records = self.find_unmatched_reagents_across_all_pages(page)
+            if not self.pagination_check_succeeded:
+                blocked_reasons.append("Sorted unmatched reagent pages could not be verified.")
+        except Exception as error:  # noqa: BLE001 - auto-pass must fail closed, not crash the run
+            blocked_reasons.append(f"Could not verify unmatched reagent pages: {error}")
 
         if unmatched_records:
             blocked_reasons.append(

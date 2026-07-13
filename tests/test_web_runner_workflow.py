@@ -7,7 +7,8 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from web_runner import AutomationJobManager, parse_target_list_numbers, repair_display_text, run_health, workflow_summary
-from web_app import web_ui_restart_command
+import web_app
+from web_app import artifact_path_for_download, web_ui_restart_command
 
 
 class WorkflowSummaryTest(unittest.TestCase):
@@ -96,6 +97,24 @@ class WorkflowSummaryTest(unittest.TestCase):
 
         self.assertEqual(command, [sys.executable])
         self.assertFalse(cwd.endswith("src"))
+
+    def test_artifact_download_path_stays_inside_log_dir(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            log_dir = root / "data" / "logs"
+            log_dir.mkdir(parents=True)
+            artifact = log_dir / "ok.txt"
+            artifact.write_text("ok", encoding="utf-8")
+            outside = root / "data" / "logs_evil.txt"
+            outside.write_text("no", encoding="utf-8")
+
+            original = web_app.LOG_DIR
+            web_app.LOG_DIR = log_dir
+            try:
+                self.assertEqual(artifact_path_for_download("ok.txt"), artifact.resolve())
+                self.assertIsNone(artifact_path_for_download("../logs_evil.txt"))
+            finally:
+                web_app.LOG_DIR = original
 
 
 if __name__ == "__main__":

@@ -1,0 +1,64 @@
+    <section class="panel memory-section" id="memory">
+      <div class="panel-title memory-header">
+        <div>
+          <h2>试剂记忆库</h2>
+          <p id="memoryMeta">读取 data/reagent_memory.sqlite，可搜索并维护高可信历史判定。</p>
+        </div>
+        <div class="memory-tools">
+          <input id="memorySearch" placeholder="搜索 CAS / 试剂名称 / 标准名">
+          <select id="memoryCategoryFilter">
+            <option value="">全部类别</option>
+          </select>
+          <select id="memoryReusableFilter">
+            <option value="">全部复用状态</option>
+            <option value="1">可复用</option>
+            <option value="0">不可复用</option>
+          </select>
+          <select id="memoryConflictFilter">
+            <option value="">全部冲突状态</option>
+            <option value="1">有冲突</option>
+            <option value="0">无冲突</option>
+          </select>
+          <button type="button" id="importMemoryButton" class="primary">从审批建议导入</button>
+          <button type="button" id="saveReusableMemoryButton">保存可复用项</button>
+          <button type="button" id="deleteConflictMemoryButton" class="danger-button">删除冲突项</button>
+          <button type="button" id="refreshMemoryButton">刷新</button>
+        </div>
+      </div>
+      <div id="memoryDetailPanel" class="memory-detail-panel" aria-live="polite">
+        <div class="memory-detail-empty">
+          <strong>当前记录</strong>
+          <span>选择表格中的一条记录后，在这里编辑 ERP 原始名、清洗名、标准名和备注。</span>
+        </div>
+      </div>
+      <div class="table-wrap memory-table-wrap">
+        <table class="memory-table">
+          <thead>
+            <tr>
+              <th>ID</th>
+              <th>CAS</th>
+              <th>试剂 / 标准名</th>
+              <th>物化特性</th>
+              <th>置信度</th>
+              <th>状态</th>
+              <th>操作</th>
+            </tr>
+          </thead>
+          <tbody id="memoryTable">
+            <tr class="table-empty-row">
+              <td colspan="7">
+                <div class="table-empty-state">
+                  <strong>暂无记忆库记录</strong>
+                  <span>导入审批建议后，可在这里维护可复用的历史判定。</span>
+                </div>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="memory-pagination">
+        <button type="button" id="memoryPrevPage">上一页</button>
+        <span id="memoryPageInfo">第 1 / 1 页，每页 10 条</span>
+        <button type="button" id="memoryNextPage">下一页</button>
+      </div>
+    </section>

@@ -14,7 +14,9 @@ sys.path.insert(0, str(ROOT_DIR / "src"))
 from reagent_memory import ReagentMemory  # noqa: E402
 from web_runner import (  # noqa: E402
     confirm_review_item,
+    delete_conflicting_memory,
     delete_memory_record,
+    delete_review_item,
     import_approval_suggestions_to_memory,
     memory_summary,
     review_queue_summary,
@@ -66,7 +68,37 @@ class WebReviewConfirmationTest(unittest.TestCase):
             assert match is not None
             self.assertEqual(match["final_category"], "普通类")
 
-    def test_confirm_review_item_accepts_reject_alias_as_non_writable_decision(self) -> None:
+    def test_delete_review_item_removes_pending_row_without_memory_write(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            data_dir = root / "data"
+            data_dir.mkdir(parents=True)
+            queue_path = data_dir / "review_queue.xlsx"
+            pd.DataFrame(
+                [
+                    {
+                        "timestamp": "2026-06-25T10:00:00",
+                        "试剂清单号": "SJ1",
+                        "序号": "1",
+                        "试剂名称": "待删除试剂",
+                        "cas": "123-45-6",
+                        "standard_name": "待删除试剂",
+                        "cleaned_name": "待删除试剂",
+                        "reason": "不需要继续处理",
+                        "status": "pending",
+                    }
+                ]
+            ).to_excel(queue_path, index=False)
+
+            summary = review_queue_summary(root)
+            result = delete_review_item({"review_key": summary["preview"][0]["review_key"]}, root)
+
+            self.assertTrue(result["deleted"])
+            self.assertEqual(review_queue_summary(root)["pending"], 0)
+            memory = ReagentMemory.from_settings({}, root)
+            self.assertIsNone(memory.lookup(cas="123-45-6"))
+
+    def test_confirm_review_item_accepts_reject_alias_as_writable_erp_decision(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             data_dir = root / "data"
@@ -100,14 +132,14 @@ class WebReviewConfirmationTest(unittest.TestCase):
             )
 
             self.assertTrue(result["confirmed"])
-            self.assertFalse(result["memory_added"])
+            self.assertTrue(result["memory_added"])
             self.assertEqual(review_queue_summary(root)["pending"], 0)
 
             memory = ReagentMemory.from_settings({}, root)
             rows = memory.list_records(query="TNT")
             self.assertEqual(len(rows), 1)
-            self.assertEqual(rows[0]["final_category"], "不建议接收类")
-            self.assertEqual(rows[0]["reusable"], 0)
+            self.assertEqual(rows[0]["final_category"], "拒收类")
+            self.assertEqual(rows[0]["reusable"], 1)
 
     def test_memory_summary_and_update_record(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -135,6 +167,47 @@ class WebReviewConfirmationTest(unittest.TestCase):
             self.assertTrue(result["updated"])
             self.assertEqual(memory_summary(query="new", root_dir=root)["preview"][0]["final_category"], "易燃类")
 
+    def test_memory_summary_paginates_preview_but_keeps_total(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            memory = ReagentMemory.from_settings({}, root)
+            for index in range(25):
+                memory.add_record(
+                    raw_name=f"page-item-{index:02d}",
+                    final_category="普通类",
+                    confidence=0.9,
+                    source="unit_test",
+                )
+
+            first = memory_summary(root_dir=root, page=1, per_page=20)
+            second = memory_summary(root_dir=root, page=2, per_page=20)
+
+            self.assertEqual(first["rows"], 25)
+            self.assertEqual(first["page_rows"], 20)
+            self.assertEqual(first["pages"], 2)
+            self.assertEqual(second["rows"], 25)
+            self.assertEqual(second["page_rows"], 5)
+            self.assertEqual(second["page"], 2)
+
+    def test_delete_conflicting_memory_creates_backup(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            memory = ReagentMemory.from_settings({}, root)
+            memory.add_record(raw_name="delete-me", final_category="普通类", confidence=0.9)
+            delete_row = memory_summary(query="delete-me", root_dir=root)["preview"][0]
+            update_memory_record(delete_row["id"], {"conflict": True, "manual_verified": False}, root_dir=root)
+
+            memory.add_record(raw_name="keep-confirmed", final_category="普通类", confidence=0.9)
+            keep_row = memory_summary(query="keep-confirmed", root_dir=root)["preview"][0]
+            update_memory_record(keep_row["id"], {"conflict": True, "manual_verified": True}, root_dir=root)
+
+            result = delete_conflicting_memory(root_dir=root)
+
+            self.assertEqual(result["deleted"], 2)
+            self.assertTrue(Path(result["backup"]).exists())
+            self.assertEqual(memory_summary(query="delete-me", root_dir=root)["rows"], 0)
+            self.assertEqual(memory_summary(query="keep-confirmed", root_dir=root)["rows"], 0)
+
     def test_update_memory_record_maps_rule_category_to_erp_property(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -157,6 +230,43 @@ class WebReviewConfirmationTest(unittest.TestCase):
 
             self.assertTrue(result["updated"])
             self.assertEqual(result["record"]["final_category"], "易燃类")
+
+    def test_update_memory_record_reusable_clears_blocking_flags(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            memory = ReagentMemory.from_settings({}, root)
+            memory.add_record(
+                raw_name="blocked reusable",
+                standard_name="blocked reusable",
+                cleaned_name="blocked reusable",
+                final_category="普通类",
+                confidence=1.0,
+                need_manual_review=True,
+            )
+            record_id = memory.find_any(raw_name="blocked reusable")["id"]
+            memory.update_record(record_id, {"conflict": True, "reusable": False})
+
+            result = update_memory_record(
+                record_id,
+                {
+                    "raw_name": "blocked reusable",
+                    "standard_name": "blocked reusable",
+                    "cleaned_name": "blocked reusable",
+                    "final_category": "普通类",
+                    "confidence": 1,
+                    "reusable": True,
+                    "conflict": True,
+                    "manual_verified": False,
+                    "need_manual_review": True,
+                },
+                root_dir=root,
+            )
+
+            self.assertTrue(result["updated"])
+            self.assertEqual(result["record"]["reusable"], 1)
+            self.assertEqual(result["record"]["conflict"], 0)
+            self.assertEqual(result["record"]["manual_verified"], 1)
+            self.assertEqual(result["record"]["need_manual_review"], 0)
 
     def test_update_memory_record_rejects_unmapped_category(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -221,13 +331,28 @@ class WebReviewConfirmationTest(unittest.TestCase):
                     }
                 ]
             ).to_excel(log_dir / "approval_suggestions_20260616_110830.xlsx", index=False)
+            pd.DataFrame(
+                [
+                    {
+                        "\u8bd5\u5242\u540d\u79f0": "memory sourced",
+                        "\u6e05\u6d17\u540e\u540d\u79f0": "wrong clean",
+                        "\u6807\u51c6\u5316\u540d\u79f0": "wrong standard",
+                        "CAS\u53f7": "-",
+                        "\u6700\u7ec8\u5efa\u8bae\u7c7b\u522b": "\u666e\u901a\u7c7b",
+                        "\u7f6e\u4fe1\u5ea6": "0.95",
+                        "\u9700\u4eba\u5de5\u590d\u6838": "False",
+                        "\u67e5\u8be2\u6765\u6e90": "reagent_memory",
+                    }
+                ]
+            ).to_excel(log_dir / "approval_suggestions_memory_source.xlsx", index=False)
 
             stats = import_approval_suggestions_to_memory(root)
 
-            self.assertEqual(stats["scanned"], 4)
+            self.assertEqual(stats["scanned"], 5)
             self.assertEqual(stats["imported"], 2)
             self.assertEqual(stats["candidate_manual_review"], 1)
             self.assertEqual(stats["candidate_low_confidence"], 1)
+            self.assertEqual(stats["skipped_memory_source"], 1)
             self.assertEqual(memory_summary(query="可信试剂", root_dir=root)["rows"], 1)
             self.assertEqual(memory_summary(query="历史时间戳试剂", root_dir=root)["rows"], 1)
             manual_candidate = memory_summary(query="人工复核试剂", root_dir=root)["preview"][0]

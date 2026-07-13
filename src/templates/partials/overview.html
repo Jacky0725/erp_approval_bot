@@ -1,0 +1,52 @@
+    <section class="metrics">
+      <article>
+        <span>建议结果</span>
+        <strong id="suggestionRows">{{ approval.rows }}</strong>
+      </article>
+      <article>
+        <span>待人工复核</span>
+        <strong id="manualReview">{{ review_queue.pending }}</strong>
+      </article>
+      <article>
+        <span>目标清单</span>
+        <strong id="targetList">-</strong>
+      </article>
+      <article>
+        <span>大模型</span>
+        <strong id="llmModel" class="metric-truncate" title="{{ runtime.llm_model }}">{{ runtime.llm_model }}</strong>
+      </article>
+      <article class="danger">
+        <span>安全门</span>
+        <strong id="safetyGate">默认关闭</strong>
+      </article>
+    </section>
+
+    <section class="timeline panel" id="workflowSteps">
+      <div class="step">登录 ERP</div>
+      <div class="step">进入试剂判定</div>
+      <div class="step">一键匹配</div>
+      <div class="step">排序读取 "-"</div>
+      <div class="step">网站查询</div>
+      <div class="step">大模型整理</div>
+      <div class="step">规则判定</div>
+      <div class="step">网页写入</div>
+    </section>
+
+    <section class="panel status-panel overview-status-panel">
+      <div class="panel-title">
+        <div>
+          <h2>当前状态</h2>
+          <p id="statusLine">等待刷新</p>
+        </div>
+      </div>
+      <div class="status-list overview-status-list">
+        <div><span>ERP URL</span><strong id="erpUrl">-</strong></div>
+        <div><span>ERP 账号</span><strong id="erpUser">-</strong></div>
+        <div><span>ERP 密码</span><strong id="erpPassword">-</strong></div>
+        <div><span>LLM API Key</span><strong id="apiKey">-</strong></div>
+        <div><span>任务动作</span><strong id="currentAction">-</strong></div>
+        <div><span>最近结果</span><strong id="lastRunResult">-</strong></div>
+        <div><span>开始时间</span><strong id="startedAt">-</strong></div>
+        <div><span>结束时间</span><strong id="finishedAt">-</strong></div>
+      </div>
+    </section>

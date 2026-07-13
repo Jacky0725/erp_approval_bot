@@ -1,0 +1,153 @@
+    <section class="panel settings-panel" id="settings">
+      <div class="panel-title">
+        <div>
+          <h2>配置项</h2>
+          <p>保存后写入 `.env` 和 `config/settings.yaml`。密码和 API Key 留空时会保留原值。</p>
+        </div>
+        <span id="settingsSaveState" class="save-state">未保存</span>
+      </div>
+      <form id="settingsForm" class="settings-form">
+        <section class="settings-section">
+          <div class="settings-section-head">
+            <div>
+              <h3>基础连接</h3>
+              <p>ERP 登录地址、账号与凭据。</p>
+            </div>
+          </div>
+          <div class="settings-grid settings-grid-connection">
+            <label>ERP 登录地址 <input name="erp_url" value="{{ runtime.erp_url }}" placeholder="https://..."></label>
+            <label>ERP 账号 <input name="erp_username" value="{{ runtime.erp_username }}" autocomplete="username"></label>
+            <label>ERP 密码 <input name="erp_password" type="password" placeholder="留空则不修改" autocomplete="new-password"></label>
+          </div>
+        </section>
+
+        <section class="settings-section">
+          <div class="settings-section-head">
+            <div>
+              <h3>钉钉机器人通知</h3>
+              <p>任务成功或失败后向钉钉群发送简洁摘要，通知失败只写入运行日志。</p>
+            </div>
+          </div>
+          <div class="settings-grid settings-grid-dingtalk">
+            <label class="check settings-check-field"><input type="checkbox" name="dingtalk_notification_enabled" value="true"> 启用钉钉通知</label>
+            <label>钉钉 Webhook <input name="dingtalk_webhook" type="password" placeholder="{% if runtime.dingtalk_webhook_configured %}已配置，留空则不修改{% else %}https://oapi.dingtalk.com/robot/send?...{% endif %}"></label>
+            <label>钉钉加签密钥 <input name="dingtalk_secret" type="password" placeholder="{% if runtime.dingtalk_secret_configured %}已配置，留空则不修改{% else %}可选：SEC...{% endif %}"></label>
+            <label class="check settings-check-field"><input type="checkbox" name="dingtalk_at_all" value="true"> 通知时 @ 所有人</label>
+          </div>
+        </section>
+
+        <section class="settings-section">
+          <div class="settings-section-head">
+            <div>
+              <h3>定时审批</h3>
+              <p>按周期或固定时间自动获取 ERP 最新待办清单，并跳过仍需人工复核的清单。</p>
+            </div>
+          </div>
+          <div class="settings-grid settings-grid-scheduler">
+            <label class="check settings-check-field"><input type="checkbox" name="scheduler_enabled" value="true"> 启用定时审批</label>
+            <label>
+              规则类型
+              <select name="scheduler_mode" id="schedulerMode">
+                <option value="interval">每隔 N 小时</option>
+                <option value="daily">每天固定时间</option>
+              </select>
+            </label>
+            <label>间隔小时 <input name="scheduler_interval_hours" value="{{ runtime.scheduler_interval_hours }}"></label>
+            <label>每天时间 <input name="scheduler_daily_time" type="time" value="{{ runtime.scheduler_daily_time }}"></label>
+            <label class="check settings-check-field"><input type="checkbox" name="scheduler_use_default_run_policy" value="true"> 沿用手动运行安全策略</label>
+          </div>
+          <div class="switches settings-policy-strip">
+            <label class="check"><input type="checkbox" name="scheduler_skip_manual_review_lists" value="true"> 跳过人工复核未完成清单</label>
+          </div>
+          <div id="schedulerAdvancedPolicy" class="scheduler-advanced-policy">
+            <div class="settings-section-head compact-head">
+              <div>
+                <h3>定时任务单独执行策略</h3>
+                <p>关闭“沿用手动运行安全策略”后生效。</p>
+              </div>
+            </div>
+            <div class="settings-grid settings-grid-scheduler-policy">
+            <label>单次最多处理 <input name="scheduler_process_all_todos_max" value="{{ runtime.scheduler_process_all_todos_max }}"></label>
+            <label>
+              定时写入模式
+              <select name="scheduler_approval_write_mode">
+                <option value="disabled">disabled</option>
+                <option value="test_one">test_one</option>
+                <option value="save_one">save_one</option>
+                <option value="single_page">single_page</option>
+                <option value="multi_page">multi_page</option>
+                <option value="generate_library">generate_library</option>
+              </select>
+            </label>
+            <label>定时最低置信度 <input name="scheduler_approval_write_min_confidence" value="{{ runtime.scheduler_approval_write_min_confidence }}"></label>
+            <label class="check danger-check"><input type="checkbox" name="scheduler_auto_pass" value="true"> 定时任务允许 AUTO_PASS</label>
+            </div>
+          </div>
+          <div class="scheduler-status">
+            <span>下次执行 <strong id="schedulerNextRun">-</strong></span>
+            <span>上次执行 <strong id="schedulerLastRun">-</strong></span>
+            <span>上次结果 <strong id="schedulerLastResult">-</strong></span>
+          </div>
+        </section>
+
+        <section class="settings-section">
+          <div class="settings-section-head">
+            <div>
+              <h3>LLM 配置</h3>
+              <p>模型服务、连接地址、模型名称与调用容错。</p>
+            </div>
+          </div>
+          <div class="settings-grid settings-grid-llm">
+            <label>LLM API Key <input name="llm_api_key" type="password" placeholder="留空则不修改"></label>
+            <label>
+              LLM Provider
+              <select name="llm_provider" id="llmProviderSelect"></select>
+            </label>
+            <label>LLM Base URL <input name="llm_base_url" id="llmBaseUrlInput" value="{{ runtime.llm_base_url }}"></label>
+            <label class="settings-field-wide">
+              LLM Model
+              <div class="model-picker">
+                <select name="llm_model" id="llmModelSelect"></select>
+                <button type="button" id="refreshLlmModels">获取模型</button>
+              </div>
+              <span id="llmModelStatus" class="field-note">填入 API Key 后可自动读取该平台模型列表。</span>
+            </label>
+            <label>LLM 超时秒数 <input name="llm_timeout_seconds" value="{{ runtime.llm_timeout_seconds }}"></label>
+            <label>LLM 重试次数 <input name="llm_max_retries" value="{{ runtime.llm_max_retries }}"></label>
+          </div>
+        </section>
+
+        <section class="settings-section">
+          <div class="settings-section-head">
+            <div>
+              <h3>运行安全策略</h3>
+              <p>默认写入模式、置信度阈值、并发与自动通过策略。</p>
+            </div>
+          </div>
+          <div class="settings-grid settings-grid-policy">
+            <label>
+              默认写入模式
+              <select name="approval_write_mode">
+                <option value="disabled">disabled</option>
+                <option value="test_one">test_one</option>
+                <option value="save_one">save_one</option>
+                <option value="single_page">single_page</option>
+                <option value="multi_page">multi_page</option>
+                <option value="generate_library">generate_library</option>
+              </select>
+            </label>
+            <label>默认最低置信度 <input name="approval_write_min_confidence" value="{{ runtime.approval_write_min_confidence }}"></label>
+            <label>查询/LLM worker 数 <input name="approval_parallel_workers" value="{{ runtime.approval_parallel_workers }}"></label>
+          </div>
+          <div class="switches settings-policy-strip">
+            <label class="check"><input type="checkbox" name="process_all_todos" value="true"> 默认处理全部待办</label>
+            <label class="inline-field">最多处理 <input class="small-input" name="process_all_todos_max" value="{{ runtime.process_all_todos_max }}"></label>
+            <label class="check danger-check"><input type="checkbox" name="auto_pass" value="true"> 默认 AUTO_PASS</label>
+          </div>
+        </section>
+
+        <div class="settings-actions">
+          <button type="submit" class="primary">保存设置</button>
+        </div>
+      </form>
+    </section>

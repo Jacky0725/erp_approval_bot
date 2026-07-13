@@ -1,0 +1,21 @@
+    <section class="lower-grid">
+      <section class="panel logs-panel" id="logs">
+        <div class="panel-title utility-header log-header">
+          <div>
+            <h2>运行日志</h2>
+            <p>最近 160 行输出。</p>
+          </div>
+          <div class="log-tools">
+            <div class="log-filter" role="group" aria-label="日志过滤">
+              <button type="button" class="log-filter-button active" data-log-filter="all">全部</button>
+              <button type="button" class="log-filter-button" data-log-filter="error">错误</button>
+              <button type="button" class="log-filter-button" data-log-filter="warning">警告</button>
+            </div>
+            <button type="button" id="refreshLogButton">刷新日志</button>
+            <button type="button" id="copyLogButton">复制日志</button>
+            <span id="logCopyState" aria-live="polite"></span>
+          </div>
+        </div>
+        <pre id="logBox">等待任务输出...</pre>
+      </section>
+    </section>
