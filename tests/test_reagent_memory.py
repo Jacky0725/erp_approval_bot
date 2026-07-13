@@ -343,6 +343,22 @@ class ReagentMemoryTest(unittest.TestCase):
             self.assertEqual(venlafaxine_row["need_manual_review"], 0)
             self.assertEqual(venlafaxine_row["conflict"], 0)
 
+            memory.add_record(
+                raw_name="\u672a\u77e5\u7ec6\u80de\u67d3\u8272\u6807\u5b9a\u6db2",
+                cleaned_name="\u672a\u77e5\u7ec6\u80de\u67d3\u8272\u6807\u5b9a\u6db2",
+                standard_name="\u672a\u77e5\u7ec6\u80de\u67d3\u8272\u6807\u5b9a\u6db2",
+                cas="-",
+                final_category="\u666e\u901a\u7c7b",
+                confidence=0.95,
+                reason="business normal keyword",
+            )
+            biology_row = memory.find_any(raw_name="\u672a\u77e5\u7ec6\u80de\u67d3\u8272\u6807\u5b9a\u6db2")
+
+            self.assertEqual(biology_row["final_category"], "\u666e\u901a\u7c7b")
+            self.assertEqual(biology_row["reusable"], 1)
+            self.assertEqual(biology_row["need_manual_review"], 0)
+            self.assertEqual(biology_row["conflict"], 0)
+
     def test_update_record_keeps_unknown_packaging_names_reusable(self) -> None:
         tmp, memory = self.make_memory()
         with tmp:

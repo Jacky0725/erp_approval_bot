@@ -448,8 +448,12 @@ class ApprovalFlowTodoLoopTest(unittest.TestCase):
         for name in (
             "\u94c5ICP\u6807\u51c6\u6eb6\u6db2",
             "\u94cdICP\u6807\u51c6\u6db2",
+            "\u94c5\u6807\u51c6\u54c1",
+            "\u6c2f\u5316\u94cd\u6807\u5b9a\u6eb6\u6db2",
             "\u5432\u54da\u6807\u51c6\u6eb6\u6db2",
             "\u86cb\u767d\u514d\u75ab\u6297\u4f53\u8bd5\u5242",
+            "\u672a\u77e5\u7ec6\u80de\u57f9\u517b\u6db2",
+            "\u82cf\u6728\u7d20\u67d3\u8272\u6db2",
             "\u8bd5\u5242\uff08\u672a\u77e5\uff09",
             "\u5361\u9a6c\u897f\u5e73\u836f\u7269\u5bf9\u7167\u54c1",
             "\u76d0\u9178\u6587\u62c9\u6cd5\u8f9b",
