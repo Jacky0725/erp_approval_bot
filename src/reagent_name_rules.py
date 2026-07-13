@@ -33,6 +33,15 @@ BUSINESS_NORMAL_NAME_PATTERNS = (
     "\u836f\u7269",
 )
 
+PHARMACEUTICAL_NORMAL_NAME_PATTERNS = (
+    "\u5361\u9a6c\u897f\u5e73",
+    "\u6587\u62c9\u6cd5\u8f9b",
+    "\u76d0\u9178\u6587\u62c9\u6cd5\u8f9b",
+    "carbamazepine",
+    "venlafaxine",
+    "venlafaxinehydrochloride",
+)
+
 
 def business_normal_name_reason(raw_name: str, *extra_values: Any) -> str:
     text = " ".join(str(value or "") for value in (raw_name, *extra_values))
@@ -47,6 +56,9 @@ def business_normal_name_reason(raw_name: str, *extra_values: Any) -> str:
                 "\u8bd5\u5242/\u7f13\u51b2\u6db2/\u86cb\u767d/\u514d\u75ab/\u6297\u4f53/"
                 "\u6807\u6db2/\u6821\u51c6/\u836f\u7269\uff09\uff0c\u6309\u666e\u901a\u7c7b\u5904\u7406\u3002"
             )
+    for pattern in PHARMACEUTICAL_NORMAL_NAME_PATTERNS:
+        if pattern.lower() in normalized:
+            return "\u8bd5\u5242\u540d\u79f0\u547d\u4e2d\u836f\u7269/API\u7c7b\u666e\u901a\u7c7b\u540d\u79f0\u89c4\u5219\uff0c\u6309\u666e\u901a\u7c7b\u5904\u7406\u3002"
     return ""
 
 

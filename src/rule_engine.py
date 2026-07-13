@@ -180,7 +180,7 @@ class RuleEngine:
             return {
                 "final_category": NORMAL_CATEGORY,
                 "matched_categories": [NORMAL_CATEGORY],
-                "reason": "试剂名称命中普通类业务关键词（清洗液/标准液/标准溶液/ICP/试剂/缓冲液/蛋白/免疫/抗体/标液/校准/药物），按普通类处理。",
+                "reason": "试剂名称命中普通类业务关键词或药物/API类名称规则，按普通类处理。",
                 "confidence": 0.95,
                 "need_manual_review": False,
             }
@@ -709,6 +709,12 @@ class RuleEngine:
             "\u6807\u6db2",
             "\u6821\u51c6",
             "\u836f\u7269",
+            "\u5361\u9a6c\u897f\u5e73",
+            "\u6587\u62c9\u6cd5\u8f9b",
+            "\u76d0\u9178\u6587\u62c9\u6cd5\u8f9b",
+            "carbamazepine",
+            "venlafaxine",
+            "venlafaxinehydrochloride",
         )
         return RuleEngine._is_pharmacopoeia_color_standard(reagent_info) or any(
             RuleEngine._normalize_text(token) in name_text for token in tokens

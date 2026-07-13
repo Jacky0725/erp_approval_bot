@@ -452,6 +452,7 @@ class ApprovalFlowTodoLoopTest(unittest.TestCase):
             "\u86cb\u767d\u514d\u75ab\u6297\u4f53\u8bd5\u5242",
             "\u8bd5\u5242\uff08\u672a\u77e5\uff09",
             "\u5361\u9a6c\u897f\u5e73\u836f\u7269\u5bf9\u7167\u54c1",
+            "\u76d0\u9178\u6587\u62c9\u6cd5\u8f9b",
         ):
             with self.subTest(name=name):
                 suggestion = bot.direct_business_rule_suggestion(

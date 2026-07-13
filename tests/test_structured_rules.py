@@ -139,6 +139,7 @@ class StructuredRulesTest(unittest.TestCase):
             "\u78f7\u9178\u7f13\u51b2\u6db2",
             "\u86cb\u767d\u514d\u75ab\u6297\u4f53\u8bd5\u5242",
             "\u5361\u9a6c\u897f\u5e73\u836f\u7269\u5bf9\u7167\u54c1",
+            "\u76d0\u9178\u6587\u62c9\u6cd5\u8f9b",
         ]
         for name in names:
             with self.subTest(name=name):
