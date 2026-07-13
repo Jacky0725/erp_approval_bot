@@ -59,14 +59,21 @@ if (!(Test-Path $EnvPath)) {
 
 if (!$NoShortcut) {
     $Desktop = [Environment]::GetFolderPath("Desktop")
-    $ShortcutPath = Join-Path $Desktop "Reagent Approval Bot.lnk"
+    $ShortcutName = -join ([char[]](0x8bd5, 0x5242, 0x5ba1, 0x6279, 0x52a9, 0x624b))
+    $ShortcutPath = Join-Path $Desktop "$ShortcutName.lnk"
     $StartScript = Join-Path $InstallDir "packaging\windows\start_web_ui.ps1"
+    $IconPath = Join-Path $InstallDir "assets\reagent-approval-bot.ico"
     $WScript = New-Object -ComObject WScript.Shell
     $Shortcut = $WScript.CreateShortcut($ShortcutPath)
     $Shortcut.TargetPath = "powershell.exe"
     $Shortcut.Arguments = "-ExecutionPolicy Bypass -File `"$StartScript`""
     $Shortcut.WorkingDirectory = $InstallDir
-    $Shortcut.IconLocation = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe,0"
+    if (Test-Path $IconPath) {
+        $Shortcut.IconLocation = "{0},0" -f $IconPath
+    } else {
+        $Shortcut.IconLocation = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe,0"
+    }
+    $Shortcut.Description = "Start Reagent Approval Bot local Web UI"
     $Shortcut.Save()
     Write-Host "Created desktop shortcut: $ShortcutPath"
 }

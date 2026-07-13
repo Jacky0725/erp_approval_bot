@@ -2836,6 +2836,38 @@ body[data-page="run"] #run .button-row:not(.compact) {
   background: #f8fafc;
 }
 
+.settings-panel .update-section {
+  display: none;
+}
+
+.update-pill {
+  border-color: #dbeafe;
+  background: #eff6ff;
+  color: #1e3a8a;
+}
+
+.update-pill.update-available {
+  border-color: #fed7aa;
+  background: #fff7ed;
+  color: #9a3412;
+}
+
+.update-pill.update-current {
+  border-color: #bbf7d0;
+  background: #f0fdf4;
+  color: #166534;
+}
+
+.update-pill.update-failed {
+  border-color: #fecaca;
+  background: #fef2f2;
+  color: #991b1b;
+}
+
+.update-top-button[hidden] {
+  display: none;
+}
+
 .update-status-grid {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));

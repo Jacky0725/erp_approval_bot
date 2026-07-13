@@ -28,6 +28,7 @@ $IncludePaths = @(
     "requirements.txt",
     "start_web_ui_hidden.bat",
     "stop_web_ui.bat",
+    "assets",
     "config",
     "scripts",
     "src",

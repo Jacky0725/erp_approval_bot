@@ -40,6 +40,10 @@
         <span class="pill">AUTO_PASS <strong id="autoPassText">{{ runtime.auto_pass }}</strong></span>
         <span class="pill">写入模式 <strong id="writeModeText">{{ runtime.approval_write_mode }}</strong></span>
         <span class="pill">处理范围 <strong id="processScopeText">{{ "全部待办" if runtime.process_all_todos == "true" else "勾选清单/首条" }}</strong></span>
+        <span id="updatePill" class="pill update-pill" title="当前版本 {{ runtime.app_version }}">程序更新 <strong id="updateStateText">检查中</strong></span>
+        <button type="button" id="checkUpdateButton" class="ghost-link update-top-button">检查</button>
+        <button type="button" id="installUpdateButton" class="ghost-link update-top-button update-install-button" disabled hidden>更新</button>
+        <a id="releaseLink" class="ghost-link update-top-button" href="#" target="_blank" rel="noreferrer" hidden>Release</a>
         <a class="ghost-link" href="/settings">修改设置</a>
       </div>
     </header>

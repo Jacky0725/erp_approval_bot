@@ -205,6 +205,10 @@
       setUpdateMessage(payload.message || "安装器已启动，当前程序即将退出。");
     });
 
+    if (document.querySelector("#checkUpdateButton")) {
+      window.setTimeout(() => checkForUpdate(), 800);
+    }
+
     on("#selectAllTodos", "click", () => {
       todoState.selected = new Set(todoState.tasks.map((task) => task.list_number).filter(Boolean));
       renderTodoTasks({ tasks: todoState.tasks, exists: todoState.tasks.length > 0 });
@@ -1372,6 +1376,59 @@
       renderArtifacts(data.artifacts || []);
       logState.lines = status.log_tail || [];
       renderLogBox();
+    }
+
+    function setUpdateState(state, label) {
+      const pill = document.querySelector("#updatePill");
+      if (pill) {
+        pill.classList.remove("update-available", "update-current", "update-failed");
+        if (state) pill.classList.add(state);
+      }
+      setText("#updateStateText", label);
+    }
+
+    async function checkForUpdate() {
+      const button = document.querySelector("#checkUpdateButton");
+      const installButton = document.querySelector("#installUpdateButton");
+      if (!button) return;
+      button.disabled = true;
+      if (installButton) {
+        installButton.disabled = true;
+        installButton.hidden = true;
+      }
+      setUpdateState("", "检查中");
+      try {
+        const response = await fetch("/api/update/check");
+        const payload = await response.json();
+        lastUpdateInfo = payload;
+        const releaseLink = document.querySelector("#releaseLink");
+        if (releaseLink && payload.release_url) {
+          releaseLink.href = payload.release_url;
+          releaseLink.hidden = false;
+        }
+        if (!response.ok || !payload.ok) {
+          setUpdateState("update-failed", "检查失败");
+          setUpdateMessage(payload.detail || payload.error || "检查更新失败。");
+          return;
+        }
+        if (payload.update_available) {
+          setUpdateState("update-available", `可更新 ${payload.latest_version || ""}`);
+          if (installButton) {
+            installButton.hidden = false;
+            installButton.disabled = !initialRuntime.app_frozen;
+          }
+          const assetSize = payload.asset?.size ? `${Math.ceil(payload.asset.size / 1024 / 1024)} MB` : "";
+          setUpdateMessage(`发现 ${payload.latest_version}，安装包 ${assetSize}。`);
+          return;
+        }
+        setUpdateState("update-current", "已是最新");
+        setUpdateMessage("当前已经是最新版本。");
+      } catch (error) {
+        setUpdateState("update-failed", "检查失败");
+        setUpdateMessage(String(error));
+      } finally {
+        button.disabled = false;
+      }
     }
 
     refreshStatus();

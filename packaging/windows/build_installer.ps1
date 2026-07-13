@@ -25,6 +25,7 @@ $SpecDir = Join-Path $RepoRoot "dist\pyinstaller-installer-spec"
 $OneFileOut = Join-Path $RepoRoot "dist\ReagentApprovalBotInstaller.exe"
 $InstallerPath = Join-Path $ReleaseDir "reagent-approval-bot-$Version-win-x64-setup.exe"
 $InstallerScript = Join-Path $RepoRoot "packaging\windows\reagent_approval_bot_installer.py"
+$IconPath = Join-Path $RepoRoot "assets\reagent-approval-bot.ico"
 
 if (!(Test-Path $InstallerScript)) {
     throw "Installer launcher not found: $InstallerScript"
@@ -53,6 +54,7 @@ if (Test-Path $InstallerPath) {
     --workpath $WorkDir `
     --specpath $SpecDir `
     --add-data "$StageDir\payload;payload" `
+    --icon $IconPath `
     $InstallerScript
 
 if (!(Test-Path $OneFileOut)) {

@@ -10,9 +10,15 @@ if (Test-Path $StopScript) {
     powershell -ExecutionPolicy Bypass -File $StopScript
 }
 
-$ShortcutPath = Join-Path ([Environment]::GetFolderPath("Desktop")) "Reagent Approval Bot.lnk"
-if (Test-Path $ShortcutPath) {
-    Remove-Item $ShortcutPath -Force
+$ShortcutName = -join ([char[]](0x8bd5, 0x5242, 0x5ba1, 0x6279, 0x52a9, 0x624b))
+$ShortcutPaths = @(
+    (Join-Path ([Environment]::GetFolderPath("Desktop")) "$ShortcutName.lnk"),
+    (Join-Path ([Environment]::GetFolderPath("Desktop")) "Reagent Approval Bot.lnk")
+)
+foreach ($ShortcutPath in $ShortcutPaths) {
+    if (Test-Path $ShortcutPath) {
+        Remove-Item $ShortcutPath -Force
+    }
 }
 
 if (Test-Path $InstallDir) {

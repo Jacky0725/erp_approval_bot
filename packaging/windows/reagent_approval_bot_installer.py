@@ -11,7 +11,6 @@ import zipfile
 
 
 APP_NAME = "ReagentApprovalBot"
-SHORTCUT_NAME = "Reagent Approval Bot.lnk"
 
 
 def bundled_root() -> Path:
@@ -73,8 +72,9 @@ def write_uninstaller(target: Path) -> None:
             }} elseif (Test-Path $InstallDir) {{
                 Remove-Item $InstallDir -Recurse -Force
             }}
-            $DesktopShortcut = Join-Path ([Environment]::GetFolderPath("Desktop")) "{SHORTCUT_NAME}"
-            $StartShortcut = Join-Path ([Environment]::GetFolderPath("StartMenu")) "Programs\\{SHORTCUT_NAME}"
+            $ShortcutName = -join ([char[]](0x8bd5, 0x5242, 0x5ba1, 0x6279, 0x52a9, 0x624b))
+            $DesktopShortcut = Join-Path ([Environment]::GetFolderPath("Desktop")) "$ShortcutName.lnk"
+            $StartShortcut = Join-Path ([Environment]::GetFolderPath("StartMenu")) "Programs\\$ShortcutName.lnk"
             Remove-Item $DesktopShortcut -Force -ErrorAction SilentlyContinue
             Remove-Item $StartShortcut -Force -ErrorAction SilentlyContinue
             """
@@ -91,9 +91,10 @@ def create_shortcuts(target: Path) -> None:
         $ErrorActionPreference = "Stop"
         $ExePath = "{exe}"
         $WorkDir = "{target}"
+        $ShortcutName = -join ([char[]](0x8bd5, 0x5242, 0x5ba1, 0x6279, 0x52a9, 0x624b))
         $ShortcutPaths = @(
-            (Join-Path ([Environment]::GetFolderPath("Desktop")) "{SHORTCUT_NAME}"),
-            (Join-Path ([Environment]::GetFolderPath("StartMenu")) "Programs\\{SHORTCUT_NAME}")
+            (Join-Path ([Environment]::GetFolderPath("Desktop")) "$ShortcutName.lnk"),
+            (Join-Path ([Environment]::GetFolderPath("StartMenu")) "Programs\\$ShortcutName.lnk")
         )
         $WScript = New-Object -ComObject WScript.Shell
         foreach ($ShortcutPath in $ShortcutPaths) {{
@@ -101,10 +102,15 @@ def create_shortcuts(target: Path) -> None:
             $Shortcut = $WScript.CreateShortcut($ShortcutPath)
             $Shortcut.TargetPath = $ExePath
             $Shortcut.WorkingDirectory = $WorkDir
-            $Shortcut.IconLocation = "$ExePath,0"
+            $Shortcut.IconLocation = "{{0}},0" -f $ExePath
+            $Shortcut.Description = "Start Reagent Approval Bot local Web UI"
             $Shortcut.Save()
         }}
         """
+    )
+    subprocess.run(
+        ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps],
+        check=True,
     )
 
 
@@ -124,11 +130,6 @@ def start_installed_app(target: Path) -> None:
         creationflags=creationflags,
         close_fds=True,
     )
-    subprocess.run(
-        ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps],
-        check=True,
-    )
-
 
 def main() -> int:
     target = install_dir()

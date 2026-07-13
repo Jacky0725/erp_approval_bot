@@ -54,24 +54,27 @@ if (`$KeepData) {
 } elseif (Test-Path `$InstallDir) {
     Remove-Item `$InstallDir -Recurse -Force
 }
-`$DesktopShortcut = Join-Path ([Environment]::GetFolderPath("Desktop")) "Reagent Approval Bot.lnk"
-`$StartShortcut = Join-Path ([Environment]::GetFolderPath("StartMenu")) "Programs\Reagent Approval Bot.lnk"
+`$ShortcutName = -join ([char[]](0x8bd5, 0x5242, 0x5ba1, 0x6279, 0x52a9, 0x624b))
+`$DesktopShortcut = Join-Path ([Environment]::GetFolderPath("Desktop")) "`$ShortcutName.lnk"
+`$StartShortcut = Join-Path ([Environment]::GetFolderPath("StartMenu")) "Programs\`$ShortcutName.lnk"
 Remove-Item `$DesktopShortcut -Force -ErrorAction SilentlyContinue
 Remove-Item `$StartShortcut -Force -ErrorAction SilentlyContinue
 "@ | Set-Content -Path $UninstallScript -Encoding UTF8
 
     if (!$NoShortcut) {
         $ExePath = Join-Path $InstallDir "ReagentApprovalBot.exe"
-        $DesktopShortcut = Join-Path ([Environment]::GetFolderPath("Desktop")) "Reagent Approval Bot.lnk"
+        $ShortcutName = -join ([char[]](0x8bd5, 0x5242, 0x5ba1, 0x6279, 0x52a9, 0x624b))
+        $DesktopShortcut = Join-Path ([Environment]::GetFolderPath("Desktop")) "$ShortcutName.lnk"
         $StartMenuDir = Join-Path ([Environment]::GetFolderPath("StartMenu")) "Programs"
-        $StartShortcut = Join-Path $StartMenuDir "Reagent Approval Bot.lnk"
+        $StartShortcut = Join-Path $StartMenuDir "$ShortcutName.lnk"
         $WScript = New-Object -ComObject WScript.Shell
         foreach ($ShortcutPath in @($DesktopShortcut, $StartShortcut)) {
             New-Item -ItemType Directory -Force -Path (Split-Path -Parent $ShortcutPath) | Out-Null
             $Shortcut = $WScript.CreateShortcut($ShortcutPath)
             $Shortcut.TargetPath = $ExePath
             $Shortcut.WorkingDirectory = $InstallDir
-            $Shortcut.IconLocation = "$ExePath,0"
+            $Shortcut.IconLocation = "{0},0" -f $ExePath
+            $Shortcut.Description = "Start Reagent Approval Bot local Web UI"
             $Shortcut.Save()
         }
     }

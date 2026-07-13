@@ -110,7 +110,7 @@ def fetch_latest_release(timeout_seconds: int = 20) -> dict[str, object]:
         return json.loads(response.read().decode("utf-8"))
 
 
-def fetch_latest_release_fallback(timeout_seconds: int = 20) -> dict[str, object]:
+def fetch_latest_release_public(timeout_seconds: int = 20) -> dict[str, object]:
     repo = app_repository()
     request = urllib.request.Request(
         GITHUB_LATEST.format(repo=repo),
@@ -145,12 +145,12 @@ def fetch_latest_release_fallback(timeout_seconds: int = 20) -> dict[str, object
 def check_for_update(current_version: str | None = None, timeout_seconds: int = 20) -> UpdateInfo:
     current = normalize_tag(current_version or app_version())
     try:
-        release = fetch_latest_release(timeout_seconds=timeout_seconds)
-    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError) as error:
+        release = fetch_latest_release_public(timeout_seconds=timeout_seconds)
+    except (urllib.error.URLError, TimeoutError, OSError) as public_error:
         try:
-            release = fetch_latest_release_fallback(timeout_seconds=timeout_seconds)
-        except (urllib.error.URLError, TimeoutError, OSError) as fallback_error:
-            return UpdateInfo(ok=False, current_version=current, error=f"{error}; fallback failed: {fallback_error}")
+            release = fetch_latest_release(timeout_seconds=timeout_seconds)
+        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError) as api_error:
+            return UpdateInfo(ok=False, current_version=current, error=f"public release check failed: {public_error}; GitHub API failed: {api_error}")
 
     latest = normalize_tag(str(release.get("tag_name") or release.get("name") or ""))
     asset = choose_setup_asset(list(release.get("assets") or []))

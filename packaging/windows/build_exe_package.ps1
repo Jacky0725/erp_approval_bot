@@ -18,6 +18,7 @@ $BuildName = "ReagentApprovalBot"
 $DistAppDir = Join-Path $RepoRoot "dist\$BuildName"
 $PackagePath = Join-Path $ReleaseDir "reagent-approval-bot-$Version-win-$Arch-portable.zip"
 $Launcher = Join-Path $RepoRoot "packaging\windows\reagent_approval_bot_launcher.py"
+$IconPath = Join-Path $RepoRoot "assets\reagent-approval-bot.ico"
 $BrowserRoot = Join-Path $env:LOCALAPPDATA "ms-playwright"
 
 if (!(Test-Path $Launcher)) {
@@ -41,6 +42,7 @@ $addData = @(
     "$RepoRoot\requirements.txt;app",
     "$RepoRoot\README.md;app",
     "$RepoRoot\AGENTS.md;app",
+    "$RepoRoot\assets;app\assets",
     "$RepoRoot\packaging\windows\start_web_ui.ps1;app\packaging\windows",
     "$RepoRoot\packaging\windows\stop_web_ui.ps1;app\packaging\windows",
     "$RepoRoot\packaging\windows\uninstall.ps1;app\packaging\windows",
@@ -99,6 +101,10 @@ $args = @(
     "--workpath", $WorkDir,
     "--specpath", $SpecDir
 )
+
+if (Test-Path $IconPath) {
+    $args += @("--icon", $IconPath)
+}
 
 foreach ($item in $addData) {
     $args += @("--add-data", $item)
