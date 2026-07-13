@@ -176,11 +176,11 @@ class RuleEngine:
         if not text:
             return self._manual_result("无法判断：试剂信息为空。")
 
-        if self._is_pharmacopoeia_color_standard(reagent_info):
+        if self._is_business_normal_name(reagent_info):
             return {
                 "final_category": NORMAL_CATEGORY,
                 "matched_categories": [NORMAL_CATEGORY],
-                "reason": "试剂名称命中“药典色度标准品/色度标准溶液”业务规则，按普通类处理。",
+                "reason": "试剂名称命中普通类业务关键词（清洗液/标准液/标准溶液/ICP/试剂/缓冲液/蛋白/免疫/抗体/标液/校准/药物），按普通类处理。",
                 "confidence": 0.95,
                 "need_manual_review": False,
             }
@@ -475,6 +475,9 @@ class RuleEngine:
         if category == "\u91cd\u91d1\u5c5e\u7c7b":
             hits.extend(RuleEngine._heavy_metal_name_hits(reagent_info))
 
+        if category == "\u5f02\u5473":
+            hits.extend(RuleEngine._indole_name_hits(reagent_info))
+
         if category == "\u7279\u6b8a\u9178" and RuleEngine._is_hydrochloride_salt(reagent_info):
             return []
 
@@ -519,6 +522,24 @@ class RuleEngine:
         for token in ("\u9521", "\u954d", "\u94b4", "\u9511", "\u516d\u4ef7\u94ec", "\u9549", "\u94cb"):
             if token in name_text:
                 hits.append(f"\u542b{token}")
+        return list(dict.fromkeys(hits))
+
+    @staticmethod
+    def _indole_name_hits(reagent_info: dict[str, Any]) -> list[str]:
+        parts = []
+        for key in ("name", "reagent_name", "chemical_name", "standard_name", "cleaned_name", "english_name"):
+            value = reagent_info.get(key)
+            if value:
+                parts.append(str(value))
+        name_text = "".join(parts).lower()
+        hits = []
+        for token, label in (
+            ("\u5432\u54da", "\u542b\u5432\u54da"),
+            ("indole", "indole"),
+            ("isoindole", "isoindole"),
+        ):
+            if token in name_text:
+                hits.append(label)
         return list(dict.fromkeys(hits))
 
     @staticmethod
@@ -657,6 +678,41 @@ class RuleEngine:
             "europeanpharmacopoeiacolorstandardsolution",
         )
         return any(RuleEngine._normalize_text(token) in name_text for token in tokens)
+
+    @staticmethod
+    def _is_business_normal_name(reagent_info: dict[str, Any]) -> bool:
+        name_text = RuleEngine._normalize_text(
+            " ".join(
+                str(reagent_info.get(key) or "")
+                for key in (
+                    "name",
+                    "reagent_name",
+                    "chemical_name",
+                    "standard_name",
+                    "cleaned_name",
+                    "english_name",
+                )
+            )
+        )
+        if any(token in name_text for token in ("\u65e0\u6807\u7b7e", "\u6a21\u62df\u8bd5\u5242", "\u5b8c\u5168\u4e0d\u5b58\u5728")):
+            return False
+        tokens = (
+            "\u6e05\u6d17\u6db2",
+            "\u6807\u51c6\u6db2",
+            "\u6807\u51c6\u6eb6\u6db2",
+            "icp",
+            "\u8bd5\u5242",
+            "\u7f13\u51b2\u6db2",
+            "\u86cb\u767d",
+            "\u514d\u75ab",
+            "\u6297\u4f53",
+            "\u6807\u6db2",
+            "\u6821\u51c6",
+            "\u836f\u7269",
+        )
+        return RuleEngine._is_pharmacopoeia_color_standard(reagent_info) or any(
+            RuleEngine._normalize_text(token) in name_text for token in tokens
+        )
 
     @staticmethod
     def _is_hydrochloride_salt(reagent_info: dict[str, Any]) -> bool:

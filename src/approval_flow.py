@@ -519,6 +519,11 @@ class ApprovalFlowMixin:
                 else:
                     suggestion = self.reagent_memory_suggestion(reagent, memory_match)
                     suggestions_by_index[index] = suggestion
+                    self.queue_manual_review_if_suggestion_requires_it(
+                        reagent,
+                        suggestion,
+                        name_result={},
+                    )
                     print(
                         "Reagent memory suggestion: "
                         f"{reagent.get('\u5e8f\u53f7', '')} {reagent_name} -> {memory_match.get('final_category', '')}"
@@ -567,6 +572,11 @@ class ApprovalFlowMixin:
                 else:
                     suggestion = self.reagent_memory_suggestion(reagent, memory_match, name_result)
                     suggestions_by_index[index] = suggestion
+                    self.queue_manual_review_if_suggestion_requires_it(
+                        reagent,
+                        suggestion,
+                        name_result=name_result,
+                    )
                     print(
                         "Reagent memory suggestion after normalization: "
                         f"{reagent.get('\u5e8f\u53f7', '')} {reagent_name} -> {memory_match.get('final_category', '')}"
@@ -644,6 +654,40 @@ class ApprovalFlowMixin:
             self.remember_erp_suggestion(memory, suggestions_by_index[item["index"]])
 
         return [suggestions_by_index[index] for index in sorted(suggestions_by_index)]
+
+    def queue_manual_review_if_suggestion_requires_it(
+        self,
+        reagent: dict[str, str],
+        suggestion: dict[str, Any],
+        name_result: dict[str, Any] | None = None,
+    ) -> None:
+        if not suggestion.get("\u9700\u4eba\u5de5\u590d\u6838"):
+            return
+        self.add_manual_review_item_from_suggestion(
+            reagent,
+            name_result or {
+                "raw_name": reagent.get("\u8bd5\u5242\u540d\u79f0", ""),
+                "cleaned_name": suggestion.get("\u6e05\u6d17\u540e\u540d\u79f0", ""),
+                "standard_name": suggestion.get("\u6807\u51c6\u5316\u540d\u79f0", ""),
+                "reason": suggestion.get("\u540d\u79f0\u6807\u51c6\u5316\u539f\u56e0", ""),
+            },
+            {
+                "source": suggestion.get("\u67e5\u8be2\u6765\u6e90", ""),
+                "url": suggestion.get("\u67e5\u8be2URL", ""),
+                "failure_reason": suggestion.get("\u67e5\u8be2\u5931\u8d25\u539f\u56e0", ""),
+                "raw_text": suggestion.get("\u8bc1\u636e", ""),
+            },
+            {
+                "evidence": [suggestion.get("\u8bc1\u636e", "")]
+                if suggestion.get("\u8bc1\u636e")
+                else [],
+            },
+            {
+                "reason": suggestion.get("\u89c4\u5219\u539f\u56e0", ""),
+                "need_manual_review": True,
+            },
+            suggestion,
+        )
 
     def unknown_reagent_suggestion(self, reagent: dict[str, Any], reason: str) -> dict[str, Any]:
         name = str(reagent.get("\u8bd5\u5242\u540d\u79f0", "") or "").strip()
@@ -1045,13 +1089,13 @@ class ApprovalFlowMixin:
         )
         if classification.get("final_category") != "\u666e\u901a\u7c7b":
             return None
-        if "\u836f\u5178\u8272\u5ea6" not in str(classification.get("reason", "")):
+        if float(classification.get("confidence") or 0.0) < 0.9:
             return None
         return self._direct_business_suggestion(
             reagent,
             reagent_name,
             classification,
-            "\u547d\u4e2d\u836f\u5178\u8272\u5ea6\u6807\u51c6\u54c1\u4e1a\u52a1\u89c4\u5219",
+            str(classification.get("reason") or "\u547d\u4e2d\u666e\u901a\u7c7b\u4e1a\u52a1\u89c4\u5219"),
         )
 
     @staticmethod

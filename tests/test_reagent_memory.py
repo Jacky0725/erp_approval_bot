@@ -292,6 +292,41 @@ class ReagentMemoryTest(unittest.TestCase):
             self.assertEqual(row["need_manual_review"], 0)
             self.assertEqual(row["conflict"], 0)
 
+    def test_business_normal_keyword_overrides_unknown_memory_rule(self) -> None:
+        tmp, memory = self.make_memory()
+        with tmp:
+            memory.add_record(
+                raw_name="\u8bd5\u5242\uff08\u672a\u77e5\uff09",
+                cleaned_name="\u8bd5\u5242 \u672a\u77e5",
+                standard_name="\u8bd5\u5242 \u672a\u77e5",
+                cas="-",
+                final_category="\u666e\u901a\u7c7b",
+                confidence=0.95,
+                reason="business normal keyword",
+            )
+            row = memory.find_any(raw_name="\u8bd5\u5242\uff08\u672a\u77e5\uff09")
+
+            self.assertEqual(row["final_category"], "\u666e\u901a\u7c7b")
+            self.assertEqual(row["reusable"], 1)
+            self.assertEqual(row["need_manual_review"], 0)
+            self.assertEqual(row["conflict"], 0)
+
+            memory.add_record(
+                raw_name="\u672a\u77e5\u836f\u7269",
+                cleaned_name="\u672a\u77e5\u836f\u7269",
+                standard_name="\u672a\u77e5\u836f\u7269",
+                cas="-",
+                final_category="\u666e\u901a\u7c7b",
+                confidence=0.95,
+                reason="business normal keyword",
+            )
+            drug_row = memory.find_any(raw_name="\u672a\u77e5\u836f\u7269")
+
+            self.assertEqual(drug_row["final_category"], "\u666e\u901a\u7c7b")
+            self.assertEqual(drug_row["reusable"], 1)
+            self.assertEqual(drug_row["need_manual_review"], 0)
+            self.assertEqual(drug_row["conflict"], 0)
+
     def test_update_record_keeps_unknown_packaging_names_reusable(self) -> None:
         tmp, memory = self.make_memory()
         with tmp:

@@ -127,6 +127,33 @@ class StructuredRulesTest(unittest.TestCase):
         self.assertEqual(result["final_category"], "\u91cd\u91d1\u5c5e\u7c7b")
         self.assertFalse(result["need_manual_review"])
 
+    def test_business_normal_keywords_override_risk_classes(self) -> None:
+        names = [
+            "\u94c5ICP\u6807\u51c6\u6eb6\u6db2",
+            "\u94cdICP\u6807\u51c6\u6db2",
+            "\u6e05\u6d17\u6db2",
+            "\u94c5\u6807\u6db2",
+            "\u94cd\u6821\u51c6\u6db2",
+            "\u5432\u54da\u6807\u51c6\u6eb6\u6db2",
+            "3-Bromo-6-nitroindole \u8bd5\u5242",
+            "\u78f7\u9178\u7f13\u51b2\u6db2",
+            "\u86cb\u767d\u514d\u75ab\u6297\u4f53\u8bd5\u5242",
+            "\u5361\u9a6c\u897f\u5e73\u836f\u7269\u5bf9\u7167\u54c1",
+        ]
+        for name in names:
+            with self.subTest(name=name):
+                result = self.engine.classify(
+                    {
+                        "reagent_name": name,
+                        "standard_name": name,
+                        "text": "\u8fd9\u91cc\u7684\u8bc1\u636e\u63d0\u5230\u542b\u94c5\u3001\u6eb4\u548c\u5432\u54da",
+                        "allow_default_normal": True,
+                    }
+                )
+
+                self.assertEqual(result["final_category"], "\u666e\u901a\u7c7b")
+                self.assertFalse(result["need_manual_review"])
+
     def test_indole_derivative_matches_odor_class(self) -> None:
         result = self.engine.classify(
             {
@@ -139,6 +166,29 @@ class StructuredRulesTest(unittest.TestCase):
 
         self.assertEqual(result["final_category"], "\u5f02\u5473")
         self.assertFalse(result["need_manual_review"])
+
+    def test_indole_names_prefer_odor_class(self) -> None:
+        for name in [
+            "\u5432\u54da",
+            "\u5f02\u5432\u54da",
+            "indole",
+            "isoindole",
+            "3-Bromo-6-nitroindole",
+            "7-\u6eb4-5-\u6c1f-1H-\u5432\u54da-2,3-\u4e8c\u916e",
+        ]:
+            with self.subTest(name=name):
+                result = self.engine.classify(
+                    {
+                        "reagent_name": name,
+                        "standard_name": name,
+                        "english_name": name,
+                        "text": name,
+                        "allow_default_normal": True,
+                    }
+                )
+
+                self.assertEqual(result["final_category"], "\u5f02\u5473")
+                self.assertFalse(result["need_manual_review"])
 
     def test_bromine_iodine_does_not_match_raw_text_noise(self) -> None:
         result = self.engine.classify(

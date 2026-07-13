@@ -441,6 +441,34 @@ class ApprovalFlowTodoLoopTest(unittest.TestCase):
                 self.assertFalse(suggestion["\u9700\u4eba\u5de5\u590d\u6838"])
                 self.assertEqual(suggestion["\u67e5\u8be2\u6765\u6e90"], "business_rule")
 
+    def test_direct_business_rule_suggestion_allows_business_normal_keywords(self) -> None:
+        bot = Bot()
+        engine = RuleEngine.from_excel(ROOT_DIR / "config" / "rules.xlsx")
+
+        for name in (
+            "\u94c5ICP\u6807\u51c6\u6eb6\u6db2",
+            "\u94cdICP\u6807\u51c6\u6db2",
+            "\u5432\u54da\u6807\u51c6\u6eb6\u6db2",
+            "\u86cb\u767d\u514d\u75ab\u6297\u4f53\u8bd5\u5242",
+            "\u8bd5\u5242\uff08\u672a\u77e5\uff09",
+            "\u5361\u9a6c\u897f\u5e73\u836f\u7269\u5bf9\u7167\u54c1",
+        ):
+            with self.subTest(name=name):
+                suggestion = bot.direct_business_rule_suggestion(
+                    {
+                        "\u5e8f\u53f7": "27",
+                        "\u8bd5\u5242\u540d\u79f0": name,
+                        "CAS\u53f7": "-",
+                    },
+                    engine,
+                )
+
+                self.assertIsNotNone(suggestion)
+                assert suggestion is not None
+                self.assertEqual(suggestion["\u6700\u7ec8\u5efa\u8bae\u7c7b\u522b"], "\u666e\u901a\u7c7b")
+                self.assertFalse(suggestion["\u9700\u4eba\u5de5\u590d\u6838"])
+                self.assertEqual(suggestion["\u67e5\u8be2\u6765\u6e90"], "business_rule")
+
     def test_parallel_processing_keeps_table_order_with_direct_rules(self) -> None:
         class OrderedBot(Bot):
             def __init__(self, root_dir: Path) -> None:
@@ -625,6 +653,83 @@ class ApprovalFlowTodoLoopTest(unittest.TestCase):
         self.assertEqual(suggestions[0]["\u67e5\u8be2\u6765\u6e90"], "reagent_memory")
         self.assertEqual(suggestions[0]["\u6700\u7ec8\u5efa\u8bae\u7c7b\u522b"], "\u666e\u901a\u7c7b")
         self.assertFalse(suggestions[0]["\u9700\u4eba\u5de5\u590d\u6838"])
+
+    def test_reagent_memory_manual_review_match_is_written_to_review_queue(self) -> None:
+        class ManualMemoryBot(Bot, ReviewQueueMixin, ExcelExportsMixin):
+            def __init__(self, root_dir: Path) -> None:
+                self.settings = {
+                    "paths": {
+                        "reagent_memory_sqlite": "data/memory.sqlite",
+                        "review_queue_excel": "data/review_queue.xlsx",
+                    },
+                    "memory": {"min_confidence": 0.8},
+                    "approval": {"parallel_workers": 3},
+                }
+                self.root_dir = root_dir
+                self.stage_logger = StageLogger()
+                self._current_detail_info = {"\u5f53\u524d\u6e05\u5355\u53f7": "SJ-MEM", "\u7533\u8bf7\u4eba": "tester"}
+
+            def read_current_page_reagents(self, page: object) -> list[dict[str, str]]:
+                return [
+                    {
+                        "\u5e8f\u53f7": "3",
+                        "\u8bd5\u5242\u540d\u79f0": "MID COPPER T0425",
+                        "CAS\u53f7": "-",
+                        "\u89c4\u683c": "4",
+                        "\u89c4\u683c\u5355\u4f4d": "L",
+                        "\u7269\u5316\u7279\u6027": "-",
+                    }
+                ]
+
+            def search_reagents_parallel(self, items: list[dict[str, object]]) -> dict[int, dict[str, object]]:
+                raise AssertionError("chemical search should be skipped when reagent memory matches")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            memory = ReagentMemory.from_settings(
+                {
+                    "paths": {"reagent_memory_sqlite": "data/memory.sqlite"},
+                    "memory": {"min_confidence": 0.8},
+                },
+                root,
+            )
+            memory.add_record(
+                raw_name="MID COPPER T0425",
+                standard_name="\u94dc",
+                cleaned_name="MID COPPER T",
+                cas="-",
+                final_category="\u666e\u901a\u7c7b",
+                confidence=1.0,
+                reason="vendor code needs manual confirmation",
+                need_manual_review=True,
+                manual_verified=True,
+                track_conflicts=False,
+            )
+            row = memory.find_any(raw_name="MID COPPER T0425")
+            assert row is not None
+            memory.update_record(row["id"], {"reusable": True, "need_manual_review": False})
+
+            bot = ManualMemoryBot(root)
+            original = bot.reagent_memory_suggestion
+
+            def manual_review_suggestion(reagent, memory_row, name_result=None):  # type: ignore[no-untyped-def]
+                suggestion = original(reagent, memory_row, name_result)
+                suggestion["\u9700\u4eba\u5de5\u590d\u6838"] = True
+                suggestion["\u540d\u79f0\u9700\u4eba\u5de5\u590d\u6838"] = True
+                suggestion["\u540d\u79f0\u6807\u51c6\u5316\u539f\u56e0"] = "low-confidence vendor code"
+                return suggestion
+
+            bot.reagent_memory_suggestion = manual_review_suggestion  # type: ignore[method-assign]
+            engine = RuleEngine.from_excel(ROOT_DIR / "config" / "rules.xlsx")
+
+            suggestions = bot.process_current_unmatched_reagent_page(object(), engine, None, {})
+            queue = __import__("pandas").read_excel(root / "data" / "review_queue.xlsx", dtype=str).fillna("")
+
+        self.assertTrue(suggestions[0]["\u9700\u4eba\u5de5\u590d\u6838"])
+        self.assertEqual(len(queue), 1)
+        self.assertEqual(queue["\u8bd5\u5242\u6e05\u5355\u53f7"].tolist(), ["SJ-MEM"])
+        self.assertEqual(queue["\u5e8f\u53f7"].tolist(), ["3"])
+        self.assertEqual(queue["chemical_name"].tolist(), ["MID COPPER T0425"])
 
     def test_unknown_packaging_name_forces_unknown_class_before_memory(self) -> None:
         class UnknownNameBot(Bot):
