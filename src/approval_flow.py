@@ -170,8 +170,11 @@ class ApprovalFlowMixin:
         try:
             self.enter_reagent_judgement_page(page)
             tasks = self.read_all_todo_tasks(page)
-            list_numbers = self.todo_list_numbers(tasks)
-            print(f"Todo list refresh: {len(list_numbers)} total task(s) across all visible todo pages.")
+            all_list_numbers = self.todo_list_numbers(tasks)
+            list_numbers = self.filter_scheduled_todo_list_numbers(all_list_numbers)
+            print(f"Todo list refresh: {len(all_list_numbers)} total task(s) across all visible todo pages.")
+            if len(list_numbers) != len(all_list_numbers):
+                print(f"Scheduled review filter kept {len(list_numbers)} task(s) for automatic approval.")
 
             for list_number in list_numbers:
                 if len(processed_list_numbers) >= max_todos:
@@ -238,6 +241,38 @@ class ApprovalFlowMixin:
             print(f"Invalid PROCESS_ALL_TODOS_MAX={value}; using 50.")
             return 50
         return max(1, max_count)
+
+    def filter_scheduled_todo_list_numbers(self, list_numbers: list[str]) -> list[str]:
+        if not self.scheduled_manual_review_skip_enabled():
+            return list_numbers
+
+        filtered = []
+        skipped = []
+        for list_number in list_numbers:
+            has_manual_review, reason = self.current_list_has_manual_review_item(list_number)
+            if has_manual_review:
+                skipped.append(list_number)
+                print(
+                    "Scheduled approval skipped list with pending manual review: "
+                    f"{list_number}. {reason}"
+                )
+                continue
+            filtered.append(list_number)
+
+        if skipped:
+            print(f"Scheduled approval skipped {len(skipped)} manual-review blocked list(s): {', '.join(skipped)}")
+        return filtered
+
+    def scheduled_manual_review_skip_enabled(self) -> bool:
+        scheduled = os.getenv("SCHEDULED_RUN", "").strip().lower() in {"1", "true", "yes", "y", "on"}
+        skip = os.getenv("SCHEDULED_SKIP_MANUAL_REVIEW_LISTS", "true").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "y",
+            "on",
+        }
+        return scheduled and skip
 
     def process_unmatched_reagent_pages(
         self,

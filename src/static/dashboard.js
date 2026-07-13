@@ -29,6 +29,11 @@
     const llmProviders = dashboardData.llmProviderOptions || [];
     const currentLlm = dashboardData.currentLlm || { provider: "", baseUrl: "", model: "" };
     const initialRuntime = dashboardData.runtime || {};
+    const initialScheduler = dashboardData.scheduler || {};
+    const logState = {
+      lines: [],
+      filter: "all",
+    };
     const $ = (selector) => document.querySelector(selector);
 
     function on(selector, eventName, handler) {
@@ -51,6 +56,24 @@
       if (element) element.disabled = value;
     }
 
+    function initSettingsSections() {
+      document.querySelectorAll(".settings-section").forEach((section) => {
+        const head = section.querySelector(":scope > .settings-section-head");
+        if (!head || head.classList.contains("compact-head") || head.querySelector(".settings-section-toggle")) return;
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "settings-section-toggle";
+        button.textContent = "收起";
+        button.setAttribute("aria-expanded", "true");
+        button.addEventListener("click", () => {
+          const collapsed = section.classList.toggle("settings-section-collapsed");
+          button.textContent = collapsed ? "展开" : "收起";
+          button.setAttribute("aria-expanded", String(!collapsed));
+        });
+        head.appendChild(button);
+      });
+    }
+
     function setSelectValue(form, name, value) {
       if (!form) return;
       const field = form.querySelector(`[name="${name}"]`);
@@ -69,9 +92,22 @@
     setCheckbox(runForm, "auto_pass", initialRuntime.auto_pass);
     setCheckbox(settingsForm, "process_all_todos", initialRuntime.process_all_todos);
     setCheckbox(settingsForm, "auto_pass", initialRuntime.auto_pass);
+    setCheckbox(settingsForm, "scheduler_enabled", initialRuntime.scheduler_enabled);
+    setCheckbox(settingsForm, "scheduler_use_default_run_policy", initialRuntime.scheduler_use_default_run_policy || "true");
+    setCheckbox(settingsForm, "scheduler_auto_pass", initialRuntime.scheduler_auto_pass);
+    setCheckbox(settingsForm, "scheduler_skip_manual_review_lists", initialRuntime.scheduler_skip_manual_review_lists || "true");
+    setCheckbox(settingsForm, "dingtalk_notification_enabled", initialRuntime.dingtalk_notification_enabled);
+    setCheckbox(settingsForm, "dingtalk_at_all", initialRuntime.dingtalk_at_all || "true");
+    setSelectValue(settingsForm, "scheduler_mode", initialRuntime.scheduler_mode);
+    setSelectValue(settingsForm, "scheduler_approval_write_mode", initialRuntime.scheduler_approval_write_mode);
+    setText("#schedulerNextRun", safe(initialScheduler.next_run_at));
+    setText("#schedulerLastRun", safe(initialScheduler.last_run_at));
+    setText("#schedulerLastResult", safe(initialScheduler.last_result));
     initLlmSettings();
     initSectionNav();
     initSidebarToggle();
+    initSettingsSections();
+    initSchedulerPolicyToggle();
 
     on("#refreshLogButton", "click", async () => {
       setText("#logCopyState", "刷新中...");
@@ -91,6 +127,17 @@
       } catch (error) {
         setText("#logCopyState", "复制失败");
       }
+    });
+
+    document.querySelectorAll("[data-log-filter]").forEach((button) => {
+      button.addEventListener("click", () => {
+        logState.filter = button.dataset.logFilter || "all";
+        document.querySelectorAll("[data-log-filter]").forEach((item) => {
+          item.classList.toggle("active", item === button);
+          item.setAttribute("aria-pressed", String(item === button));
+        });
+        renderLogBox();
+      });
     });
 
     on("#refreshArtifactButton", "click", async () => {
@@ -275,6 +322,17 @@
       });
     }
 
+    function initSchedulerPolicyToggle() {
+      const field = settingsForm?.querySelector('[name="scheduler_use_default_run_policy"]');
+      const advanced = document.querySelector("#schedulerAdvancedPolicy");
+      if (!field || !advanced) return;
+      const apply = () => {
+        advanced.hidden = field.checked;
+      };
+      field.addEventListener("change", apply);
+      apply();
+    }
+
     settingsForm?.addEventListener("submit", async (event) => {
       event.preventDefault();
       const state = document.querySelector("#settingsSaveState");
@@ -291,6 +349,8 @@
       state.className = "save-state saved";
       settingsForm.querySelector('[name="erp_password"]').value = "";
       settingsForm.querySelector('[name="llm_api_key"]').value = "";
+      settingsForm.querySelector('[name="dingtalk_webhook"]').value = "";
+      settingsForm.querySelector('[name="dingtalk_secret"]').value = "";
       await refreshStatus({forceReview: true});
     });
 
@@ -492,11 +552,7 @@
       visibleCount.textContent = `显示 ${pageRows.length} / ${rows.length} 条`;
       body.innerHTML = "";
       if (!rows.length) {
-        body.innerHTML = tableEmptyHtml(9, "暂无人工复核项", "需要人工确认的审批记录会显示在这里。");
-        updateReviewPagination();
-        return;
-        renderMemoryDetail(null);
-        body.innerHTML = '<tr class="review-empty-row"><td colspan="9">暂无人工复核项</td></tr>';
+        body.innerHTML = tableEmptyHtml(6, "暂无人工复核项", "需要人工确认的审批记录会显示在这里。");
         updateReviewPagination();
         return;
       }
@@ -505,12 +561,18 @@
         tr.className = "review-row";
         const options = categoryOptionsHtml("");
         tr.innerHTML = `
-          <td class="review-time-cell">${escapeHtml(row.timestamp)}</td>
-          <td class="review-list-cell">${escapeHtml(row.list_number)}</td>
-          <td class="review-name-cell">${escapeHtml(row.reagent_name)}</td>
-          <td class="review-cas-cell">${escapeHtml(row.cas)}</td>
-          <td class="review-standard-cell">${escapeHtml(row.standard_name)}</td>
-          <td><span class="status-badge status-warning">${escapeHtml(row.status)}</span></td>
+          <td class="review-time-cell">
+            <strong>${escapeHtml(row.timestamp || "-")}</strong>
+            <span>${escapeHtml(row.list_number || "-")}</span>
+          </td>
+          <td class="review-name-cell">
+            <strong>${escapeHtml(row.reagent_name || "-")}</strong>
+            <span>${escapeHtml(row.standard_name || "-")}</span>
+          </td>
+          <td class="review-cas-status-cell">
+            <span>${escapeHtml(row.cas || "-")}</span>
+            <span class="status-badge status-warning">${escapeHtml(row.status || "待复核")}</span>
+          </td>
           <td class="reason-cell" title="${escapeHtml(row.reason_full || row.reason)}">${escapeHtml(row.reason)}</td>
           <td class="review-category-cell">
             <select class="review-category">${options}</select>
@@ -598,6 +660,8 @@
             deleteButton.disabled = false;
             return;
           }
+          rowMessage.textContent = payload.message || "已删除";
+          rowMessage.className = "review-row-message ok";
           await refreshStatus({forceReview: true});
         });
         body.appendChild(tr);
@@ -1092,6 +1156,32 @@
       alert(`已删除 ${result.deleted || 0} 条冲突记录。`);
     }
 
+    function logLineMatchesFilter(line) {
+      const text = String(line || "").toLowerCase();
+      if (logState.filter === "error") {
+        return /error|exception|traceback|failed|failure|失败|错误|异常/.test(text);
+      }
+      if (logState.filter === "warning") {
+        return /warn|warning|警告|注意/.test(text);
+      }
+      return true;
+    }
+
+    function renderLogBox() {
+      const lines = logState.lines.filter(logLineMatchesFilter);
+      const emptyText = logState.lines.length ? "当前过滤条件下暂无日志。" : "等待任务输出...";
+      setText("#logBox", lines.join("\n") || emptyText);
+    }
+
+    function artifactGroupName(item) {
+      const name = String(item?.name || "").toLowerCase();
+      if (/\.(xlsx|xls|csv|tsv)$/.test(name)) return "Excel / 数据";
+      if (/\.(png|jpg|jpeg|webp)$/.test(name)) return "截图";
+      if (/\.(html|htm)$/.test(name)) return "HTML 页面";
+      if (/\.(log|txt)$/.test(name)) return "运行日志";
+      return "其他";
+    }
+
     function renderArtifacts(items) {
       const holder = document.querySelector("#artifactList");
       const meta = document.querySelector("#artifactMeta");
@@ -1106,20 +1196,35 @@
           </div>
         `;
         return;
-        holder.innerHTML = '<div class="artifact-empty">暂无产物</div>';
-        return;
       }
-      if (meta) meta.textContent = `共 ${items.length} 个可下载产物，按最近更新时间展示。`;
+      if (meta) meta.textContent = `共 ${items.length} 个可下载产物，按文件类型分组展示。`;
+      const groups = new Map();
       items.forEach((item) => {
-        const link = document.createElement("a");
-        link.href = item.download_url;
-        link.className = "artifact";
-        link.innerHTML = `<strong>${escapeHtml(item.name)}</strong><span>${escapeHtml(item.modified)} · ${Math.ceil(item.size / 1024)} KB</span>`;
-        link.innerHTML = `
-          <strong>${escapeHtml(item.name)}</strong>
-          <span>${escapeHtml(item.modified)} · ${Math.ceil(item.size / 1024)} KB</span>
-        `;
-        holder.appendChild(link);
+        const groupName = artifactGroupName(item);
+        if (!groups.has(groupName)) groups.set(groupName, []);
+        groups.get(groupName).push(item);
+      });
+      groups.forEach((groupItems, groupName) => {
+        const section = document.createElement("section");
+        section.className = "artifact-group";
+        const title = document.createElement("h3");
+        title.className = "artifact-group-title";
+        title.textContent = `${groupName} · ${groupItems.length}`;
+        const list = document.createElement("div");
+        list.className = "artifact-group-list";
+        groupItems.forEach((item) => {
+          const link = document.createElement("a");
+          link.href = item.download_url;
+          link.className = "artifact";
+          link.innerHTML = `
+            <strong>${escapeHtml(item.name)}</strong>
+            <span>${escapeHtml(item.modified)} · ${Math.ceil(item.size / 1024)} KB</span>
+          `;
+          list.appendChild(link);
+        });
+        section.appendChild(title);
+        section.appendChild(list);
+        holder.appendChild(section);
       });
     }
 
@@ -1145,6 +1250,7 @@
       const approval = data.approval || {};
       const reviewQueue = data.review_queue || {};
       const todoTasks = data.todo_tasks || {};
+      const scheduler = data.scheduler || {};
       if (runtime.review_decision_options && runtime.review_decision_options.length) {
         reviewCategories = runtime.review_decision_options;
       }
@@ -1175,6 +1281,9 @@
       setText("#manualReview", safe(reviewQueue.pending, "0"));
       setText("#safetyGate", runtime.auto_pass === "true" ? "启用校验" : "默认关闭");
       setText("#suggestionMeta", approval.exists ? `最近更新：${safe(approval.modified)}` : "尚未生成 approval_suggestions.xlsx");
+      setText("#schedulerNextRun", safe(scheduler.next_run_at));
+      setText("#schedulerLastRun", safe(scheduler.last_run_at));
+      setText("#schedulerLastResult", safe(scheduler.last_result));
 
       renderTags(approval.categories || {});
       renderSuggestions(approval.preview || []);
@@ -1184,7 +1293,8 @@
       renderTodoTasks(todoTasks);
       renderWorkflow(status.workflow || {});
       renderArtifacts(data.artifacts || []);
-      setText("#logBox", (status.log_tail || []).join("\n") || "等待任务输出...");
+      logState.lines = status.log_tail || [];
+      renderLogBox();
     }
 
     refreshStatus();

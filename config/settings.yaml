@@ -35,6 +35,25 @@ approval:
     - reject
     - manual_review
 
+scheduler:
+  enabled: false
+  mode: interval
+  interval_hours: 6
+  daily_time: '16:00'
+  use_default_run_policy: true
+  process_all_todos_max: 50
+  approval_write_mode: multi_page
+  approval_write_min_confidence: '0.8'
+  auto_pass: false
+  skip_manual_review_lists: true
+
+notification:
+  dingtalk:
+    enabled: false
+    webhook_env: DINGTALK_ROBOT_WEBHOOK
+    secret_env: DINGTALK_ROBOT_SECRET
+    at_all: true
+
 reagent:
   physicochemical_property_options:
     - "\u666e\u901a\u7c7b"

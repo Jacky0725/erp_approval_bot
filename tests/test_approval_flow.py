@@ -207,6 +207,65 @@ class ApprovalFlowTodoLoopTest(unittest.TestCase):
 
         self.assertEqual(bot.processed, ["SJ202606170001", "SJ202606170002"])
 
+    def test_scheduled_all_todos_skips_pending_manual_review_lists(self) -> None:
+        class ScheduledTodoBot(Bot):
+            def __init__(self) -> None:
+                self.processed: list[str] = []
+
+            def enter_reagent_judgement_page(self, page: object) -> None:
+                return None
+
+            def read_all_todo_tasks(self, page: object) -> list[dict[str, str]]:
+                return [
+                    {"\u8bd5\u5242\u6e05\u5355\u53f7": "SJ202606170001"},
+                    {"\u8bd5\u5242\u6e05\u5355\u53f7": "SJ202606170002"},
+                ]
+
+            def current_list_has_manual_review_item(self, list_number: str) -> tuple[bool, str]:
+                return list_number == "SJ202606170001", "pending manual review"
+
+            def generate_approval_suggestions(self, page: object) -> None:
+                self.processed.append(self.target_list_number)
+
+        bot = ScheduledTodoBot()
+
+        with patch.dict(
+            os.environ,
+            {
+                "PROCESS_ALL_TODOS_MAX": "50",
+                "SCHEDULED_RUN": "true",
+                "SCHEDULED_SKIP_MANUAL_REVIEW_LISTS": "true",
+            },
+            clear=True,
+        ):
+            bot.generate_all_todo_approval_suggestions(object())
+
+        self.assertEqual(bot.processed, ["SJ202606170002"])
+
+    def test_manual_all_todos_does_not_apply_scheduled_review_filter(self) -> None:
+        class ManualTodoBot(Bot):
+            def __init__(self) -> None:
+                self.processed: list[str] = []
+
+            def enter_reagent_judgement_page(self, page: object) -> None:
+                return None
+
+            def read_all_todo_tasks(self, page: object) -> list[dict[str, str]]:
+                return [{"\u8bd5\u5242\u6e05\u5355\u53f7": "SJ202606170001"}]
+
+            def current_list_has_manual_review_item(self, list_number: str) -> tuple[bool, str]:
+                raise AssertionError("Manual runs should not apply scheduled skip filtering")
+
+            def generate_approval_suggestions(self, page: object) -> None:
+                self.processed.append(self.target_list_number)
+
+        bot = ManualTodoBot()
+
+        with patch.dict(os.environ, {"PROCESS_ALL_TODOS_MAX": "50"}, clear=True):
+            bot.generate_all_todo_approval_suggestions(object())
+
+        self.assertEqual(bot.processed, ["SJ202606170001"])
+
     def test_max_process_all_todos_count_has_safe_default_and_minimum(self) -> None:
         bot = Bot()
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from contextlib import asynccontextmanager
 from pathlib import Path
 import subprocess
 import sys
@@ -12,9 +13,12 @@ from fastapi import FastAPI, Form, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from dotenv import load_dotenv
 
 from llm_providers import fetch_provider_models, provider_options
+from scheduler import ApprovalScheduler
 from web_runner import (
+    ENV_PATH,
     ROOT_DIR,
     approval_summary,
     artifact_summary,
@@ -23,6 +27,7 @@ from web_runner import (
     delete_memory_record,
     delete_review_item,
     import_approval_suggestions_to_memory,
+    load_settings,
     manager,
     memory_summary,
     review_queue_summary,
@@ -39,7 +44,20 @@ TEMPLATES_DIR = SOURCE_ROOT / "src" / "templates"
 STATIC_DIR = SOURCE_ROOT / "src" / "static"
 LOG_DIR = ROOT_DIR / "data" / "logs"
 
-app = FastAPI(title="试剂审批自动化控制台")
+load_dotenv(ENV_PATH, override=True)
+scheduler = ApprovalScheduler(root_dir=ROOT_DIR, settings_loader=load_settings, job_manager=manager)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    scheduler.start()
+    try:
+        yield
+    finally:
+        scheduler.stop()
+
+
+app = FastAPI(title="试剂审批自动化控制台", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 templates = Jinja2Templates(directory=TEMPLATES_DIR)
 
@@ -109,6 +127,7 @@ def dashboard_context(request: Request, active_page: str) -> dict:
         "artifacts": artifact_summary(),
         "review_queue": review_queue_summary(),
         "todo_tasks": todo_tasks_summary(),
+        "scheduler": scheduler.status(),
         "dashboard_data": {
             "activePage": active_page,
             "runtime": runtime,
@@ -119,6 +138,7 @@ def dashboard_context(request: Request, active_page: str) -> dict:
                 "baseUrl": runtime.get("llm_base_url") or "",
                 "model": runtime.get("llm_model") or "",
             },
+            "scheduler": scheduler.status(),
         },
     }
 
@@ -181,6 +201,7 @@ def api_status() -> JSONResponse:
             "artifacts": artifact_summary(),
             "review_queue": review_queue_summary(),
             "todo_tasks": todo_tasks_summary(),
+            "scheduler": scheduler.status(),
         }
     )
 
@@ -277,6 +298,20 @@ def api_settings(
     approval_write_min_confidence: Annotated[str, Form()] = "0.8",
     approval_parallel_workers: Annotated[str, Form()] = "3",
     auto_pass: Annotated[str, Form()] = "",
+    scheduler_enabled: Annotated[str, Form()] = "",
+    scheduler_mode: Annotated[str, Form()] = "interval",
+    scheduler_interval_hours: Annotated[str, Form()] = "6",
+    scheduler_daily_time: Annotated[str, Form()] = "16:00",
+    scheduler_use_default_run_policy: Annotated[str, Form()] = "",
+    scheduler_process_all_todos_max: Annotated[str, Form()] = "50",
+    scheduler_approval_write_mode: Annotated[str, Form()] = "multi_page",
+    scheduler_approval_write_min_confidence: Annotated[str, Form()] = "0.8",
+    scheduler_auto_pass: Annotated[str, Form()] = "",
+    scheduler_skip_manual_review_lists: Annotated[str, Form()] = "",
+    dingtalk_notification_enabled: Annotated[str, Form()] = "",
+    dingtalk_webhook: Annotated[str, Form()] = "",
+    dingtalk_secret: Annotated[str, Form()] = "",
+    dingtalk_at_all: Annotated[str, Form()] = "",
     llm_provider: Annotated[str, Form()] = "siliconflow",
     llm_base_url: Annotated[str, Form()] = "",
     llm_model: Annotated[str, Form()] = "",
@@ -299,6 +334,20 @@ def api_settings(
             "approval_write_min_confidence": approval_write_min_confidence,
             "approval_parallel_workers": approval_parallel_workers,
             "auto_pass": normalize_checkbox(auto_pass),
+            "scheduler_enabled": normalize_checkbox(scheduler_enabled),
+            "scheduler_mode": scheduler_mode,
+            "scheduler_interval_hours": scheduler_interval_hours,
+            "scheduler_daily_time": scheduler_daily_time,
+            "scheduler_use_default_run_policy": normalize_checkbox(scheduler_use_default_run_policy),
+            "scheduler_process_all_todos_max": scheduler_process_all_todos_max,
+            "scheduler_approval_write_mode": scheduler_approval_write_mode,
+            "scheduler_approval_write_min_confidence": scheduler_approval_write_min_confidence,
+            "scheduler_auto_pass": normalize_checkbox(scheduler_auto_pass),
+            "scheduler_skip_manual_review_lists": normalize_checkbox(scheduler_skip_manual_review_lists),
+            "dingtalk_notification_enabled": normalize_checkbox(dingtalk_notification_enabled),
+            "dingtalk_webhook": dingtalk_webhook,
+            "dingtalk_secret": dingtalk_secret,
+            "dingtalk_at_all": normalize_checkbox(dingtalk_at_all),
             "llm_provider": llm_provider,
             "llm_base_url": llm_base_url,
             "llm_model": llm_model,
@@ -308,7 +357,8 @@ def api_settings(
             "llm_max_retries": llm_max_retries,
         }
     )
-    return JSONResponse({"saved": True, "runtime": snapshot})
+    scheduler.reload()
+    return JSONResponse({"saved": True, "runtime": snapshot, "scheduler": scheduler.status()})
 
 
 @app.post("/api/run")
@@ -375,11 +425,22 @@ async def api_review_delete(request: Request) -> JSONResponse:
 
 @app.get("/artifacts/{filename}")
 def download_artifact(filename: str) -> FileResponse:
-    path = (LOG_DIR / filename).resolve()
-    log_dir = LOG_DIR.resolve()
-    if not str(path).startswith(str(log_dir)) or not path.exists() or not path.is_file():
+    path = artifact_path_for_download(filename)
+    if path is None:
         raise HTTPException(status_code=404, detail="Artifact not found")
     return FileResponse(path)
+
+
+def artifact_path_for_download(filename: str) -> Path | None:
+    log_dir = LOG_DIR.resolve()
+    path = (log_dir / filename).resolve()
+    try:
+        path.relative_to(log_dir)
+    except ValueError:
+        return None
+    if not path.exists() or not path.is_file():
+        return None
+    return path
 
 
 def run_options(

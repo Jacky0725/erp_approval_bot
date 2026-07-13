@@ -24,6 +24,75 @@
         <section class="settings-section">
           <div class="settings-section-head">
             <div>
+              <h3>钉钉机器人通知</h3>
+              <p>任务成功或失败后向钉钉群发送简洁摘要，通知失败只写入运行日志。</p>
+            </div>
+          </div>
+          <div class="settings-grid settings-grid-dingtalk">
+            <label class="check settings-check-field"><input type="checkbox" name="dingtalk_notification_enabled" value="true"> 启用钉钉通知</label>
+            <label>钉钉 Webhook <input name="dingtalk_webhook" type="password" placeholder="{% if runtime.dingtalk_webhook_configured %}已配置，留空则不修改{% else %}https://oapi.dingtalk.com/robot/send?...{% endif %}"></label>
+            <label>钉钉加签密钥 <input name="dingtalk_secret" type="password" placeholder="{% if runtime.dingtalk_secret_configured %}已配置，留空则不修改{% else %}可选：SEC...{% endif %}"></label>
+            <label class="check settings-check-field"><input type="checkbox" name="dingtalk_at_all" value="true"> 通知时 @ 所有人</label>
+          </div>
+        </section>
+
+        <section class="settings-section">
+          <div class="settings-section-head">
+            <div>
+              <h3>定时审批</h3>
+              <p>按周期或固定时间自动获取 ERP 最新待办清单，并跳过仍需人工复核的清单。</p>
+            </div>
+          </div>
+          <div class="settings-grid settings-grid-scheduler">
+            <label class="check settings-check-field"><input type="checkbox" name="scheduler_enabled" value="true"> 启用定时审批</label>
+            <label>
+              规则类型
+              <select name="scheduler_mode" id="schedulerMode">
+                <option value="interval">每隔 N 小时</option>
+                <option value="daily">每天固定时间</option>
+              </select>
+            </label>
+            <label>间隔小时 <input name="scheduler_interval_hours" value="{{ runtime.scheduler_interval_hours }}"></label>
+            <label>每天时间 <input name="scheduler_daily_time" type="time" value="{{ runtime.scheduler_daily_time }}"></label>
+            <label class="check settings-check-field"><input type="checkbox" name="scheduler_use_default_run_policy" value="true"> 沿用手动运行安全策略</label>
+          </div>
+          <div class="switches settings-policy-strip">
+            <label class="check"><input type="checkbox" name="scheduler_skip_manual_review_lists" value="true"> 跳过人工复核未完成清单</label>
+          </div>
+          <div id="schedulerAdvancedPolicy" class="scheduler-advanced-policy">
+            <div class="settings-section-head compact-head">
+              <div>
+                <h3>定时任务单独执行策略</h3>
+                <p>关闭“沿用手动运行安全策略”后生效。</p>
+              </div>
+            </div>
+            <div class="settings-grid settings-grid-scheduler-policy">
+            <label>单次最多处理 <input name="scheduler_process_all_todos_max" value="{{ runtime.scheduler_process_all_todos_max }}"></label>
+            <label>
+              定时写入模式
+              <select name="scheduler_approval_write_mode">
+                <option value="disabled">disabled</option>
+                <option value="test_one">test_one</option>
+                <option value="save_one">save_one</option>
+                <option value="single_page">single_page</option>
+                <option value="multi_page">multi_page</option>
+                <option value="generate_library">generate_library</option>
+              </select>
+            </label>
+            <label>定时最低置信度 <input name="scheduler_approval_write_min_confidence" value="{{ runtime.scheduler_approval_write_min_confidence }}"></label>
+            <label class="check danger-check"><input type="checkbox" name="scheduler_auto_pass" value="true"> 定时任务允许 AUTO_PASS</label>
+            </div>
+          </div>
+          <div class="scheduler-status">
+            <span>下次执行 <strong id="schedulerNextRun">-</strong></span>
+            <span>上次执行 <strong id="schedulerLastRun">-</strong></span>
+            <span>上次结果 <strong id="schedulerLastResult">-</strong></span>
+          </div>
+        </section>
+
+        <section class="settings-section">
+          <div class="settings-section-head">
+            <div>
               <h3>LLM 配置</h3>
               <p>模型服务、连接地址、模型名称与调用容错。</p>
             </div>
@@ -72,7 +141,7 @@
           </div>
           <div class="switches settings-policy-strip">
             <label class="check"><input type="checkbox" name="process_all_todos" value="true"> 默认处理全部待办</label>
-            <label class="inline-field">最多处理 <input class="small-input" name="process_all_todos_max" value="50"></label>
+            <label class="inline-field">最多处理 <input class="small-input" name="process_all_todos_max" value="{{ runtime.process_all_todos_max }}"></label>
             <label class="check danger-check"><input type="checkbox" name="auto_pass" value="true"> 默认 AUTO_PASS</label>
           </div>
         </section>
