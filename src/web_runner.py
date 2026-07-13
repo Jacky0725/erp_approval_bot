@@ -53,6 +53,7 @@ REVIEW_QUEUE_PATH = ROOT_DIR / "data" / "review_queue.xlsx"
 WEB_RUN_STATE_PATH = LOG_DIR / "web_run_state.yaml"
 TODO_TASKS_PATH = LOG_DIR / "todo_tasks.xlsx"
 TODO_TASKS_JSON_PATH = LOG_DIR / "todo_tasks.json"
+ALLOWED_WEB_WRITE_MODES = {"multi_page", "generate_library"}
 
 
 WORKFLOW_STEPS = [
@@ -65,6 +66,11 @@ WORKFLOW_STEPS = [
     {"id": "rule", "label": "规则判定"},
     {"id": "write", "label": "网页写入"},
 ]
+
+
+def normalize_web_write_mode(value: str | None, *, default: str = "multi_page") -> str:
+    mode = str(value or "").strip().lower()
+    return mode if mode in ALLOWED_WEB_WRITE_MODES else default
 
 
 BLOCKING_REVIEW_STATUSES = {
@@ -1339,9 +1345,11 @@ def runtime_config_snapshot() -> dict[str, Any]:
         "target_list_number": os.getenv("TARGET_LIST_NUMBER", ""),
         "process_all_todos": os.getenv("PROCESS_ALL_TODOS", "false"),
         "process_all_todos_max": os.getenv("PROCESS_ALL_TODOS_MAX", "50"),
-        "approval_write_mode": os.getenv(
-            "APPROVAL_WRITE_MODE",
-            str(approval.get("write_mode", "disabled")),
+        "approval_write_mode": normalize_web_write_mode(
+            os.getenv(
+                "APPROVAL_WRITE_MODE",
+                str(approval.get("write_mode", "multi_page")),
+            )
         ),
         "approval_write_min_confidence": os.getenv(
             "APPROVAL_WRITE_MIN_CONFIDENCE",
@@ -1357,7 +1365,7 @@ def runtime_config_snapshot() -> dict[str, Any]:
         "scheduler_daily_time": schedule.get("daily_time", "16:00"),
         "scheduler_use_default_run_policy": "true" if schedule.get("use_default_run_policy", True) else "false",
         "scheduler_process_all_todos_max": str(schedule.get("process_all_todos_max", 50)),
-        "scheduler_approval_write_mode": schedule.get("approval_write_mode", "multi_page"),
+        "scheduler_approval_write_mode": normalize_web_write_mode(str(schedule.get("approval_write_mode", "multi_page"))),
         "scheduler_approval_write_min_confidence": str(schedule.get("approval_write_min_confidence", "0.8")),
         "scheduler_auto_pass": "true" if schedule.get("auto_pass") else "false",
         "scheduler_skip_manual_review_lists": "true" if schedule.get("skip_manual_review_lists", True) else "false",
@@ -1392,7 +1400,7 @@ def save_runtime_config(form: dict[str, str]) -> dict[str, Any]:
         "TARGET_LIST_NUMBER": form.get("target_list_number", "").strip(),
         "PROCESS_ALL_TODOS": form.get("process_all_todos", "false").strip().lower(),
         "PROCESS_ALL_TODOS_MAX": form.get("process_all_todos_max", "50").strip() or "50",
-        "APPROVAL_WRITE_MODE": form.get("approval_write_mode", "disabled").strip() or "disabled",
+        "APPROVAL_WRITE_MODE": normalize_web_write_mode(form.get("approval_write_mode", "")),
         "APPROVAL_WRITE_MIN_CONFIDENCE": form.get("approval_write_min_confidence", "0.8").strip() or "0.8",
         "LLM_PROVIDER": provider.id,
         "LLM_BASE_URL": llm_base_url,
@@ -1457,9 +1465,9 @@ def save_runtime_config(form: dict[str, str]) -> dict[str, Any]:
         form.get("scheduler_process_all_todos_max", ""),
         scheduler.get("process_all_todos_max", 50),
     )
-    scheduler["approval_write_mode"] = (
-        form.get("scheduler_approval_write_mode", "").strip()
-        or scheduler.get("approval_write_mode", "multi_page")
+    scheduler["approval_write_mode"] = normalize_web_write_mode(
+        form.get("scheduler_approval_write_mode", ""),
+        default=normalize_web_write_mode(str(scheduler.get("approval_write_mode", "multi_page"))),
     )
     scheduler["approval_write_min_confidence"] = (
         form.get("scheduler_approval_write_min_confidence", "").strip()

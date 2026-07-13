@@ -6,9 +6,16 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from web_runner import AutomationJobManager, parse_target_list_numbers, repair_display_text, run_health, workflow_summary
+from web_runner import (
+    AutomationJobManager,
+    normalize_web_write_mode,
+    parse_target_list_numbers,
+    repair_display_text,
+    run_health,
+    workflow_summary,
+)
 import web_app
-from web_app import artifact_path_for_download, web_ui_restart_command
+from web_app import artifact_path_for_download, run_options, web_ui_restart_command
 
 
 class WorkflowSummaryTest(unittest.TestCase):
@@ -115,6 +122,35 @@ class WorkflowSummaryTest(unittest.TestCase):
                 self.assertIsNone(artifact_path_for_download("../logs_evil.txt"))
             finally:
                 web_app.LOG_DIR = original
+
+    def test_write_mode_options_expose_only_production_modes(self) -> None:
+        template_text = (Path(__file__).resolve().parents[1] / "src" / "templates" / "partials" / "run.html").read_text(
+            encoding="utf-8"
+        )
+        settings_text = (
+            Path(__file__).resolve().parents[1] / "src" / "templates" / "partials" / "settings.html"
+        ).read_text(encoding="utf-8")
+        combined = template_text + settings_text
+
+        self.assertIn('value="multi_page">全清单分页保存', combined)
+        self.assertIn('value="generate_library">保存并生成试剂库', combined)
+        for retired in ["disabled", "test_one", "save_one", "single_page"]:
+            self.assertNotIn(f'<option value="{retired}"', combined)
+
+    def test_web_write_mode_normalizes_retired_values(self) -> None:
+        self.assertEqual(normalize_web_write_mode("save_one"), "multi_page")
+        self.assertEqual(normalize_web_write_mode("generate_library"), "generate_library")
+
+        options = run_options(
+            target_list_numbers="SJ1",
+            process_all_todos="",
+            process_all_todos_max="50",
+            approval_write_mode="disabled",
+            approval_write_min_confidence="0.8",
+            auto_pass="",
+        )
+
+        self.assertEqual(options["APPROVAL_WRITE_MODE"], "multi_page")
 
 
 if __name__ == "__main__":

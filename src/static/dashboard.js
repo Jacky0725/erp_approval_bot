@@ -30,6 +30,10 @@
     const currentLlm = dashboardData.currentLlm || { provider: "", baseUrl: "", model: "" };
     const initialRuntime = dashboardData.runtime || {};
     const initialScheduler = dashboardData.scheduler || {};
+    const approvalWriteModeLabels = {
+      multi_page: "全清单分页保存",
+      generate_library: "保存并生成试剂库",
+    };
     const logState = {
       lines: [],
       filter: "all",
@@ -77,7 +81,22 @@
     function setSelectValue(form, name, value) {
       if (!form) return;
       const field = form.querySelector(`[name="${name}"]`);
-      if (field) field.value = value || field.value;
+      if (!field) return;
+      const candidate = value || field.value;
+      if (field.tagName === "SELECT") {
+        const hasOption = Array.from(field.options || []).some((option) => option.value === candidate);
+        if (hasOption) {
+          field.value = candidate;
+        } else if (name.includes("approval_write_mode") && field.options.length) {
+          field.value = "multi_page";
+        }
+        return;
+      }
+      field.value = candidate;
+    }
+
+    function approvalWriteModeLabel(value) {
+      return approvalWriteModeLabels[value] || safe(value);
     }
 
     function setCheckbox(form, name, value) {
@@ -100,6 +119,7 @@
     setCheckbox(settingsForm, "dingtalk_at_all", initialRuntime.dingtalk_at_all || "true");
     setSelectValue(settingsForm, "scheduler_mode", initialRuntime.scheduler_mode);
     setSelectValue(settingsForm, "scheduler_approval_write_mode", initialRuntime.scheduler_approval_write_mode);
+    setText("#writeModeText", approvalWriteModeLabel(initialRuntime.approval_write_mode));
     setText("#schedulerNextRun", safe(initialScheduler.next_run_at));
     setText("#schedulerLastRun", safe(initialScheduler.last_run_at));
     setText("#schedulerLastResult", safe(initialScheduler.last_result));
@@ -392,7 +412,7 @@
           return;
         }
         if (payload.update_available) {
-          setText("#updateStateText", "发现新版本");
+          setText("#updateStateText", "有新版本");
           const assetSize = payload.asset?.size ? `${Math.ceil(payload.asset.size / 1024 / 1024)} MB` : "";
           setUpdateMessage(`发现 ${payload.latest_version}，安装包 ${assetSize}。`);
           if (installButton) installButton.disabled = !initialRuntime.app_frozen;
@@ -400,7 +420,7 @@
             setUpdateMessage(`发现 ${payload.latest_version}，但当前是源码模式，请在正式安装版中自动更新。`);
           }
         } else {
-          setText("#updateStateText", "已是最新");
+          setText("#updateStateText", "已是最新版本");
           setUpdateMessage(payload.error || "当前已经是最新版本。");
         }
       } catch (error) {
@@ -1349,7 +1369,7 @@
       setText("#startedAt", safe(status.started_at));
       setText("#finishedAt", safe(status.finished_at));
       setText("#autoPassText", safe(runtime.auto_pass));
-      setText("#writeModeText", safe(runtime.approval_write_mode));
+      setText("#writeModeText", approvalWriteModeLabel(runtime.approval_write_mode));
       setText("#processScopeText", runtime.process_all_todos === "true" ? "全部待办" : "勾选清单/首条");
       const selectedLists = selectedTodoNumbers();
       setText("#targetList", selectedLists.length ? `${selectedLists.length} 个清单` : "-");
@@ -1412,7 +1432,7 @@
           return;
         }
         if (payload.update_available) {
-          setUpdateState("update-available", `可更新 ${payload.latest_version || ""}`);
+          setUpdateState("update-available", `有新版本 ${payload.latest_version || ""}`);
           if (installButton) {
             installButton.hidden = false;
             installButton.disabled = !initialRuntime.app_frozen;
@@ -1421,7 +1441,7 @@
           setUpdateMessage(`发现 ${payload.latest_version}，安装包 ${assetSize}。`);
           return;
         }
-        setUpdateState("update-current", "已是最新");
+        setUpdateState("update-current", "已是最新版本");
         setUpdateMessage("当前已经是最新版本。");
       } catch (error) {
         setUpdateState("update-failed", "检查失败");

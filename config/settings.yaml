@@ -24,7 +24,7 @@ paths:
 
 approval:
   default_action: manual_review
-  write_mode: disabled
+  write_mode: multi_page
   write_min_confidence: 0.8
   write_max_attempts: 2
   write_failure_break_limit: 1

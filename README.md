@@ -61,7 +61,7 @@ http://127.0.0.1:8000
 - `TARGET_LIST_NUMBER`：指定清单号，例如 `SJ202606170003`。
 - `PROCESS_ALL_TODOS=true`：同一登录会话内逐条处理当前待办列表。
 - `PROCESS_ALL_TODOS_MAX=50`：全量待办处理上限。
-- `APPROVAL_WRITE_MODE=disabled`：默认只生成建议，不写网页。
+- `APPROVAL_WRITE_MODE=multi_page`：默认按清单分页保存；Web UI 仅保留 `multi_page` 和 `generate_library` 两个正式写入模式。
 - `APPROVAL_WRITE_MIN_CONFIDENCE=0.8`：网页填写最低置信度。
 - `AUTO_PASS=false`：默认不点击顶部“通过”。
 
@@ -97,7 +97,7 @@ python scripts/cleanup_reagent_memory_conflicts.py --yes
 ## 安全约束
 
 - 开发阶段使用 headed 浏览器。
-- 默认 `APPROVAL_WRITE_MODE=disabled`，不修改网页数据。
+- 默认 `APPROVAL_WRITE_MODE=multi_page`，会在满足置信度与安全门条件时写入网页；`AUTO_PASS=false` 时不会点击顶部“通过”。
 - 默认 `AUTO_PASS=false`，不会点击顶部“通过”。
 - 所有审批建议和阻断原因应保存在 `data/logs/` 中。
 - 真实账号密码、API Key 只放 `.env`，不要提交到 Git。

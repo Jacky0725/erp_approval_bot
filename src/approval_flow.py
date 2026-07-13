@@ -1784,8 +1784,8 @@ class ApprovalFlowMixin:
         return bool(parts) and all(part in candidates for part in parts)
 
     def approval_write_mode(self) -> str:
-        configured = (getattr(self, "settings", {}).get("approval", {}) or {}).get("write_mode", "disabled")
-        return str(os.getenv("APPROVAL_WRITE_MODE") or configured or "disabled").strip().lower()
+        configured = (getattr(self, "settings", {}).get("approval", {}) or {}).get("write_mode", "multi_page")
+        return str(os.getenv("APPROVAL_WRITE_MODE") or configured or "multi_page").strip().lower()
 
     def high_confidence_write_candidates(self, suggestions: list[dict[str, Any]]) -> list[dict[str, Any]]:
         threshold = float(os.getenv("APPROVAL_WRITE_MIN_CONFIDENCE") or getattr(self, "settings", {}).get("approval", {}).get("write_min_confidence", 0.8))

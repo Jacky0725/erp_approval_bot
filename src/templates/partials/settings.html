@@ -71,12 +71,8 @@
             <label>
               定时写入模式
               <select name="scheduler_approval_write_mode">
-                <option value="disabled">disabled</option>
-                <option value="test_one">test_one</option>
-                <option value="save_one">save_one</option>
-                <option value="single_page">single_page</option>
-                <option value="multi_page">multi_page</option>
-                <option value="generate_library">generate_library</option>
+                <option value="multi_page">全清单分页保存</option>
+                <option value="generate_library">保存并生成试剂库</option>
               </select>
             </label>
             <label>定时最低置信度 <input name="scheduler_approval_write_min_confidence" value="{{ runtime.scheduler_approval_write_min_confidence }}"></label>
@@ -128,12 +124,8 @@
             <label>
               默认写入模式
               <select name="approval_write_mode">
-                <option value="disabled">disabled</option>
-                <option value="test_one">test_one</option>
-                <option value="save_one">save_one</option>
-                <option value="single_page">single_page</option>
-                <option value="multi_page">multi_page</option>
-                <option value="generate_library">generate_library</option>
+                <option value="multi_page">全清单分页保存</option>
+                <option value="generate_library">保存并生成试剂库</option>
               </select>
             </label>
             <label>默认最低置信度 <input name="approval_write_min_confidence" value="{{ runtime.approval_write_min_confidence }}"></label>

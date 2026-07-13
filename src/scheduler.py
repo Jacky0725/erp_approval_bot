@@ -53,8 +53,8 @@ def scheduler_config(settings: dict[str, Any] | None) -> dict[str, Any]:
         )
         result["approval_write_mode"] = (
             os.getenv("APPROVAL_WRITE_MODE")
-            or str(approval.get("write_mode") or result.get("approval_write_mode") or "disabled")
-        ).strip() or "disabled"
+            or str(approval.get("write_mode") or result.get("approval_write_mode") or "multi_page")
+        ).strip() or "multi_page"
         result["approval_write_min_confidence"] = (
             os.getenv("APPROVAL_WRITE_MIN_CONFIDENCE")
             or str(approval.get("write_min_confidence") or result.get("approval_write_min_confidence") or "0.8")
