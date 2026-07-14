@@ -68,6 +68,8 @@ class ApprovalWriter:
                 self._commit_row_property_selection(page, row)
                 if self._row_property_selection_matches(page, row, candidate_name):
                     return True
+                if self._row_property_selection_looks_committed(page, row, candidate_name):
+                    return True
             if self._direct_input_property_value(page, candidate_name, row):
                 self.commit_property_selection(page)
                 if row is None or self._row_property_selection_matches(page, row, candidate_name):
@@ -75,6 +77,8 @@ class ApprovalWriter:
                 if row is not None:
                     self._commit_row_property_selection(page, row)
                     if self._row_property_selection_matches(page, row, candidate_name):
+                        return True
+                    if self._row_property_selection_looks_committed(page, row, candidate_name):
                         return True
         self.dismiss_open_dropdown(page)
         return False
@@ -545,6 +549,72 @@ class ApprovalWriter:
         except (Error, TimeoutError):
             return False
         return False
+
+    @staticmethod
+    def _row_property_selection_looks_committed(page: Page, row: Locator, candidate_name: str) -> bool:
+        """Detect Ant Design select state before the table row text finishes rendering."""
+        identity = ApprovalWriter._row_identity(row)
+        try:
+            page.wait_for_timeout(250)
+            return bool(
+                page.evaluate(
+                    """
+                    ({ rowKey, top, height, candidateName }) => {
+                      const visible = (node) => {
+                        const rect = node.getBoundingClientRect();
+                        const style = window.getComputedStyle(node);
+                        return rect.width > 0 && rect.height > 0
+                          && style.visibility !== 'hidden'
+                          && style.display !== 'none';
+                      };
+                      const text = (node) => (node.innerText || node.textContent || '').replace(/\\s+/g, ' ').trim();
+                      const rowCenter = Number.isFinite(top)
+                        ? top + (Number.isFinite(height) ? height / 2 : 0)
+                        : null;
+                      const sameRow = (tr) => {
+                        if (!tr) return false;
+                        if (rowKey && tr.getAttribute('data-row-key') === rowKey) return true;
+                        if (Number.isFinite(rowCenter)) {
+                          const rect = tr.getBoundingClientRect();
+                          return Math.abs((rect.top + rect.height / 2) - rowCenter) < 12;
+                        }
+                        return false;
+                      };
+                      const exactMatch = (value) => {
+                        const normalized = String(value || '').replace(/\\s+/g, ' ').trim();
+                        return normalized === candidateName || normalized.includes(candidateName);
+                      };
+                      const rows = Array.from(document.querySelectorAll('tbody tr.ant-table-row')).filter(sameRow);
+                      for (const tr of rows) {
+                        const selectedItems = Array.from(tr.querySelectorAll(
+                          '.ant-select-selection-item, .ant-select-selector'
+                        )).filter(visible);
+                        if (selectedItems.some((node) => exactMatch(text(node)))) return true;
+
+                        const inputs = Array.from(tr.querySelectorAll(
+                          'input[role="combobox"], .ant-select-selection-search-input'
+                        )).filter(visible);
+                        if (inputs.some((node) => exactMatch(node.value || node.getAttribute('value')))) {
+                          return true;
+                        }
+                      }
+
+                      const active = document.activeElement;
+                      const activeSelect = active?.closest?.('.ant-select');
+                      if (activeSelect && visible(activeSelect) && exactMatch(text(activeSelect))) {
+                        return true;
+                      }
+                      const selectedOption = Array.from(document.querySelectorAll(
+                        '.ant-select-dropdown:not(.ant-select-dropdown-hidden) .ant-select-item-option-selected'
+                      )).find(visible);
+                      return Boolean(selectedOption && exactMatch(text(selectedOption)));
+                    }
+                    """,
+                    {**identity, "candidateName": candidate_name},
+                )
+            )
+        except (Error, TimeoutError):
+            return False
 
     @staticmethod
     def _click_property_option_in_active_dropdown(page: Page, candidate_name: str) -> bool:

@@ -112,6 +112,7 @@ h2 {
   z-index: 20;
   width: var(--sidebar);
   padding: 22px 18px;
+  overflow-x: hidden;
   overflow-y: auto;
   background: #15202b;
   color: #fff;
@@ -210,9 +211,10 @@ nav a:hover::before {
 .sidebar-toggle {
   display: grid;
   place-items: center;
-  position: absolute;
+  position: fixed;
   top: 92px;
-  right: -13px;
+  left: calc(var(--sidebar) - 14px);
+  z-index: 25;
   width: 28px;
   height: 28px;
   padding: 0;
@@ -275,7 +277,7 @@ body.sidebar-collapsed nav a::before {
 
 body.sidebar-collapsed .sidebar-toggle {
   top: 66px;
-  right: -13px;
+  left: calc(var(--sidebar-collapsed) - 14px);
 }
 
 body.sidebar-collapsed .sidebar-toggle-icon {

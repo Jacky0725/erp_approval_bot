@@ -115,6 +115,12 @@ PAGE_DEFS = {
 }
 
 
+def static_asset_version() -> str:
+    asset_paths = [STATIC_DIR / "dashboard.css", STATIC_DIR / "dashboard.js"]
+    mtimes = [path.stat().st_mtime for path in asset_paths if path.exists()]
+    return str(int(max(mtimes))) if mtimes else "1"
+
+
 def dashboard_context(request: Request, active_page: str) -> dict:
     page = PAGE_DEFS.get(active_page, PAGE_DEFS["overview"])
     runtime = runtime_config_snapshot()
@@ -130,6 +136,7 @@ def dashboard_context(request: Request, active_page: str) -> dict:
         "review_queue": review_queue_summary(),
         "todo_tasks": todo_tasks_summary(),
         "scheduler": scheduler.status(),
+        "static_version": static_asset_version(),
         "dashboard_data": {
             "activePage": active_page,
             "runtime": runtime,
