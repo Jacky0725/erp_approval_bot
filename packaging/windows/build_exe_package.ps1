@@ -1,6 +1,9 @@
 param(
     [string]$Version = "",
-    [string]$Python = "python"
+    [string]$Python = "python",
+    [ValidateSet("headless", "full")]
+    [string]$BrowserBundle = "headless",
+    [string]$PackageSuffix = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -16,7 +19,10 @@ $WorkDir = Join-Path $RepoRoot "dist\pyinstaller-work"
 $SpecDir = Join-Path $RepoRoot "dist\pyinstaller-spec"
 $BuildName = "ReagentApprovalBot"
 $DistAppDir = Join-Path $RepoRoot "dist\$BuildName"
-$PackagePath = Join-Path $ReleaseDir "reagent-approval-bot-$Version-win-$Arch-portable.zip"
+if (!$PackageSuffix) {
+    $PackageSuffix = if ($BrowserBundle -eq "headless") { "lite-portable" } else { "full-portable" }
+}
+$PackagePath = Join-Path $ReleaseDir "reagent-approval-bot-$Version-win-$Arch-$PackageSuffix.zip"
 $Launcher = Join-Path $RepoRoot "packaging\windows\reagent_approval_bot_launcher.py"
 $IconPath = Join-Path $RepoRoot "assets\reagent-approval-bot.ico"
 $BrowserRoot = Join-Path $env:LOCALAPPDATA "ms-playwright"
@@ -24,10 +30,31 @@ $BrowserRoot = Join-Path $env:LOCALAPPDATA "ms-playwright"
 if (!(Test-Path $Launcher)) {
     throw "Launcher not found: $Launcher"
 }
-if (!(Test-Path (Join-Path $BrowserRoot "chromium-1223"))) {
-    Write-Host "Playwright Chromium was not found. Installing chromium..."
-    & $Python -m playwright install chromium
+function Find-PlaywrightBrowserDir([string]$Pattern) {
+    if (!(Test-Path $BrowserRoot)) {
+        return $null
+    }
+    Get-ChildItem $BrowserRoot -Directory -Filter $Pattern |
+        Sort-Object LastWriteTime -Descending |
+        Select-Object -First 1 -ExpandProperty FullName
 }
+
+$HeadlessShellDir = Find-PlaywrightBrowserDir "chromium_headless_shell-*"
+$FullChromiumDir = Find-PlaywrightBrowserDir "chromium-*"
+if (!$HeadlessShellDir -or ($BrowserBundle -eq "full" -and !$FullChromiumDir)) {
+    Write-Host "Required Playwright Chromium runtime was not found. Installing chromium package..."
+    & $Python -m playwright install chromium
+    $HeadlessShellDir = Find-PlaywrightBrowserDir "chromium_headless_shell-*"
+    $FullChromiumDir = Find-PlaywrightBrowserDir "chromium-*"
+}
+if (!$HeadlessShellDir -or !(Test-Path $HeadlessShellDir)) {
+    throw "Playwright headless Chromium shell was not found under: $BrowserRoot"
+}
+if ($BrowserBundle -eq "full" -and (!$FullChromiumDir -or !(Test-Path $FullChromiumDir))) {
+    throw "Playwright Chromium browser was not found under: $BrowserRoot"
+}
+$HeadlessShellName = Split-Path $HeadlessShellDir -Leaf
+$FullChromiumName = if ($FullChromiumDir) { Split-Path $FullChromiumDir -Leaf } else { "" }
 
 New-Item -ItemType Directory -Force -Path $ReleaseDir | Out-Null
 if (Test-Path $DistAppDir) {
@@ -46,10 +73,11 @@ $addData = @(
     "$RepoRoot\packaging\windows\start_web_ui.ps1;app\packaging\windows",
     "$RepoRoot\packaging\windows\stop_web_ui.ps1;app\packaging\windows",
     "$RepoRoot\packaging\windows\uninstall.ps1;app\packaging\windows",
-    "$BrowserRoot\chromium-1223;ms-playwright\chromium-1223",
-    "$BrowserRoot\chromium_headless_shell-1223;ms-playwright\chromium_headless_shell-1223",
-    "$BrowserRoot\ffmpeg-1011;ms-playwright\ffmpeg-1011"
+    "$HeadlessShellDir;ms-playwright\$HeadlessShellName"
 )
+if ($BrowserBundle -eq "full") {
+    $addData += "$FullChromiumDir;ms-playwright\$FullChromiumName"
+}
 
 $hiddenImports = @(
     "automation_worker",
@@ -120,6 +148,26 @@ $args += $Launcher
 Write-Host "Building $BuildName $Arch with PyInstaller..."
 & $Python @args
 
+$cleanupPaths = @(
+    (Join-Path $DistAppDir "_internal\pandas\tests"),
+    (Join-Path $DistAppDir "_internal\app\src\__pycache__")
+)
+foreach ($path in $cleanupPaths) {
+    if (Test-Path $path) {
+        Remove-Item $path -Recurse -Force
+    }
+}
+$BundledBrowserRoot = Join-Path $DistAppDir "_internal\ms-playwright"
+if ($BrowserBundle -eq "headless") {
+    Get-ChildItem $BundledBrowserRoot -Directory -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -notlike "chromium_headless_shell-*" } |
+        Remove-Item -Recurse -Force
+} else {
+    Get-ChildItem $BundledBrowserRoot -Directory -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -notlike "chromium_headless_shell-*" -and $_.Name -notlike "chromium-*" } |
+        Remove-Item -Recurse -Force
+}
+
 $Readme = Join-Path $DistAppDir "README-WINDOWS.txt"
 @"
 Reagent Approval Bot $Version ($Arch)
@@ -143,8 +191,19 @@ Configuration:
 
 Notes:
 - Keep the _internal folder next to ReagentApprovalBot.exe.
-- This package includes Playwright Chromium only.
 "@ | Set-Content -Path $Readme -Encoding UTF8
+
+if ($BrowserBundle -eq "headless") {
+    @"
+ - This lightweight package includes Playwright headless Chromium shell only.
+ - The packaged runtime forces browser.headless=true.
+"@ | Add-Content -Path $Readme -Encoding UTF8
+} else {
+    @"
+ - This full package includes Playwright Chromium and headless Chromium shell.
+ - It supports headed browser debugging when config/settings.yaml sets browser.headless=false.
+"@ | Add-Content -Path $Readme -Encoding UTF8
+}
 
 if (Test-Path $PackagePath) {
     Remove-Item $PackagePath -Force

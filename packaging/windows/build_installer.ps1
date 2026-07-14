@@ -1,7 +1,8 @@
 param(
     [string]$Version = "",
     [string]$PortableZip = "",
-    [string]$Python = "python"
+    [string]$Python = "python",
+    [string]$InstallerSuffix = "setup"
 )
 
 $ErrorActionPreference = "Stop"
@@ -13,17 +14,17 @@ if (!$Version) {
 
 $ReleaseDir = Join-Path $RepoRoot "dist\releases"
 if (!$PortableZip) {
-    $PortableZip = Join-Path $ReleaseDir "reagent-approval-bot-$Version-win-x64-portable.zip"
+    $PortableZip = Join-Path $ReleaseDir "reagent-approval-bot-$Version-win-x64-lite-portable.zip"
 }
 if (!(Test-Path $PortableZip)) {
     throw "Portable zip not found: $PortableZip"
 }
 
-$StageDir = Join-Path $RepoRoot "dist\installer-stage\reagent-approval-bot-$Version-win-x64-setup"
+$StageDir = Join-Path $RepoRoot "dist\installer-stage\reagent-approval-bot-$Version-win-x64-$InstallerSuffix"
 $WorkDir = Join-Path $RepoRoot "dist\pyinstaller-installer-work"
 $SpecDir = Join-Path $RepoRoot "dist\pyinstaller-installer-spec"
 $OneFileOut = Join-Path $RepoRoot "dist\ReagentApprovalBotInstaller.exe"
-$InstallerPath = Join-Path $ReleaseDir "reagent-approval-bot-$Version-win-x64-setup.exe"
+$InstallerPath = Join-Path $ReleaseDir "reagent-approval-bot-$Version-win-x64-$InstallerSuffix.exe"
 $InstallerScript = Join-Path $RepoRoot "packaging\windows\reagent_approval_bot_installer.py"
 $IconPath = Join-Path $RepoRoot "assets\reagent-approval-bot.ico"
 

@@ -17,7 +17,9 @@ from runtime_paths import runtime_root
 GITHUB_API = "https://api.github.com/repos/{repo}/releases/latest"
 GITHUB_LATEST = "https://github.com/{repo}/releases/latest"
 GITHUB_DOWNLOAD = "https://github.com/{repo}/releases/download/{tag}/{asset}"
-SETUP_ASSET_SUFFIX = "-win-x64-setup.exe"
+SETUP_ASSET_MARKER = "-win-x64-"
+SETUP_ASSET_SUFFIX = "setup.exe"
+PREFERRED_SETUP_MARKER = "-lite-setup.exe"
 
 
 @dataclass(frozen=True)
@@ -72,12 +74,19 @@ def choose_setup_asset(assets: list[dict[str, object]]) -> ReleaseAsset | None:
     for asset in assets:
         name = str(asset.get("name") or "")
         url = str(asset.get("browser_download_url") or "")
-        if not name.endswith(SETUP_ASSET_SUFFIX) or not url:
+        if SETUP_ASSET_MARKER not in name or not name.endswith(SETUP_ASSET_SUFFIX) or not url:
             continue
         candidates.append(ReleaseAsset(name=name, url=url, size=int(asset.get("size") or 0)))
     if not candidates:
         return None
-    return sorted(candidates, key=lambda item: item.name)[-1]
+    return sorted(
+        candidates,
+        key=lambda item: (
+            1 if item.name.endswith(PREFERRED_SETUP_MARKER) else 0,
+            0 if "full-test" in item.name else 1,
+            item.name,
+        ),
+    )[-1]
 
 
 def github_token() -> str:
@@ -120,7 +129,7 @@ def fetch_latest_release_public(timeout_seconds: int = 20) -> dict[str, object]:
         final_url = response.geturl()
     tag = final_url.rstrip("/").split("/")[-1]
     version = normalize_tag(tag)
-    asset_name = f"reagent-approval-bot-{version}-win-x64-setup.exe"
+    asset_name = f"reagent-approval-bot-{version}-win-x64-lite-setup.exe"
     asset_url = GITHUB_DOWNLOAD.format(repo=repo, tag=tag, asset=asset_name)
     asset_size = 0
     try:

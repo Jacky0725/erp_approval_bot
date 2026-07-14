@@ -37,6 +37,26 @@ def test_choose_setup_asset_prefers_windows_x64_setup():
     assert asset.size == 123
 
 
+def test_choose_setup_asset_prefers_lite_setup_over_full_test():
+    asset = choose_setup_asset(
+        [
+            {
+                "name": "reagent-approval-bot-0.1.7-win-x64-full-test-setup.exe",
+                "browser_download_url": "full",
+                "size": 300,
+            },
+            {
+                "name": "reagent-approval-bot-0.1.7-win-x64-lite-setup.exe",
+                "browser_download_url": "lite",
+                "size": 200,
+            },
+        ]
+    )
+    assert asset is not None
+    assert asset.name.endswith("-lite-setup.exe")
+    assert asset.url == "lite"
+
+
 def test_check_for_update_uses_public_release_before_api(monkeypatch):
     calls = []
 

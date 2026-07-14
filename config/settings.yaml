@@ -3,8 +3,8 @@ app:
   dry_run: true
 
 browser:
-  headless: false
-  slow_mo_ms: 100
+  headless: true
+  slow_mo_ms: 0
   timeout_ms: 30000
 
 llm:

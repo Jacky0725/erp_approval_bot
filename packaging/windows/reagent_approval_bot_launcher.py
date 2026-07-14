@@ -34,6 +34,9 @@ def configure_runtime() -> Path:
     browser_root = bundled_root() / "ms-playwright"
     if browser_root.exists():
         os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", str(browser_root))
+        has_full_chromium = any(browser_root.glob("chromium-*"))
+        if not has_full_chromium:
+            os.environ.setdefault("REAGENT_APPROVAL_HEADLESS_ONLY", "true")
     (runtime / "data" / "logs").mkdir(parents=True, exist_ok=True)
     return runtime
 

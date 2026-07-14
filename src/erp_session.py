@@ -46,6 +46,20 @@ LOGIN_BUTTON_SELECTORS = [
 
 class ErpSessionMixin:
 
+    @staticmethod
+    def effective_browser_headless(browser_settings: dict[str, Any]) -> bool:
+        configured = bool(browser_settings.get("headless", False))
+        headless_only = os.getenv("REAGENT_APPROVAL_HEADLESS_ONLY", "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+        if headless_only and not configured:
+            print("Packaged runtime is headless-only; forcing browser.headless=true.")
+            return True
+        return configured
+
     def run_after_login_capture(self, screenshot_name: str, html_name: str, after_login: Any | None) -> None:
         stage_logger = getattr(self, "stage_logger", None) or StageLogger()
         self.stage_logger = stage_logger
@@ -66,7 +80,7 @@ class ErpSessionMixin:
 
             for attempt in range(1, 4):
                 browser = playwright.chromium.launch(
-                    headless=bool(browser_settings.get("headless", False)),
+                    headless=self.effective_browser_headless(browser_settings),
                     slow_mo=int(browser_settings.get("slow_mo_ms", 0)),
                 )
                 context = browser.new_context(ignore_https_errors=True)
