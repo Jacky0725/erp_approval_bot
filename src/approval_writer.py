@@ -191,24 +191,40 @@ class ApprovalWriter:
         return False
 
     def _select_property_option(self, page: Page, candidate_name: str, row: Locator | None = None) -> bool:
+        if row is not None and ApprovalWriter._click_property_option_in_bound_dropdown(page, candidate_name, row):
+            return True
         if ApprovalWriter._click_property_option(page, candidate_name):
             return True
         if ApprovalWriter._type_property_search_text_real(page, candidate_name, row):
             page.wait_for_timeout(300)
+            if row is not None and ApprovalWriter._click_property_option_in_bound_dropdown(page, candidate_name, row):
+                return True
             if ApprovalWriter._click_property_option(page, candidate_name):
                 return True
             if ApprovalWriter._confirm_property_option_by_keyboard(page, candidate_name):
                 return True
+        if row is not None and self._scroll_bound_dropdown_to_configured_option(page, candidate_name, row):
+            page.wait_for_timeout(180)
+            if ApprovalWriter._click_property_option_in_bound_dropdown(page, candidate_name, row):
+                return True
         if self._scroll_dropdown_to_configured_option(page, candidate_name):
             page.wait_for_timeout(180)
+            if row is not None and ApprovalWriter._click_property_option_in_bound_dropdown(page, candidate_name, row):
+                return True
             if ApprovalWriter._click_property_option(page, candidate_name):
                 return True
         if self._select_property_option_by_keyboard_order(page, candidate_name, row):
             return True
         if ApprovalWriter._type_property_search_text(page, candidate_name):
             page.wait_for_timeout(250)
+            if row is not None and ApprovalWriter._click_property_option_in_bound_dropdown(page, candidate_name, row):
+                return True
             if ApprovalWriter._click_property_option(page, candidate_name):
                 return True
+            if row is not None and self._scroll_bound_dropdown_to_configured_option(page, candidate_name, row):
+                page.wait_for_timeout(180)
+                if ApprovalWriter._click_property_option_in_bound_dropdown(page, candidate_name, row):
+                    return True
             if self._scroll_dropdown_to_configured_option(page, candidate_name):
                 page.wait_for_timeout(180)
                 if ApprovalWriter._click_property_option(page, candidate_name):
@@ -222,6 +238,12 @@ class ApprovalWriter:
     def _scroll_dropdown_to_configured_option(self, page: Page, candidate_name: str) -> bool:
         option_names = erp_property_options(self.settings or {})
         return self._scroll_dropdown_to_option(page, candidate_name, option_names)
+
+    def _scroll_bound_dropdown_to_configured_option(
+        self, page: Page, candidate_name: str, row: Locator | None
+    ) -> bool:
+        option_names = erp_property_options(self.settings or {})
+        return self._scroll_bound_dropdown_to_option(page, candidate_name, option_names, row)
 
     def _select_property_option_by_keyboard_order(
         self, page: Page, candidate_name: str, row: Locator | None = None
@@ -601,13 +623,13 @@ class ApprovalWriter:
 
                       const active = document.activeElement;
                       const activeSelect = active?.closest?.('.ant-select');
-                      if (activeSelect && visible(activeSelect) && exactMatch(text(activeSelect))) {
-                        return true;
+                      if (activeSelect && visible(activeSelect)) {
+                        const activeRow = activeSelect.closest('tbody tr.ant-table-row');
+                        if (sameRow(activeRow) && exactMatch(text(activeSelect))) {
+                          return true;
+                        }
                       }
-                      const selectedOption = Array.from(document.querySelectorAll(
-                        '.ant-select-dropdown:not(.ant-select-dropdown-hidden) .ant-select-item-option-selected'
-                      )).find(visible);
-                      return Boolean(selectedOption && exactMatch(text(selectedOption)));
+                      return false;
                     }
                     """,
                     {**identity, "candidateName": candidate_name},
@@ -615,6 +637,92 @@ class ApprovalWriter:
             )
         except (Error, TimeoutError):
             return False
+
+    @staticmethod
+    def _click_property_option_in_bound_dropdown(page: Page, candidate_name: str, row: Locator) -> bool:
+        identity = ApprovalWriter._row_identity(row)
+        try:
+            clicked = bool(
+                page.evaluate(
+                    """
+                    ({ candidateName, rowKey, top, height }) => {
+                      const visible = (node) => {
+                        if (!node) return false;
+                        const rect = node.getBoundingClientRect();
+                        const style = window.getComputedStyle(node);
+                        return rect.width > 0 && rect.height > 0
+                          && style.visibility !== 'hidden'
+                          && style.display !== 'none';
+                      };
+                      const text = (node) => (node.innerText || node.textContent || '').replace(/\\s+/g, ' ').trim();
+                      const rowCenter = Number.isFinite(top)
+                        ? top + (Number.isFinite(height) ? height / 2 : 0)
+                        : null;
+                      const sameRow = (tr) => {
+                        if (!tr) return false;
+                        if (rowKey && tr.getAttribute('data-row-key') === rowKey) return true;
+                        if (Number.isFinite(rowCenter)) {
+                          const rect = tr.getBoundingClientRect();
+                          return Math.abs((rect.top + rect.height / 2) - rowCenter) < 14;
+                        }
+                        return false;
+                      };
+                      const rowNode = Array.from(document.querySelectorAll('tbody tr.ant-table-row')).find(sameRow);
+                      const rowInputs = rowNode
+                        ? Array.from(rowNode.querySelectorAll('input[role="combobox"], .ant-select-selection-search-input')).filter(visible)
+                        : [];
+                      if (!rowNode || !rowInputs.length) return false;
+                      const active = document.activeElement;
+                      const input = rowInputs.find((node) => node === active)
+                        || rowInputs.find((node) => node.closest('.ant-select-open, .ant-select-focused'))
+                        || rowInputs[rowInputs.length - 1];
+                      const inputRect = input?.getBoundingClientRect?.();
+                      const controls = input?.getAttribute?.('aria-controls') || '';
+                      const dropdowns = Array.from(document.querySelectorAll(
+                        '.ant-select-dropdown:not(.ant-select-dropdown-hidden)'
+                      )).filter(visible);
+                      const scored = dropdowns
+                        .map((dropdown, index) => {
+                          const rect = dropdown.getBoundingClientRect();
+                          const tied = controls && dropdown.id === controls;
+                          const distance = inputRect
+                            ? Math.abs((rect.left + rect.width / 2) - (inputRect.left + inputRect.width / 2))
+                              + Math.abs(rect.top - inputRect.bottom)
+                            : index * 1000;
+                          return { dropdown, score: tied ? -10000 : distance };
+                        })
+                        .sort((a, b) => a.score - b.score);
+                      const dropdown = scored[0]?.dropdown;
+                      if (!dropdown) return false;
+                      const options = Array.from(dropdown.querySelectorAll('.ant-select-item-option')).filter(visible);
+                      const option = options.find((node) => text(node) === candidateName)
+                        || options.find((node) => text(node).includes(candidateName));
+                      if (!option) return false;
+                      option.scrollIntoView({ block: 'center', inline: 'center' });
+                      const target = option.querySelector('.ant-select-item-option-content') || option;
+                      const rect = target.getBoundingClientRect();
+                      const events = ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'];
+                      for (const type of events) {
+                        target.dispatchEvent(new MouseEvent(type, {
+                          bubbles: true,
+                          cancelable: true,
+                          view: window,
+                          clientX: rect.left + rect.width / 2,
+                          clientY: rect.top + rect.height / 2,
+                        }));
+                      }
+                      return true;
+                    }
+                    """,
+                    {**identity, "candidateName": candidate_name},
+                )
+            )
+            if clicked:
+                page.wait_for_timeout(120)
+                return True
+        except (Error, TimeoutError):
+            return False
+        return False
 
     @staticmethod
     def _click_property_option_in_active_dropdown(page: Page, candidate_name: str) -> bool:
@@ -1004,6 +1112,146 @@ class ApprovalWriter:
             return True
         except (Error, TimeoutError):
             return False
+
+    @staticmethod
+    def _bound_dropdown_state(
+        page: Page,
+        candidate_name: str,
+        option_names: list[str],
+        row: Locator | None,
+    ) -> dict[str, Any]:
+        identity = ApprovalWriter._row_identity(row) if row is not None else {}
+        try:
+            state = page.evaluate(
+                """
+                ({ candidateName, optionNames, rowKey, top, height }) => {
+                  const visible = (node) => {
+                    if (!node) return false;
+                    const rect = node.getBoundingClientRect();
+                    const style = window.getComputedStyle(node);
+                    return rect.width > 0 && rect.height > 0
+                      && style.visibility !== 'hidden'
+                      && style.display !== 'none';
+                  };
+                  const text = (node) => (node.innerText || node.textContent || '').replace(/\\s+/g, ' ').trim();
+                  const rowCenter = Number.isFinite(top)
+                    ? top + (Number.isFinite(height) ? height / 2 : 0)
+                    : null;
+                  const sameRow = (tr) => {
+                    if (!tr) return false;
+                    if (rowKey && tr.getAttribute('data-row-key') === rowKey) return true;
+                    if (Number.isFinite(rowCenter)) {
+                      const rect = tr.getBoundingClientRect();
+                      return Math.abs((rect.top + rect.height / 2) - rowCenter) < 14;
+                    }
+                    return false;
+                  };
+                  const rowNode = rowKey || Number.isFinite(rowCenter)
+                    ? Array.from(document.querySelectorAll('tbody tr.ant-table-row')).find(sameRow)
+                    : null;
+                  const rowInputs = rowNode
+                    ? Array.from(rowNode.querySelectorAll('input[role="combobox"], .ant-select-selection-search-input')).filter(visible)
+                    : [];
+                  if ((rowKey || Number.isFinite(rowCenter)) && (!rowNode || !rowInputs.length)) {
+                    return { hasDropdown: false, found: false };
+                  }
+                  const active = document.activeElement;
+                  const input = rowInputs.find((node) => node === active)
+                    || rowInputs.find((node) => node.closest('.ant-select-open, .ant-select-focused'))
+                    || rowInputs[rowInputs.length - 1]
+                    || Array.from(document.querySelectorAll('input[role="combobox"], .ant-select-selection-search-input')).filter(visible).pop();
+                  const inputRect = input?.getBoundingClientRect?.();
+                  const controls = input?.getAttribute?.('aria-controls') || '';
+                  const dropdowns = Array.from(document.querySelectorAll(
+                    '.ant-select-dropdown:not(.ant-select-dropdown-hidden)'
+                  )).filter(visible);
+                  const scored = dropdowns
+                    .map((dropdown, index) => {
+                      const rect = dropdown.getBoundingClientRect();
+                      const tied = controls && dropdown.id === controls;
+                      const distance = inputRect
+                        ? Math.abs((rect.left + rect.width / 2) - (inputRect.left + inputRect.width / 2))
+                          + Math.abs(rect.top - inputRect.bottom)
+                        : index * 1000;
+                      return { dropdown, score: tied ? -10000 : distance };
+                    })
+                    .sort((a, b) => a.score - b.score);
+                  const dropdown = scored[0]?.dropdown;
+                  if (!dropdown) return { hasDropdown: false, found: false };
+                  const options = Array.from(dropdown.querySelectorAll('.ant-select-item-option')).filter(visible);
+                  const visibleTexts = options.map(text).filter(Boolean);
+                  const found = visibleTexts.some((value) => value === candidateName || value.includes(candidateName));
+                  const holder = dropdown.querySelector('.rc-virtual-list-holder') || dropdown;
+                  const rect = holder.getBoundingClientRect();
+                  const targetIndex = optionNames.findIndex((name) => name === candidateName);
+                  const firstVisibleIndex = visibleTexts.length
+                    ? optionNames.findIndex((name) => name === visibleTexts[0])
+                    : -1;
+                  return {
+                    hasDropdown: true,
+                    found,
+                    visibleTexts,
+                    targetIndex,
+                    firstVisibleIndex,
+                    scrollTop: holder.scrollTop || 0,
+                    scrollHeight: holder.scrollHeight || 0,
+                    clientHeight: holder.clientHeight || rect.height || 0,
+                    x: rect.left + rect.width / 2,
+                    y: rect.top + rect.height / 2,
+                  };
+                }
+                """,
+                {**identity, "candidateName": candidate_name, "optionNames": option_names},
+            )
+            return dict(state or {})
+        except (Error, TimeoutError):
+            return {"hasDropdown": False, "found": False}
+
+    @staticmethod
+    def _scroll_bound_dropdown_to_option(
+        page: Page,
+        candidate_name: str,
+        option_names: list[str],
+        row: Locator | None = None,
+    ) -> bool:
+        option_names = [str(name or "").strip() for name in option_names if str(name or "").strip()]
+        state = ApprovalWriter._bound_dropdown_state(page, candidate_name, option_names, row)
+        if state.get("found"):
+            return True
+        if not state.get("hasDropdown"):
+            return False
+
+        target_index = int(state.get("targetIndex", -1) or -1)
+        first_visible_index = int(state.get("firstVisibleIndex", -1) or -1)
+        if target_index >= 0 and first_visible_index >= 0:
+            direction = 1 if target_index > first_visible_index else -1
+        else:
+            direction = 1
+
+        for _ in range(24):
+            try:
+                latest = ApprovalWriter._bound_dropdown_state(page, candidate_name, option_names, row)
+                if latest.get("found"):
+                    return True
+                if not latest.get("hasDropdown"):
+                    return False
+                x = float(latest.get("x") or 0)
+                y = float(latest.get("y") or 0)
+                if not x or not y:
+                    return False
+                scroll_top = float(latest.get("scrollTop") or 0)
+                scroll_height = float(latest.get("scrollHeight") or 0)
+                client_height = float(latest.get("clientHeight") or 0)
+                if direction > 0 and scroll_height and scroll_top + client_height >= scroll_height - 2:
+                    break
+                if direction < 0 and scroll_top <= 2:
+                    break
+                page.mouse.move(x, y)
+                page.mouse.wheel(0, 180 * direction)
+                page.wait_for_timeout(140)
+            except (Error, TimeoutError, ValueError, TypeError):
+                return False
+        return bool(ApprovalWriter._bound_dropdown_state(page, candidate_name, option_names, row).get("found"))
 
     @staticmethod
     def _scroll_dropdown_to_option(page: Page, candidate_name: str, option_names: list[str]) -> bool:

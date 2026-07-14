@@ -5,8 +5,10 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 import urllib.error
 import urllib.request
 
@@ -198,15 +200,29 @@ def current_process_is_frozen() -> bool:
     return bool(getattr(sys, "frozen", False))
 
 
+def installer_launch_copy(installer_path: Path) -> Path:
+    source = installer_path.resolve()
+    launch_dir = Path(tempfile.gettempdir()) / "ReagentApprovalBotUpdates"
+    launch_dir.mkdir(parents=True, exist_ok=True)
+    destination = launch_dir / source.name
+    if source != destination.resolve():
+        tmp = destination.with_suffix(destination.suffix + ".copying")
+        shutil.copy2(source, tmp)
+        tmp.replace(destination)
+    return destination
+
+
 def launch_installer(installer_path: Path) -> None:
+    launch_path = installer_launch_copy(installer_path)
     env = os.environ.copy()
     env["REAGENT_APPROVAL_START_AFTER_INSTALL"] = "1"
+    env["REAGENT_APPROVAL_WAIT_FOR_PID"] = str(os.getpid())
     creationflags = 0
     if os.name == "nt":
         creationflags = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
     subprocess.Popen(
-        [str(installer_path)],
-        cwd=str(installer_path.parent),
+        [str(launch_path)],
+        cwd=str(launch_path.parent),
         env=env,
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,

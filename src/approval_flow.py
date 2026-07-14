@@ -1631,15 +1631,12 @@ class ApprovalFlowMixin:
             "Recovering reagent detail page after write-state failure"
             f" ({reason}); target list: {target_list_number or '<current>'}."
         )
-        try:
-            page.keyboard.press("Escape")
-            page.wait_for_timeout(150)
-        except Exception:
-            pass
+        self.force_close_editing_overlays(page)
         try:
             page.reload(wait_until="domcontentloaded", timeout=60000)
         except Exception as error:
             print(f"Normal detail page reload failed; continuing with current page: {error}")
+        self.force_close_editing_overlays(page)
 
         if self.current_page_is_target_detail(page, target_list_number):
             try:
@@ -1654,11 +1651,7 @@ class ApprovalFlowMixin:
                 "Detail page recovery will reopen the target list from the todo page "
                 "and let the next loop re-sort/re-read current '-' rows."
             )
-            try:
-                opened = self.open_task_detail_by_list_number(page, target_list_number)
-            except Exception as error:
-                print(f"Could not reopen target detail {target_list_number}: {error}")
-                return False
+            opened = self.reopen_target_detail_for_recovery(page, target_list_number)
             if not opened:
                 print(f"Could not reopen target detail after write failure: {target_list_number}")
                 return False
@@ -1678,6 +1671,100 @@ class ApprovalFlowMixin:
         except Exception as error:
             print(f"Reagent table was not ready after reload and no target list was known: {error}")
             return False
+
+    def force_close_editing_overlays(self, page: Page) -> None:
+        for _ in range(3):
+            try:
+                page.keyboard.press("Escape")
+                page.wait_for_timeout(150)
+            except Exception:
+                pass
+            try:
+                page.evaluate(
+                    """
+                    () => {
+                      const visible = (node) => {
+                        const rect = node.getBoundingClientRect();
+                        const style = window.getComputedStyle(node);
+                        return rect.width > 0 && rect.height > 0
+                          && style.visibility !== 'hidden'
+                          && style.display !== 'none';
+                      };
+                      for (const selector of [
+                        '.ant-select-dropdown:not(.ant-select-dropdown-hidden)',
+                        '.ant-popover:not(.ant-popover-hidden)',
+                        '.ant-tooltip',
+                        '.ant-modal-wrap',
+                        '.ant-drawer'
+                      ]) {
+                        for (const node of document.querySelectorAll(selector)) {
+                          if (!visible(node)) continue;
+                          const closer = node.querySelector('.ant-drawer-close, .ant-modal-close, .ant-popconfirm-buttons button');
+                          if (closer && visible(closer)) closer.click();
+                        }
+                      }
+                    }
+                    """
+                )
+                page.wait_for_timeout(150)
+            except Exception:
+                pass
+
+    def reopen_target_detail_for_recovery(self, page: Page, target_list_number: str) -> bool:
+        attempts = [
+            ("todo list page", lambda: self.open_task_detail_by_list_number(page, target_list_number)),
+            ("browser back then todo list page", lambda: self.reopen_after_browser_back(page, target_list_number)),
+            ("menu reset then todo list page", lambda: self.reopen_after_menu_reset(page, target_list_number)),
+        ]
+        for label, action in attempts:
+            try:
+                self.force_close_editing_overlays(page)
+                if action():
+                    print(f"Recovered target detail via {label}: {target_list_number}")
+                    return True
+            except Exception as error:
+                print(f"Could not reopen target detail {target_list_number} via {label}: {error}")
+        return False
+
+    def reopen_after_browser_back(self, page: Page, target_list_number: str) -> bool:
+        try:
+            page.go_back(wait_until="domcontentloaded", timeout=30000)
+            page.wait_for_timeout(800)
+        except Exception as error:
+            print(f"Browser back during detail recovery failed: {error}")
+        return self.open_task_detail_by_list_number(page, target_list_number)
+
+    def reopen_after_menu_reset(self, page: Page, target_list_number: str) -> bool:
+        try:
+            self.enter_reagent_judgement_page(page)
+        except Exception as error:
+            print(f"Menu reset during detail recovery failed: {error}")
+            self.click_reagent_judgement_from_dom(page)
+        return self.open_task_detail_by_list_number(page, target_list_number)
+
+    @staticmethod
+    def click_reagent_judgement_from_dom(page: Page) -> None:
+        page.evaluate(
+            """
+            () => {
+              const visible = (node) => {
+                const rect = node.getBoundingClientRect();
+                const style = window.getComputedStyle(node);
+                return rect.width > 0 && rect.height > 0
+                  && style.visibility !== 'hidden'
+                  && style.display !== 'none';
+              };
+              const textOf = (node) => (node.innerText || node.textContent || '').replace(/\\s+/g, '').trim();
+              const nodes = Array.from(document.querySelectorAll('li, a, span, div, button'));
+              const judgement = nodes.find((node) => visible(node) && textOf(node).includes('试剂判定'));
+              if (judgement) {
+                judgement.scrollIntoView({block: 'center', inline: 'center'});
+                judgement.click();
+              }
+            }
+            """
+        )
+        page.wait_for_timeout(1000)
 
     def current_page_is_target_detail(self, page: Page, target_list_number: str = "") -> bool:
         target_list_number = str(target_list_number or "").strip()

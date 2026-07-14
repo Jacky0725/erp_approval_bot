@@ -24,6 +24,13 @@ function Copy-IfExists {
 
 try {
     Write-Host "Installing Reagent Approval Bot to $InstallDir"
+    Get-CimInstance Win32_Process | Where-Object {
+        ($_.Name -eq "ReagentApprovalBot.exe") -or
+        ($_.ExecutablePath -and $_.ExecutablePath.StartsWith($InstallDir, [StringComparison]::OrdinalIgnoreCase))
+    } | ForEach-Object {
+        Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+    }
+    Start-Sleep -Milliseconds 700
     New-Item -ItemType Directory -Force -Path $TempExtract | Out-Null
     Expand-Archive -Path $ZipPath -DestinationPath $TempExtract -Force
 
@@ -49,21 +56,33 @@ try {
 param([switch]`$KeepData)
 `$ErrorActionPreference = "Stop"
 `$InstallDir = "$InstallDir"
+`$ShortcutName = -join ([char[]](0x8bd5, 0x5242, 0x5ba1, 0x6279, 0x52a9, 0x624b))
+`$UninstallShortcutName = -join ([char[]](0x5378, 0x8f7d, 0x8bd5, 0x5242, 0x5ba1, 0x6279, 0x52a9, 0x624b))
+Get-CimInstance Win32_Process | Where-Object {
+    (`$_.Name -eq "ReagentApprovalBot.exe") -or
+    (`$_.ExecutablePath -and `$_.ExecutablePath.StartsWith(`$InstallDir, [StringComparison]::OrdinalIgnoreCase))
+} | ForEach-Object {
+    Stop-Process -Id `$_.ProcessId -Force -ErrorAction SilentlyContinue
+}
+Start-Sleep -Milliseconds 700
 if (`$KeepData) {
     Get-ChildItem -LiteralPath `$InstallDir -Force | Where-Object { `$_.Name -notin @("data", ".env") } | Remove-Item -Recurse -Force
 } elseif (Test-Path `$InstallDir) {
     Remove-Item `$InstallDir -Recurse -Force
 }
-`$ShortcutName = -join ([char[]](0x8bd5, 0x5242, 0x5ba1, 0x6279, 0x52a9, 0x624b))
 `$DesktopShortcut = Join-Path ([Environment]::GetFolderPath("Desktop")) "`$ShortcutName.lnk"
-`$StartShortcut = Join-Path ([Environment]::GetFolderPath("StartMenu")) "Programs\`$ShortcutName.lnk"
-Remove-Item `$DesktopShortcut -Force -ErrorAction SilentlyContinue
-Remove-Item `$StartShortcut -Force -ErrorAction SilentlyContinue
+`$StartMenuDir = Join-Path ([Environment]::GetFolderPath("StartMenu")) "Programs"
+`$StartShortcut = Join-Path `$StartMenuDir "`$ShortcutName.lnk"
+`$UninstallStartShortcut = Join-Path `$StartMenuDir "`$UninstallShortcutName.lnk"
+foreach (`$ShortcutPath in @(`$DesktopShortcut, `$StartShortcut, `$UninstallStartShortcut)) {
+    Remove-Item `$ShortcutPath -Force -ErrorAction SilentlyContinue
+}
 "@ | Set-Content -Path $UninstallScript -Encoding UTF8
 
     if (!$NoShortcut) {
         $ExePath = Join-Path $InstallDir "ReagentApprovalBot.exe"
         $ShortcutName = -join ([char[]](0x8bd5, 0x5242, 0x5ba1, 0x6279, 0x52a9, 0x624b))
+        $UninstallShortcutName = -join ([char[]](0x5378, 0x8f7d, 0x8bd5, 0x5242, 0x5ba1, 0x6279, 0x52a9, 0x624b))
         $DesktopShortcut = Join-Path ([Environment]::GetFolderPath("Desktop")) "$ShortcutName.lnk"
         $StartMenuDir = Join-Path ([Environment]::GetFolderPath("StartMenu")) "Programs"
         $StartShortcut = Join-Path $StartMenuDir "$ShortcutName.lnk"
@@ -77,6 +96,15 @@ Remove-Item `$StartShortcut -Force -ErrorAction SilentlyContinue
             $Shortcut.Description = "Start Reagent Approval Bot local Web UI"
             $Shortcut.Save()
         }
+        $UninstallShortcutPath = Join-Path $StartMenuDir "$UninstallShortcutName.lnk"
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $UninstallShortcutPath) | Out-Null
+        $UninstallShortcut = $WScript.CreateShortcut($UninstallShortcutPath)
+        $UninstallShortcut.TargetPath = "powershell.exe"
+        $UninstallShortcut.Arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$UninstallScript`""
+        $UninstallShortcut.WorkingDirectory = $InstallDir
+        $UninstallShortcut.IconLocation = "$env:SystemRoot\System32\shell32.dll,31"
+        $UninstallShortcut.Description = "Uninstall Reagent Approval Bot"
+        $UninstallShortcut.Save()
     }
 
     Write-Host "Installation complete."

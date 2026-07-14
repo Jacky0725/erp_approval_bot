@@ -8,6 +8,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from web_runner import (
     AutomationJobManager,
+    automation_failure_reason,
     normalize_web_write_mode,
     parse_target_list_numbers,
     repair_display_text,
@@ -70,6 +71,16 @@ class WorkflowSummaryTest(unittest.TestCase):
         health = run_health(["Failed save operation(s): reagent_save_1"], True, "")
 
         self.assertEqual(health, "warning")
+
+    def test_automation_failure_reason_detects_web_write_failure(self) -> None:
+        reason = automation_failure_reason(
+            [
+                "Could not select physicochemical property 强反应 for sequence: 9",
+                "2026-07-14T13:11:53 END suggestions",
+            ]
+        )
+
+        self.assertIn("物化特性", reason)
 
     def test_stop_reports_not_stopped_when_idle(self) -> None:
         with TemporaryDirectory() as tmp:

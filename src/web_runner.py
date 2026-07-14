@@ -132,6 +132,7 @@ class LineBufferWriter(io.TextIOBase):
         self.lines = lines
         self.path = path
         self.limit = limit
+        self.failure_reason = ""
         self._lock = threading.RLock()
         self._file = path.open("a", encoding="utf-8")
 
@@ -148,6 +149,8 @@ class LineBufferWriter(io.TextIOBase):
             for line in cleaned_text.splitlines():
                 if line.strip():
                     self.lines.append(line)
+                    if not self.failure_reason:
+                        self.failure_reason = automation_failure_reason([line])
             if len(self.lines) > self.limit:
                 del self.lines[: len(self.lines) - self.limit]
         return len(text)
@@ -261,9 +264,18 @@ class AutomationJobManager:
                 error = "用户停止运行"
                 writer.write(f"{datetime.now().isoformat(timespec='seconds')} STOPPED {action}\n")
             elif return_code == 0:
-                success = True
-                error = ""
-                writer.write(f"{datetime.now().isoformat(timespec='seconds')} END {action}\n")
+                failure_reason = writer.failure_reason or automation_failure_reason(self.lines)
+                if failure_reason:
+                    success = False
+                    error = failure_reason
+                    writer.write(
+                        f"{datetime.now().isoformat(timespec='seconds')} END {action} WITH WARNINGS: "
+                        f"{failure_reason}\n"
+                    )
+                else:
+                    success = True
+                    error = ""
+                    writer.write(f"{datetime.now().isoformat(timespec='seconds')} END {action}\n")
             else:
                 success = False
                 error = f"Automation worker exited with code {return_code}"
@@ -552,6 +564,24 @@ def run_health(lines: list[str], success: bool | None, error: str) -> str:
     if success is True:
         return "ok"
     return "unknown"
+
+
+def automation_failure_reason(lines: list[str]) -> str:
+    text = "\n".join(str(line) for line in lines).lower()
+    failure_patterns = (
+        ("could not select physicochemical property", "存在物化特性下拉选择失败"),
+        ("could not open technical judgement", "存在技术判定入口打开失败"),
+        ("save verification failed", "存在网页保存后校验失败"),
+        ("failed save operation", "存在保存操作失败"),
+        ("multi-page mode stopped because the reagent detail page could not be stabilized", "写入失败后详情页未能恢复稳定"),
+        ("multi-page mode stopped because next-page navigation could not be verified", "分页切换未能确认"),
+        ("multi-page mode stopped because sorting after", "排序或翻页后的页面状态异常"),
+        ("traceback", "运行过程中出现异常堆栈"),
+    )
+    for pattern, reason in failure_patterns:
+        if pattern in text:
+            return reason
+    return ""
 
 
 def parse_target_list_numbers(value: str) -> list[str]:

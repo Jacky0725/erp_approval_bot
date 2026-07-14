@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import textwrap
 import zipfile
 import ctypes
@@ -113,16 +114,27 @@ def write_uninstaller(target: Path) -> None:
             param([switch]$KeepData)
             $ErrorActionPreference = "Stop"
             $InstallDir = "{target}"
+            $ShortcutName = -join ([char[]](0x8bd5, 0x5242, 0x5ba1, 0x6279, 0x52a9, 0x624b))
+            $UninstallShortcutName = -join ([char[]](0x5378, 0x8f7d, 0x8bd5, 0x5242, 0x5ba1, 0x6279, 0x52a9, 0x624b))
+            Get-CimInstance Win32_Process | Where-Object {{
+                ($_.Name -eq "ReagentApprovalBot.exe") -or
+                ($_.ExecutablePath -and $_.ExecutablePath.StartsWith($InstallDir, [StringComparison]::OrdinalIgnoreCase))
+            }} | ForEach-Object {{
+                Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+            }}
+            Start-Sleep -Milliseconds 700
             if ($KeepData) {{
                 Get-ChildItem -LiteralPath $InstallDir -Force | Where-Object {{ $_.Name -notin @("data", ".env") }} | Remove-Item -Recurse -Force
             }} elseif (Test-Path $InstallDir) {{
                 Remove-Item $InstallDir -Recurse -Force
             }}
-            $ShortcutName = -join ([char[]](0x8bd5, 0x5242, 0x5ba1, 0x6279, 0x52a9, 0x624b))
             $DesktopShortcut = Join-Path ([Environment]::GetFolderPath("Desktop")) "$ShortcutName.lnk"
-            $StartShortcut = Join-Path ([Environment]::GetFolderPath("StartMenu")) "Programs\\$ShortcutName.lnk"
-            Remove-Item $DesktopShortcut -Force -ErrorAction SilentlyContinue
-            Remove-Item $StartShortcut -Force -ErrorAction SilentlyContinue
+            $StartMenuDir = Join-Path ([Environment]::GetFolderPath("StartMenu")) "Programs"
+            $StartShortcut = Join-Path $StartMenuDir "$ShortcutName.lnk"
+            $UninstallStartShortcut = Join-Path $StartMenuDir "$UninstallShortcutName.lnk"
+            foreach ($ShortcutPath in @($DesktopShortcut, $StartShortcut, $UninstallStartShortcut)) {{
+                Remove-Item $ShortcutPath -Force -ErrorAction SilentlyContinue
+            }}
             """
         ).strip()
         + "\n",
@@ -138,9 +150,11 @@ def create_shortcuts(target: Path) -> None:
         $ExePath = "{exe}"
         $WorkDir = "{target}"
         $ShortcutName = -join ([char[]](0x8bd5, 0x5242, 0x5ba1, 0x6279, 0x52a9, 0x624b))
+        $UninstallShortcutName = -join ([char[]](0x5378, 0x8f7d, 0x8bd5, 0x5242, 0x5ba1, 0x6279, 0x52a9, 0x624b))
+        $StartMenuDir = Join-Path ([Environment]::GetFolderPath("StartMenu")) "Programs"
         $ShortcutPaths = @(
             (Join-Path ([Environment]::GetFolderPath("Desktop")) "$ShortcutName.lnk"),
-            (Join-Path ([Environment]::GetFolderPath("StartMenu")) "Programs\\$ShortcutName.lnk")
+            (Join-Path $StartMenuDir "$ShortcutName.lnk")
         )
         $WScript = New-Object -ComObject WScript.Shell
         foreach ($ShortcutPath in $ShortcutPaths) {{
@@ -152,6 +166,15 @@ def create_shortcuts(target: Path) -> None:
             $Shortcut.Description = "Start Reagent Approval Bot local Web UI"
             $Shortcut.Save()
         }}
+        $UninstallShortcutPath = Join-Path $StartMenuDir "$UninstallShortcutName.lnk"
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $UninstallShortcutPath) | Out-Null
+        $UninstallShortcut = $WScript.CreateShortcut($UninstallShortcutPath)
+        $UninstallShortcut.TargetPath = "powershell.exe"
+        $UninstallShortcut.Arguments = "-NoProfile -ExecutionPolicy Bypass -File `"{target}\\uninstall_installed.ps1`""
+        $UninstallShortcut.WorkingDirectory = "{target}"
+        $UninstallShortcut.IconLocation = "$env:SystemRoot\\System32\\shell32.dll,31"
+        $UninstallShortcut.Description = "Uninstall Reagent Approval Bot"
+        $UninstallShortcut.Save()
         """
     )
     subprocess.run(
@@ -178,6 +201,71 @@ def start_installed_app(target: Path) -> None:
         close_fds=True,
     )
 
+
+def wait_for_previous_process() -> None:
+    value = os.getenv("REAGENT_APPROVAL_WAIT_FOR_PID", "").strip()
+    if not value:
+        return
+    try:
+        pid = int(value)
+    except ValueError:
+        return
+    if pid <= 0 or pid == os.getpid():
+        return
+    if os.name == "nt":
+        wait_for_windows_process_exit(pid)
+        return
+    wait_for_process_exit_portable(pid)
+
+
+def stop_existing_app_processes(target: Path) -> None:
+    if os.name != "nt":
+        return
+    script = textwrap.dedent(
+        f"""
+        $InstallDir = "{target}"
+        Get-CimInstance Win32_Process | Where-Object {{
+            ($_.Name -eq "ReagentApprovalBot.exe") -or
+            ($_.ExecutablePath -and $_.ExecutablePath.StartsWith($InstallDir, [StringComparison]::OrdinalIgnoreCase))
+        }} | ForEach-Object {{
+            Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+        }}
+        """
+    )
+    subprocess.run(
+        ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script],
+        check=False,
+        **hidden_subprocess_kwargs(),
+    )
+    time.sleep(0.7)
+
+
+def wait_for_windows_process_exit(pid: int, timeout_seconds: int = 60) -> None:
+    synchronize = 0x00100000
+    handle = ctypes.windll.kernel32.OpenProcess(synchronize, False, pid)
+    if not handle:
+        return
+    try:
+        remaining_ms = max(1, timeout_seconds) * 1000
+        while remaining_ms > 0:
+            result = ctypes.windll.kernel32.WaitForSingleObject(handle, min(1000, remaining_ms))
+            if result == 0:
+                return
+            remaining_ms -= 1000
+    finally:
+        ctypes.windll.kernel32.CloseHandle(handle)
+
+
+def wait_for_process_exit_portable(pid: int, timeout_seconds: int = 60) -> None:
+    deadline = time.monotonic() + max(1, timeout_seconds)
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except OSError:
+            return
+        time.sleep(1)
+
+
 def main() -> int:
     log_path = Path(os.getenv("TEMP", str(Path.home()))) / INSTALL_LOG_NAME
     try:
@@ -185,6 +273,8 @@ def main() -> int:
         log_path = target.parent / INSTALL_LOG_NAME
         log_path.parent.mkdir(parents=True, exist_ok=True)
         write_install_log(log_path, f"Installing Reagent Approval Bot to: {target}")
+        wait_for_previous_process()
+        stop_existing_app_processes(target)
         with tempfile.TemporaryDirectory(prefix="ReagentApprovalBotInstall_") as tmp:
             temp_root = Path(tmp)
             extracted = temp_root / "payload"

@@ -402,6 +402,50 @@ class ApprovalFlowTodoLoopTest(unittest.TestCase):
         self.assertTrue(bot.recover_reagent_detail_page_after_write_failure(FakePage(), "unit test"))
         self.assertEqual(bot.reopened, ["SJ202607020001"])
 
+    def test_write_failure_recovery_tries_browser_back_after_reopen_failure(self) -> None:
+        class RecoveryBot(Bot):
+            def __init__(self) -> None:
+                self._current_detail_info = {"\u5f53\u524d\u6e05\u5355\u53f7": "SJ202607020002"}
+                self.open_attempts = 0
+
+            def force_close_editing_overlays(self, page: object) -> None:
+                return None
+
+            def current_page_is_target_detail(self, page: object, target_list_number: str = "") -> bool:
+                return False
+
+            def open_task_detail_by_list_number(self, page: object, target_list_number: str) -> bool:
+                self.open_attempts += 1
+                if self.open_attempts == 1:
+                    raise RuntimeError("menu temporarily hidden")
+                return True
+
+            def wait_for_reagent_table_ready(self, page: object) -> None:
+                return None
+
+            def read_detail_info(self, page: object) -> dict[str, str]:
+                return {"\u5f53\u524d\u6e05\u5355\u53f7": "SJ202607020002"}
+
+        class FakePage:
+            def __init__(self) -> None:
+                self.back_calls = 0
+
+            def reload(self, **kwargs: object) -> None:
+                return None
+
+            def wait_for_timeout(self, timeout: int) -> None:
+                return None
+
+            def go_back(self, **kwargs: object) -> None:
+                self.back_calls += 1
+
+        page = FakePage()
+        bot = RecoveryBot()
+
+        self.assertTrue(bot.recover_reagent_detail_page_after_write_failure(page, "unit test"))
+        self.assertEqual(bot.open_attempts, 2)
+        self.assertEqual(page.back_calls, 1)
+
     def test_direct_business_rule_suggestion_allows_color_standard_without_search(self) -> None:
         bot = Bot()
         engine = RuleEngine.from_excel(ROOT_DIR / "config" / "rules.xlsx")

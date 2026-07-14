@@ -87,3 +87,42 @@ def test_check_for_update_uses_public_release_before_api(monkeypatch):
     assert result.latest_version == "0.1.5"
     assert result.update_available
     assert calls == ["public"]
+
+
+def test_installer_launch_copy_uses_temp_directory(tmp_path, monkeypatch):
+    source_dir = tmp_path / "install" / "data" / "updates"
+    source_dir.mkdir(parents=True)
+    source = source_dir / "reagent-approval-bot-0.1.8-win-x64-lite-setup.exe"
+    source.write_bytes(b"installer")
+    temp_dir = tmp_path / "temp"
+    monkeypatch.setattr(update_checker.tempfile, "gettempdir", lambda: str(temp_dir))
+
+    copied = update_checker.installer_launch_copy(source)
+
+    assert copied == temp_dir / "ReagentApprovalBotUpdates" / source.name
+    assert copied.read_bytes() == b"installer"
+    assert copied != source
+
+
+def test_launch_installer_runs_temp_copy_and_waits_for_current_pid(tmp_path, monkeypatch):
+    source = tmp_path / "install" / "data" / "updates" / "setup.exe"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"installer")
+    temp_dir = tmp_path / "temp"
+    popen_calls = []
+
+    class DummyPopen:
+        def __init__(self, args, **kwargs):
+            popen_calls.append((args, kwargs))
+
+    monkeypatch.setattr(update_checker.tempfile, "gettempdir", lambda: str(temp_dir))
+    monkeypatch.setattr(update_checker.subprocess, "Popen", DummyPopen)
+
+    update_checker.launch_installer(source)
+
+    assert len(popen_calls) == 1
+    args, kwargs = popen_calls[0]
+    assert Path(args[0]).parent == temp_dir / "ReagentApprovalBotUpdates"
+    assert kwargs["cwd"] == str(temp_dir / "ReagentApprovalBotUpdates")
+    assert kwargs["env"]["REAGENT_APPROVAL_START_AFTER_INSTALL"] == "1"
+    assert kwargs["env"]["REAGENT_APPROVAL_WAIT_FOR_PID"] == str(update_checker.os.getpid())
