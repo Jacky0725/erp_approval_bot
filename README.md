@@ -99,6 +99,7 @@ python scripts/cleanup_reagent_memory_conflicts.py --yes
 - 正式安装包默认并强制使用无头浏览器；源码开发调试时可在 `config/settings.yaml` 中临时改为 headed 浏览器。
 - 正式安装包启动 Web UI 时优先使用 `127.0.0.1:8000`；如果端口被其他程序占用，会自动尝试后续端口并打开正确地址。
 - 正式安装包日志保存在安装目录的 `data/logs/`：主程序启动日志为 `launcher.log`，审批任务详细日志为 `web_run_stdout.txt`。
+- Windows 安装包默认安装到当前用户的 `%LOCALAPPDATA%\Programs\ReagentApprovalBot`；手动安装时可选择安装目录，在线更新时会沿用当前安装目录。
 - 默认 `APPROVAL_WRITE_MODE=multi_page`，会在满足置信度与安全门条件时写入网页；`AUTO_PASS=false` 时不会点击顶部“通过”。
 - 默认 `AUTO_PASS=false`，不会点击顶部“通过”。
 - 所有审批建议和阻断原因应保存在 `data/logs/` 中。

@@ -215,7 +215,12 @@ class ApprovalFlowMixin:
                 print(f"Processing selected todo detail {processed_count}: {list_number}")
                 self.target_list_number = list_number
                 self.generate_approval_suggestions(page)
-                self.enter_reagent_judgement_page(page)
+                if processed_count < min(len(selected), max_todos):
+                    try:
+                        self.enter_reagent_judgement_page(page)
+                    except Exception as error:
+                        print(f"Could not return to reagent judgement list after {list_number}: {error}")
+                        break
         finally:
             self.target_list_number = original_target
 

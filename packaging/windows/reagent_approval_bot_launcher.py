@@ -121,24 +121,34 @@ def open_browser_later(url: str) -> None:
     webbrowser.open(url)
 
 
-def run_worker_if_requested() -> bool:
+def worker_requested() -> bool:
+    return "-m" in sys.argv and len(sys.argv) > sys.argv.index("-m") + 1 and sys.argv[sys.argv.index("-m") + 1] == "automation_worker"
+
+
+def run_worker_if_requested() -> int | None:
     if "-m" not in sys.argv:
-        return False
+        return None
     module_index = sys.argv.index("-m")
     if len(sys.argv) <= module_index + 1 or sys.argv[module_index + 1] != "automation_worker":
-        return False
+        return None
     sys.argv = ["automation_worker", *sys.argv[module_index + 2 :]]
-    runpy.run_module("automation_worker", run_name="__main__")
-    return True
+    try:
+        runpy.run_module("automation_worker", run_name="__main__")
+        return 0
+    except SystemExit as exc:
+        code = exc.code
+        return int(code) if isinstance(code, int) else 1
 
 
 def main() -> int:
     runtime = configure_runtime()
     app = app_root()
     log_path = runtime / "data" / "logs" / "launcher.log"
+    is_worker = worker_requested()
     try:
-        if run_worker_if_requested():
-            return 0
+        worker_return_code = run_worker_if_requested()
+        if worker_return_code is not None:
+            return worker_return_code
 
         import uvicorn
 
@@ -167,6 +177,9 @@ def main() -> int:
     except Exception:  # noqa: BLE001 - write crash details for desktop users
         with log_path.open("a", encoding="utf-8") as file:
             file.write(traceback.format_exc())
+        if is_worker:
+            traceback.print_exc()
+            return 1
         try:
             webbrowser.open(str(log_path))
         except Exception:

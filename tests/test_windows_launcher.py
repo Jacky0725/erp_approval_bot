@@ -38,3 +38,19 @@ def test_resolve_web_ui_port_reuses_existing_reagent_web_ui():
         patch.object(launcher, "is_reagent_web_ui", return_value=True),
     ):
         assert launcher.resolve_web_ui_port("127.0.0.1", 8000) == (8000, True)
+
+
+def test_worker_failure_does_not_open_launcher_log(tmp_path, monkeypatch):
+    launcher = load_launcher_module()
+    monkeypatch.setattr(launcher.sys, "argv", ["ReagentApprovalBot.exe", "-m", "automation_worker", "suggestions"])
+    monkeypatch.setenv("REAGENT_APPROVAL_RUNTIME_ROOT", str(tmp_path))
+    monkeypatch.setenv("REAGENT_APPROVAL_SOURCE_ROOT", str(tmp_path))
+
+    with (
+        patch.object(launcher, "bundled_root", return_value=tmp_path),
+        patch.object(launcher, "runpy") as runpy_mock,
+        patch.object(launcher.webbrowser, "open") as open_mock,
+    ):
+        runpy_mock.run_module.side_effect = RuntimeError("worker failed")
+        assert launcher.main() == 1
+        open_mock.assert_not_called()

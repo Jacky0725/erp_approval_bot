@@ -49,7 +49,7 @@ if (Test-Path $InstallerPath) {
     --noconfirm `
     --clean `
     --onefile `
-    --console `
+    --windowed `
     --name ReagentApprovalBotInstaller `
     --distpath (Join-Path $RepoRoot "dist") `
     --workpath $WorkDir `
