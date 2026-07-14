@@ -14,6 +14,34 @@ import urllib.request
 import webbrowser
 
 
+class TeeLogWriter:
+    def __init__(self, log_path: Path, original: object | None = None) -> None:
+        self.log_path = log_path
+        self.original = original
+        self._file = log_path.open("a", encoding="utf-8", buffering=1)
+
+    def write(self, text: str) -> int:
+        if not text:
+            return 0
+        self._file.write(text)
+        self._file.flush()
+        if self.original and hasattr(self.original, "write"):
+            try:
+                self.original.write(text)
+                self.original.flush()
+            except Exception:
+                pass
+        return len(text)
+
+    def flush(self) -> None:
+        self._file.flush()
+        if self.original and hasattr(self.original, "flush"):
+            try:
+                self.original.flush()
+            except Exception:
+                pass
+
+
 def bundled_root() -> Path:
     if getattr(sys, "frozen", False):
         return Path(getattr(sys, "_MEIPASS", Path(sys.executable).resolve().parent))
@@ -40,8 +68,21 @@ def configure_runtime() -> Path:
         has_full_chromium = any(browser_root.glob("chromium-*"))
         if not has_full_chromium:
             os.environ.setdefault("REAGENT_APPROVAL_HEADLESS_ONLY", "true")
-    (runtime / "data" / "logs").mkdir(parents=True, exist_ok=True)
+    log_dir = runtime / "data" / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    redirect_process_output(log_dir / "launcher.log")
     return runtime
+
+
+def redirect_process_output(log_path: Path) -> None:
+    if os.getenv("REAGENT_APPROVAL_LAUNCHER_LOG_REDIRECTED") == "1":
+        return
+    os.environ["REAGENT_APPROVAL_LAUNCHER_LOG_REDIRECTED"] = "1"
+    stamp = time.strftime("%Y-%m-%d %H:%M:%S")
+    with log_path.open("a", encoding="utf-8") as file:
+        file.write(f"\n===== launcher start {stamp} =====\n")
+    sys.stdout = TeeLogWriter(log_path, getattr(sys, "__stdout__", None))  # type: ignore[assignment]
+    sys.stderr = TeeLogWriter(log_path, getattr(sys, "__stderr__", None))  # type: ignore[assignment]
 
 
 def port_is_open(host: str, port: int) -> bool:
@@ -124,7 +165,8 @@ def main() -> int:
         )
         return 0
     except Exception:  # noqa: BLE001 - write crash details for desktop users
-        log_path.write_text(traceback.format_exc(), encoding="utf-8")
+        with log_path.open("a", encoding="utf-8") as file:
+            file.write(traceback.format_exc())
         try:
             webbrowser.open(str(log_path))
         except Exception:
