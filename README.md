@@ -97,6 +97,7 @@ python scripts/cleanup_reagent_memory_conflicts.py --yes
 ## 安全约束
 
 - 正式安装包默认并强制使用无头浏览器；源码开发调试时可在 `config/settings.yaml` 中临时改为 headed 浏览器。
+- 正式安装包启动 Web UI 时优先使用 `127.0.0.1:8000`；如果端口被其他程序占用，会自动尝试后续端口并打开正确地址。
 - 默认 `APPROVAL_WRITE_MODE=multi_page`，会在满足置信度与安全门条件时写入网页；`AUTO_PASS=false` 时不会点击顶部“通过”。
 - 默认 `AUTO_PASS=false`，不会点击顶部“通过”。
 - 所有审批建议和阻断原因应保存在 `data/logs/` 中。

@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import json
 import runpy
 import socket
 import sys
 import threading
 import time
 import traceback
+import urllib.error
+import urllib.request
 import webbrowser
 
 
@@ -47,6 +50,31 @@ def port_is_open(host: str, port: int) -> bool:
         return sock.connect_ex((host, port)) == 0
 
 
+def is_reagent_web_ui(host: str, port: int) -> bool:
+    request = urllib.request.Request(
+        f"http://{host}:{port}/api/status",
+        headers={"User-Agent": "reagent-approval-bot-launcher"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=0.8) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError, json.JSONDecodeError):
+        return False
+    runtime = payload.get("runtime") if isinstance(payload, dict) else None
+    if isinstance(runtime, dict) and runtime.get("app_version"):
+        return True
+    return isinstance(payload, dict) and bool(payload.get("version"))
+
+
+def resolve_web_ui_port(host: str, preferred_port: int, scan_count: int = 50) -> tuple[int, bool]:
+    for port in range(preferred_port, preferred_port + scan_count):
+        if not port_is_open(host, port):
+            return port, False
+        if is_reagent_web_ui(host, port):
+            return port, True
+    raise RuntimeError(f"No available Web UI port found from {preferred_port} to {preferred_port + scan_count - 1}.")
+
+
 def open_browser_later(url: str) -> None:
     time.sleep(1.5)
     webbrowser.open(url)
@@ -74,11 +102,16 @@ def main() -> int:
         import uvicorn
 
         host = os.getenv("WEB_UI_HOST", "127.0.0.1")
-        port = int(os.getenv("WEB_UI_PORT", "8000"))
+        preferred_port = int(os.getenv("WEB_UI_PORT", "8000"))
+        port, existing_web_ui = resolve_web_ui_port(host, preferred_port)
         url = f"http://{host}:{port}/"
-        if port_is_open(host, port):
+        if existing_web_ui:
             webbrowser.open(url)
             return 0
+
+        if port != preferred_port:
+            os.environ["WEB_UI_PORT"] = str(port)
+            print(f"Preferred Web UI port {preferred_port} is occupied; using {port}.")
 
         threading.Thread(target=open_browser_later, args=(url,), daemon=True).start()
         uvicorn.run(
