@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import ctypes
 import io
 import os
 import shutil
@@ -398,6 +399,7 @@ class AutomationJobManager:
                 bufsize=1,
                 **popen_kwargs,
             )
+            job_handle = self._assign_windows_kill_on_close_job(process)
             self._process = process
             if self._stop_requested:
                 self._terminate_process_tree(process)
@@ -407,8 +409,78 @@ class AutomationJobManager:
                 writer.write(line)
             return process.wait()
         finally:
+            self._close_windows_job_handle(job_handle)
             with self._lock:
                 self._process = None
+
+    @staticmethod
+    def _assign_windows_kill_on_close_job(process: subprocess.Popen[str]) -> int | None:
+        if os.name != "nt":
+            return None
+        try:
+            kernel32 = ctypes.windll.kernel32
+            job = kernel32.CreateJobObjectW(None, None)
+            if not job:
+                return None
+
+            class JOBOBJECT_BASIC_LIMIT_INFORMATION(ctypes.Structure):
+                _fields_ = [
+                    ("PerProcessUserTimeLimit", ctypes.c_int64),
+                    ("PerJobUserTimeLimit", ctypes.c_int64),
+                    ("LimitFlags", ctypes.c_uint32),
+                    ("MinimumWorkingSetSize", ctypes.c_size_t),
+                    ("MaximumWorkingSetSize", ctypes.c_size_t),
+                    ("ActiveProcessLimit", ctypes.c_uint32),
+                    ("Affinity", ctypes.c_size_t),
+                    ("PriorityClass", ctypes.c_uint32),
+                    ("SchedulingClass", ctypes.c_uint32),
+                ]
+
+            class IO_COUNTERS(ctypes.Structure):
+                _fields_ = [
+                    ("ReadOperationCount", ctypes.c_uint64),
+                    ("WriteOperationCount", ctypes.c_uint64),
+                    ("OtherOperationCount", ctypes.c_uint64),
+                    ("ReadTransferCount", ctypes.c_uint64),
+                    ("WriteTransferCount", ctypes.c_uint64),
+                    ("OtherTransferCount", ctypes.c_uint64),
+                ]
+
+            class JOBOBJECT_EXTENDED_LIMIT_INFORMATION(ctypes.Structure):
+                _fields_ = [
+                    ("BasicLimitInformation", JOBOBJECT_BASIC_LIMIT_INFORMATION),
+                    ("IoInfo", IO_COUNTERS),
+                    ("ProcessMemoryLimit", ctypes.c_size_t),
+                    ("JobMemoryLimit", ctypes.c_size_t),
+                    ("PeakProcessMemoryUsed", ctypes.c_size_t),
+                    ("PeakJobMemoryUsed", ctypes.c_size_t),
+                ]
+
+            info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION()
+            info.BasicLimitInformation.LimitFlags = 0x00002000  # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+            if not kernel32.SetInformationJobObject(
+                job,
+                9,  # JobObjectExtendedLimitInformation
+                ctypes.byref(info),
+                ctypes.sizeof(info),
+            ):
+                kernel32.CloseHandle(job)
+                return None
+            if not kernel32.AssignProcessToJobObject(job, int(process._handle)):  # noqa: SLF001 - Windows handle
+                kernel32.CloseHandle(job)
+                return None
+            return int(job)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _close_windows_job_handle(job_handle: int | None) -> None:
+        if os.name != "nt" or not job_handle:
+            return
+        try:
+            ctypes.windll.kernel32.CloseHandle(job_handle)
+        except Exception:
+            return
 
     @staticmethod
     def _terminate_process_tree(process: subprocess.Popen[str] | None) -> None:

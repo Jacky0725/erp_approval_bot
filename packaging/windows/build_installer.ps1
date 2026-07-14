@@ -55,6 +55,8 @@ if (Test-Path $InstallerPath) {
     --workpath $WorkDir `
     --specpath $SpecDir `
     --add-data "$StageDir\payload;payload" `
+    --hidden-import tkinter `
+    --hidden-import tkinter.ttk `
     --icon $IconPath `
     $InstallerScript
 

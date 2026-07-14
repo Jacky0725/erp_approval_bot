@@ -10,10 +10,86 @@ import time
 import textwrap
 import zipfile
 import ctypes
+from typing import Any
 
 
 APP_NAME = "ReagentApprovalBot"
 INSTALL_LOG_NAME = "reagent_approval_bot_install.log"
+
+
+def ui_text(*codepoints: int) -> str:
+    return "".join(chr(value) for value in codepoints)
+
+
+APP_TITLE = ui_text(0x8bd5, 0x5242, 0x5ba1, 0x6279, 0x81ea, 0x52a8, 0x5316)
+INSTALLING_TITLE = ui_text(0x6b63, 0x5728, 0x5b89, 0x88c5)
+INSTALL_DONE_TITLE = ui_text(0x5b89, 0x88c5, 0x5b8c, 0x6210)
+INSTALL_FAILED_TITLE = ui_text(0x5b89, 0x88c5, 0x5931, 0x8d25)
+
+
+class ProgressReporter:
+    def __init__(self) -> None:
+        self.enabled = os.name == "nt" and os.getenv(
+            "REAGENT_APPROVAL_SUPPRESS_INSTALL_PROGRESS", ""
+        ).strip().lower() not in {"1", "true", "yes", "on"}
+        self.root: Any | None = None
+        self.message_var: Any | None = None
+        self.detail_var: Any | None = None
+        self.progress: Any | None = None
+        if self.enabled:
+            self._create_window()
+
+    def _create_window(self) -> None:
+        try:
+            import tkinter as tk
+            from tkinter import ttk
+
+            root = tk.Tk()
+            root.title(f"{APP_TITLE} - {INSTALLING_TITLE}")
+            root.resizable(False, False)
+            root.geometry("460x170")
+            root.attributes("-topmost", True)
+            root.protocol("WM_DELETE_WINDOW", lambda: None)
+
+            frame = ttk.Frame(root, padding=18)
+            frame.pack(fill="both", expand=True)
+            self.message_var = tk.StringVar(value=ui_text(0x6b63, 0x5728, 0x51c6, 0x5907, 0x5b89, 0x88c5, 0x2026))
+            self.detail_var = tk.StringVar(value="")
+            ttk.Label(frame, textvariable=self.message_var, font=("Microsoft YaHei UI", 11, "bold")).pack(
+                anchor="w", pady=(0, 8)
+            )
+            ttk.Label(frame, textvariable=self.detail_var, wraplength=410).pack(anchor="w", pady=(0, 14))
+            self.progress = ttk.Progressbar(frame, mode="indeterminate", length=410)
+            self.progress.pack(fill="x")
+            self.progress.start(12)
+            root.update()
+            self.root = root
+        except Exception:
+            self.enabled = False
+            self.root = None
+
+    def update(self, message: str, detail: str = "") -> None:
+        if not self.root:
+            return
+        try:
+            self.message_var.set(message)
+            self.detail_var.set(detail)
+            self.root.update_idletasks()
+            self.root.update()
+        except Exception:
+            self.close()
+
+    def close(self) -> None:
+        if not self.root:
+            return
+        try:
+            if self.progress:
+                self.progress.stop()
+            self.root.destroy()
+        except Exception:
+            pass
+        finally:
+            self.root = None
 
 
 def bundled_root() -> Path:
@@ -184,14 +260,14 @@ def create_shortcuts(target: Path) -> None:
     )
 
 
-def start_installed_app(target: Path) -> None:
+def start_installed_app(target: Path) -> subprocess.Popen[bytes] | None:
     exe = target / "ReagentApprovalBot.exe"
     if not exe.exists():
-        return
+        return None
     creationflags = 0
     if os.name == "nt":
         creationflags = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
-    subprocess.Popen(
+    return subprocess.Popen(
         [str(exe)],
         cwd=str(target),
         stdin=subprocess.DEVNULL,
@@ -199,6 +275,22 @@ def start_installed_app(target: Path) -> None:
         stderr=subprocess.DEVNULL,
         creationflags=creationflags,
         close_fds=True,
+    )
+
+
+def verify_started_app(process: subprocess.Popen[bytes] | None, target: Path, log_path: Path) -> None:
+    if process is None:
+        write_install_log(log_path, "Application executable was not found; skipping startup verification.")
+        return
+    time.sleep(2)
+    return_code = process.poll()
+    if return_code is None:
+        write_install_log(log_path, f"Application process started: pid={process.pid}")
+        return
+    launcher_log = target / "data" / "logs" / "launcher.log"
+    raise RuntimeError(
+        "Application started and exited immediately. "
+        f"Exit code: {return_code}. Launcher log: {launcher_log}"
     )
 
 
@@ -268,11 +360,14 @@ def wait_for_process_exit_portable(pid: int, timeout_seconds: int = 60) -> None:
 
 def main() -> int:
     log_path = Path(os.getenv("TEMP", str(Path.home()))) / INSTALL_LOG_NAME
+    progress = ProgressReporter()
     try:
+        progress.update("正在准备安装...", "如果弹出安装位置选择窗口，请选择安装目录。")
         target = install_dir()
         log_path = target.parent / INSTALL_LOG_NAME
         log_path.parent.mkdir(parents=True, exist_ok=True)
         write_install_log(log_path, f"Installing Reagent Approval Bot to: {target}")
+        progress.update("正在停止旧版程序...", str(target))
         wait_for_previous_process()
         stop_existing_app_processes(target)
         with tempfile.TemporaryDirectory(prefix="ReagentApprovalBotInstall_") as tmp:
@@ -284,13 +379,17 @@ def main() -> int:
 
             if target.exists():
                 write_install_log(log_path, "Preserving existing settings and runtime data...")
+                progress.update("正在备份原有配置和数据...", "会保留账号配置、日志、规则文件和试剂记忆库。")
                 preserve_existing(target, backup)
+                progress.update("正在删除旧版程序文件...", str(target))
                 shutil.rmtree(target)
 
             write_install_log(log_path, "Extracting application files...")
+            progress.update("正在解压新版程序...", "首次运行或杀毒软件扫描时可能需要几分钟，请稍候。")
             with zipfile.ZipFile(payload_zip()) as zf:
                 zf.extractall(extracted)
 
+            progress.update("正在复制程序文件...", str(target))
             target.mkdir(parents=True, exist_ok=True)
             for item in extracted.iterdir():
                 destination = target / item.name
@@ -299,19 +398,27 @@ def main() -> int:
                 else:
                     shutil.copy2(item, destination)
 
+            progress.update("正在恢复本地配置和数据...", "升级安装会保留原有资料。")
             restore_existing(target, backup)
+            progress.update("正在创建快捷方式和卸载入口...", "")
             write_uninstaller(target)
             create_shortcuts(target)
             if os.getenv("REAGENT_APPROVAL_START_AFTER_INSTALL", "").strip().lower() in {"1", "true", "yes", "on"}:
-                start_installed_app(target)
+                progress.update("正在启动程序...", "如果启动失败，会提示 launcher.log 路径。")
+                process = start_installed_app(target)
+                verify_started_app(process, target, log_path)
 
         write_install_log(log_path, "Installation complete.")
-        show_message("试剂审批自动化", f"安装完成：\n{target}")
+        progress.close()
+        show_message(APP_TITLE, f"{INSTALL_DONE_TITLE}\n{target}")
         return 0
     except Exception as exc:  # noqa: BLE001 - show install failures to desktop users
+        progress.close()
         write_install_log(log_path, f"Installation failed: {exc}")
-        show_message("试剂审批自动化安装失败", f"{exc}\n\n日志：{log_path}", error=True)
+        show_message(APP_TITLE, f"{INSTALL_FAILED_TITLE}\n{exc}\n\n日志：{log_path}", error=True)
         return 1
+    finally:
+        progress.close()
 
 
 def write_install_log(path: Path, message: str) -> None:
