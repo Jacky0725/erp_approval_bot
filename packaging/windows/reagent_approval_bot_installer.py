@@ -8,6 +8,7 @@ import sys
 import tempfile
 import threading
 import textwrap
+import time
 import zipfile
 import ctypes
 from queue import Empty, Queue
@@ -383,6 +384,45 @@ def ensure_install_dir_writable(target: Path) -> None:
         probe.unlink(missing_ok=True)
 
 
+def process_exists(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    if os.name == "nt":
+        result = subprocess.run(
+            [
+                "powershell",
+                "-NoProfile",
+                "-Command",
+                f"if (Get-Process -Id {pid} -ErrorAction SilentlyContinue) {{ exit 0 }} else {{ exit 1 }}",
+            ],
+            text=True,
+            capture_output=True,
+            **hidden_subprocess_kwargs(),
+        )
+        return result.returncode == 0
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
+
+def wait_for_requested_previous_process(timeout_seconds: float = 90.0) -> int | None:
+    raw = os.getenv("REAGENT_APPROVAL_WAIT_FOR_PID", "").strip()
+    if not raw:
+        return None
+    try:
+        pid = int(raw)
+    except ValueError:
+        return None
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        if not process_exists(pid):
+            return pid
+        time.sleep(0.5)
+    return pid
+
+
 
 
 def write_install_log(path: Path, message: str) -> None:
@@ -410,6 +450,11 @@ def perform_install(progress: ProgressReporter, state: dict[str, Path]) -> Path:
     log_path.parent.mkdir(parents=True, exist_ok=True)
     write_install_log(log_path, f"Installing Reagent Approval Bot to: {target}")
     write_install_log(log_path, f"Runtime data directory: {runtime}")
+
+    progress.update("Waiting for previous application to exit...", "")
+    waited_pid = wait_for_requested_previous_process()
+    if waited_pid is not None:
+        write_install_log(log_path, f"Waited for previous process pid={waited_pid}")
 
     progress.update("Checking running application...", str(target))
     running = running_app_processes(target)

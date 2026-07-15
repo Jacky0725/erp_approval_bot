@@ -105,3 +105,20 @@ def test_perform_install_fails_when_app_is_running(tmp_path, monkeypatch):
             raise AssertionError("perform_install should fail when app is running")
     finally:
         progress.close()
+
+
+def test_wait_for_requested_previous_process_polls_until_exit(monkeypatch):
+    installer = load_installer_module()
+    monkeypatch.setenv("REAGENT_APPROVAL_WAIT_FOR_PID", "456")
+    states = iter([True, True, False])
+    seen: list[int] = []
+
+    def fake_process_exists(pid: int) -> bool:
+        seen.append(pid)
+        return next(states)
+
+    monkeypatch.setattr(installer, "process_exists", fake_process_exists)
+    monkeypatch.setattr(installer.time, "sleep", lambda seconds: None)
+
+    assert installer.wait_for_requested_previous_process(timeout_seconds=5) == 456
+    assert seen == [456, 456, 456]
