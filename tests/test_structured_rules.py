@@ -127,6 +127,19 @@ class StructuredRulesTest(unittest.TestCase):
         self.assertEqual(result["final_category"], "\u91cd\u91d1\u5c5e\u7c7b")
         self.assertFalse(result["need_manual_review"])
 
+    def test_chromium_salt_matches_heavy_metal_class(self) -> None:
+        result = self.engine.classify(
+            {
+                "reagent_name": "\u5341\u4e8c\u6c34\u5408\u786b\u9178\u94ec\u94be",
+                "standard_name": "\u5341\u4e8c\u6c34\u5408\u786b\u9178\u94ec\u94be",
+                "text": "\u5341\u4e8c\u6c34\u5408\u786b\u9178\u94ec\u94be",
+                "allow_default_normal": True,
+            }
+        )
+
+        self.assertEqual(result["final_category"], "\u91cd\u91d1\u5c5e\u7c7b")
+        self.assertFalse(result["need_manual_review"])
+
     def test_business_normal_keywords_override_risk_classes(self) -> None:
         names = [
             "\u94c5ICP\u6807\u51c6\u6eb6\u6db2",

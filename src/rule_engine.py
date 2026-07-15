@@ -519,7 +519,7 @@ class RuleEngine:
                 parts.append(str(value))
         name_text = "".join(parts)
         hits = []
-        for token in ("\u9521", "\u954d", "\u94b4", "\u9511", "\u516d\u4ef7\u94ec", "\u9549", "\u94cb"):
+        for token in ("\u9521", "\u954d", "\u94b4", "\u9511", "\u94ec", "\u9549", "\u94cb"):
             if token in name_text:
                 hits.append(f"\u542b{token}")
         return list(dict.fromkeys(hits))
