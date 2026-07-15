@@ -4,7 +4,15 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 import update_checker
-from update_checker import choose_setup_asset, check_for_update, is_newer_version, normalize_tag, parse_version
+from update_checker import (
+    choose_portable_asset,
+    choose_setup_asset,
+    choose_update_asset,
+    check_for_update,
+    is_newer_version,
+    normalize_tag,
+    parse_version,
+)
 
 
 def test_parse_version_ignores_prefixes_and_suffixes():
@@ -57,6 +65,46 @@ def test_choose_setup_asset_prefers_lite_setup_over_full_test():
     assert asset.url == "lite"
 
 
+def test_choose_portable_asset_prefers_lite_portable():
+    asset = choose_portable_asset(
+        [
+            {
+                "name": "reagent-approval-bot-0.1.7-win-x64-full-portable.zip",
+                "browser_download_url": "full",
+                "size": 300,
+            },
+            {
+                "name": "reagent-approval-bot-0.1.7-win-x64-lite-portable.zip",
+                "browser_download_url": "lite",
+                "size": 200,
+            },
+        ]
+    )
+    assert asset is not None
+    assert asset.name.endswith("-lite-portable.zip")
+    assert asset.url == "lite"
+
+
+def test_choose_update_asset_prefers_portable_over_setup():
+    asset = choose_update_asset(
+        [
+            {
+                "name": "reagent-approval-bot-0.1.7-win-x64-lite-setup.exe",
+                "browser_download_url": "setup",
+                "size": 200,
+            },
+            {
+                "name": "reagent-approval-bot-0.1.7-win-x64-lite-portable.zip",
+                "browser_download_url": "portable",
+                "size": 180,
+            },
+        ]
+    )
+    assert asset is not None
+    assert asset.name.endswith("-lite-portable.zip")
+    assert asset.url == "portable"
+
+
 def test_check_for_update_uses_public_release_before_api(monkeypatch):
     calls = []
 
@@ -67,8 +115,8 @@ def test_check_for_update_uses_public_release_before_api(monkeypatch):
             "html_url": "https://github.example/release",
             "assets": [
                 {
-                    "name": "reagent-approval-bot-0.1.5-win-x64-setup.exe",
-                    "browser_download_url": "https://github.example/setup.exe",
+                    "name": "reagent-approval-bot-0.1.5-win-x64-lite-portable.zip",
+                    "browser_download_url": "https://github.example/portable.zip",
                     "size": 100,
                 }
             ],
@@ -87,6 +135,8 @@ def test_check_for_update_uses_public_release_before_api(monkeypatch):
     assert result.latest_version == "0.1.5"
     assert result.update_available
     assert calls == ["public"]
+    assert result.asset is not None
+    assert result.asset.name.endswith("-lite-portable.zip")
 
 
 def test_installer_launch_copy_uses_temp_directory(tmp_path, monkeypatch):
@@ -126,3 +176,33 @@ def test_launch_installer_runs_temp_copy_and_waits_for_current_pid(tmp_path, mon
     assert kwargs["cwd"] == str(temp_dir / "ReagentApprovalBotUpdates")
     assert kwargs["env"]["REAGENT_APPROVAL_START_AFTER_INSTALL"] == "1"
     assert kwargs["env"]["REAGENT_APPROVAL_WAIT_FOR_PID"] == str(update_checker.os.getpid())
+
+
+def test_launch_portable_updater_generates_script(tmp_path, monkeypatch):
+    source = tmp_path / "install" / "data" / "updates" / "portable.zip"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"zip")
+    temp_dir = tmp_path / "temp"
+    runtime_dir = tmp_path / "runtime"
+    executable = tmp_path / "app" / "ReagentApprovalBot.exe"
+    executable.parent.mkdir(parents=True)
+    executable.write_bytes(b"exe")
+    popen_calls = []
+
+    class DummyPopen:
+        def __init__(self, args, **kwargs):
+            popen_calls.append((args, kwargs))
+
+    monkeypatch.setattr(update_checker.tempfile, "gettempdir", lambda: str(temp_dir))
+    monkeypatch.setattr(update_checker, "runtime_root", lambda: runtime_dir)
+    monkeypatch.setattr(update_checker.sys, "executable", str(executable))
+    monkeypatch.setattr(update_checker.subprocess, "Popen", DummyPopen)
+
+    script = update_checker.launch_portable_updater(source)
+
+    assert script == temp_dir / "ReagentApprovalBotUpdates" / "apply_reagent_update.ps1"
+    script_text = script.read_text(encoding="utf-8")
+    assert "Expand-Archive" in script_text
+    assert "Get-Process -Id" in script_text
+    assert "Start-Process -FilePath" in script_text
+    assert len(popen_calls) == 1

@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import json
 import runpy
+import shutil
 import socket
 import sys
 import threading
@@ -56,12 +57,14 @@ def app_root() -> Path:
 
 def configure_runtime() -> Path:
     app = app_root()
-    runtime = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else app
+    executable_dir = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else app
+    runtime = default_runtime_root(executable_dir) if getattr(sys, "frozen", False) else app
     src = app / "src"
     sys.path.insert(0, str(src))
     os.environ.setdefault("REAGENT_APPROVAL_SOURCE_ROOT", str(app))
     os.environ.setdefault("REAGENT_APPROVAL_RUNTIME_ROOT", str(runtime))
-    os.chdir(runtime)
+    migrate_legacy_runtime(executable_dir, runtime)
+    os.chdir(executable_dir)
     browser_root = bundled_root() / "ms-playwright"
     if browser_root.exists():
         os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", str(browser_root))
@@ -72,6 +75,38 @@ def configure_runtime() -> Path:
     log_dir.mkdir(parents=True, exist_ok=True)
     redirect_process_output(log_dir / "launcher.log")
     return runtime
+
+
+def default_runtime_root(executable_dir: Path) -> Path:
+    configured = os.getenv("REAGENT_APPROVAL_RUNTIME_ROOT", "").strip()
+    if configured:
+        return Path(configured).expanduser().resolve()
+    local_app_data = os.getenv("LOCALAPPDATA", "").strip()
+    if local_app_data:
+        return Path(local_app_data) / "ReagentApprovalBot"
+    return executable_dir
+
+
+def migrate_legacy_runtime(executable_dir: Path, runtime: Path) -> None:
+    if executable_dir == runtime:
+        return
+    runtime.mkdir(parents=True, exist_ok=True)
+    legacy_items = (
+        ".env",
+        "data",
+        "config/settings.yaml",
+        "config/name_aliases.yaml",
+    )
+    for relative in legacy_items:
+        source = executable_dir / relative
+        destination = runtime / relative
+        if not source.exists() or destination.exists():
+            continue
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        if source.is_dir():
+            shutil.copytree(source, destination)
+        else:
+            shutil.copy2(source, destination)
 
 
 def redirect_process_output(log_path: Path) -> None:

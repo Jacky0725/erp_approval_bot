@@ -17,7 +17,7 @@ from dotenv import load_dotenv
 
 from llm_providers import fetch_provider_models, provider_options
 from scheduler import ApprovalScheduler
-from update_checker import check_for_update, current_process_is_frozen, download_update, launch_installer
+from update_checker import check_for_update, current_process_is_frozen, download_update, launch_update_package
 from web_runner import (
     ENV_PATH,
     ROOT_DIR,
@@ -237,18 +237,18 @@ def api_update_install() -> JSONResponse:
         return JSONResponse(
             {
                 "started": False,
-                "message": "当前是源码开发模式，不能自动安装 setup.exe。请在正式安装版中使用在线更新。",
+                "message": "当前是源码开发模式，不能自动应用更新包。请在正式安装版中使用在线更新。",
                 **info.as_dict(),
             }
         )
-    installer = download_update(info.asset)
-    launch_installer(installer)
+    update_package = download_update(info.asset)
+    launch_update_package(update_package)
     threading.Thread(target=delayed_exit, name="web-ui-update-exit", daemon=True).start()
     return JSONResponse(
         {
             "started": True,
-            "message": "已下载更新包并启动安装器，当前程序即将退出。",
-            "installer": str(installer),
+            "message": "已下载更新包并启动更新器，当前程序即将退出。",
+            "installer": str(update_package),
             **info.as_dict(),
         }
     )

@@ -54,3 +54,29 @@ def test_worker_failure_does_not_open_launcher_log(tmp_path, monkeypatch):
         runpy_mock.run_module.side_effect = RuntimeError("worker failed")
         assert launcher.main() == 1
         open_mock.assert_not_called()
+
+
+def test_default_runtime_root_uses_local_app_data(tmp_path, monkeypatch):
+    launcher = load_launcher_module()
+    local_app_data = tmp_path / "LocalAppData"
+    monkeypatch.setenv("LOCALAPPDATA", str(local_app_data))
+    monkeypatch.delenv("REAGENT_APPROVAL_RUNTIME_ROOT", raising=False)
+
+    assert launcher.default_runtime_root(tmp_path / "app") == local_app_data / "ReagentApprovalBot"
+
+
+def test_migrate_legacy_runtime_copies_existing_user_data(tmp_path):
+    launcher = load_launcher_module()
+    executable_dir = tmp_path / "Programs" / "ReagentApprovalBot"
+    runtime = tmp_path / "LocalAppData" / "ReagentApprovalBot"
+    (executable_dir / "data" / "logs").mkdir(parents=True)
+    (executable_dir / "config").mkdir(parents=True)
+    (executable_dir / ".env").write_text("ERP_USERNAME=demo", encoding="utf-8")
+    (executable_dir / "data" / "reagent_memory.sqlite").write_bytes(b"db")
+    (executable_dir / "config" / "settings.yaml").write_text("approval: {}", encoding="utf-8")
+
+    launcher.migrate_legacy_runtime(executable_dir, runtime)
+
+    assert (runtime / ".env").read_text(encoding="utf-8") == "ERP_USERNAME=demo"
+    assert (runtime / "data" / "reagent_memory.sqlite").read_bytes() == b"db"
+    assert (runtime / "config" / "settings.yaml").read_text(encoding="utf-8") == "approval: {}"

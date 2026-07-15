@@ -187,7 +187,9 @@ Start:
 Configuration:
 - Real credentials are not included.
 - Configure ERP and LLM credentials in the Web UI settings page.
-- Runtime data, logs, review queues, and .env are stored inside this extracted folder.
+- Runtime data, logs, review queues, .env, and the reagent memory database are
+  stored outside the program folder under %LOCALAPPDATA%\ReagentApprovalBot.
+  Upgrades replace program files only and keep local data intact.
 
 Notes:
 - Keep the _internal folder next to ReagentApprovalBot.exe.
