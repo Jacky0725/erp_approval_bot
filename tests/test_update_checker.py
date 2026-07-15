@@ -105,7 +105,7 @@ def test_choose_update_asset_prefers_portable_over_setup():
     assert asset.url == "portable"
 
 
-def test_check_for_update_uses_public_release_before_api(monkeypatch):
+def test_check_for_update_uses_public_release_when_api_matches(monkeypatch):
     calls = []
 
     def public_release(timeout_seconds=20):
@@ -124,7 +124,17 @@ def test_check_for_update_uses_public_release_before_api(monkeypatch):
 
     def api_release(timeout_seconds=20):
         calls.append("api")
-        raise AssertionError("GitHub API should not be called when public release check succeeds")
+        return {
+            "tag_name": "v0.1.5",
+            "html_url": "https://github.example/release",
+            "assets": [
+                {
+                    "name": "reagent-approval-bot-0.1.5-win-x64-lite-portable.zip",
+                    "browser_download_url": "https://github.example/portable.zip",
+                    "size": 100,
+                }
+            ],
+        }
 
     monkeypatch.setattr(update_checker, "fetch_latest_release_public", public_release)
     monkeypatch.setattr(update_checker, "fetch_latest_release", api_release)
@@ -134,9 +144,49 @@ def test_check_for_update_uses_public_release_before_api(monkeypatch):
     assert result.ok
     assert result.latest_version == "0.1.5"
     assert result.update_available
-    assert calls == ["public"]
+    assert calls == ["public", "api"]
     assert result.asset is not None
     assert result.asset.name.endswith("-lite-portable.zip")
+
+
+def test_check_for_update_uses_api_when_public_latest_is_stale(monkeypatch):
+    def public_release(timeout_seconds=20):
+        return {
+            "tag_name": "v0.1.5",
+            "html_url": "https://github.example/old",
+            "assets": [
+                {
+                    "name": "reagent-approval-bot-0.1.5-win-x64-lite-portable.zip",
+                    "browser_download_url": "https://github.example/old.zip",
+                    "size": 100,
+                }
+            ],
+        }
+
+    def api_release(timeout_seconds=20):
+        return {
+            "tag_name": "v0.1.6",
+            "html_url": "https://github.example/new",
+            "assets": [
+                {
+                    "name": "reagent-approval-bot-0.1.6-win-x64-lite-portable.zip",
+                    "browser_download_url": "https://github.example/new.zip",
+                    "size": 200,
+                }
+            ],
+        }
+
+    monkeypatch.setattr(update_checker, "fetch_latest_release_public", public_release)
+    monkeypatch.setattr(update_checker, "fetch_latest_release", api_release)
+
+    result = check_for_update(current_version="0.1.5")
+
+    assert result.ok
+    assert result.latest_version == "0.1.6"
+    assert result.update_available
+    assert result.release_url == "https://github.example/new"
+    assert result.asset is not None
+    assert result.asset.url == "https://github.example/new.zip"
 
 
 def test_installer_launch_copy_uses_temp_directory(tmp_path, monkeypatch):

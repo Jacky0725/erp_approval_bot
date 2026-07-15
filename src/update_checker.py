@@ -152,7 +152,11 @@ def fetch_latest_release_public(timeout_seconds: int = 20) -> dict[str, object]:
     repo = app_repository()
     request = urllib.request.Request(
         GITHUB_LATEST.format(repo=repo),
-        headers={"User-Agent": "reagent-approval-bot-updater"},
+        headers={
+            "User-Agent": "reagent-approval-bot-updater",
+            "Cache-Control": "no-cache",
+            "Pragma": "no-cache",
+        },
     )
     with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
         final_url = response.geturl()
@@ -182,6 +186,7 @@ def fetch_latest_release_public(timeout_seconds: int = 20) -> dict[str, object]:
 
 def check_for_update(current_version: str | None = None, timeout_seconds: int = 20) -> UpdateInfo:
     current = normalize_tag(current_version or app_version())
+    public_error: Exception | None = None
     try:
         release = fetch_latest_release_public(timeout_seconds=timeout_seconds)
     except (urllib.error.URLError, TimeoutError, OSError) as public_error:
@@ -189,6 +194,15 @@ def check_for_update(current_version: str | None = None, timeout_seconds: int = 
             release = fetch_latest_release(timeout_seconds=timeout_seconds)
         except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError) as api_error:
             return UpdateInfo(ok=False, current_version=current, error=f"public release check failed: {public_error}; GitHub API failed: {api_error}")
+    else:
+        try:
+            api_release = fetch_latest_release(timeout_seconds=timeout_seconds)
+            public_latest = normalize_tag(str(release.get("tag_name") or release.get("name") or ""))
+            api_latest = normalize_tag(str(api_release.get("tag_name") or api_release.get("name") or ""))
+            if is_newer_version(api_latest, public_latest):
+                release = api_release
+        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError):
+            pass
 
     latest = normalize_tag(str(release.get("tag_name") or release.get("name") or ""))
     asset = choose_update_asset(list(release.get("assets") or []))
