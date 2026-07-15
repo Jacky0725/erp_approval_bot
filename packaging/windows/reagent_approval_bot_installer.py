@@ -7,7 +7,6 @@ import subprocess
 import sys
 import tempfile
 import threading
-import time
 import textwrap
 import zipfile
 import ctypes
@@ -177,6 +176,16 @@ def install_dir() -> Path:
     return default_parent / APP_NAME
 
 
+def runtime_data_dir() -> Path:
+    configured = os.getenv("REAGENT_APPROVAL_RUNTIME_ROOT", "").strip()
+    if configured:
+        return Path(configured).expanduser().resolve()
+    local_app_data = os.getenv("LOCALAPPDATA", "").strip()
+    if local_app_data:
+        return Path(local_app_data) / APP_NAME
+    return Path.home() / APP_NAME
+
+
 def should_prompt_for_install_dir() -> bool:
     if os.getenv("REAGENT_APPROVAL_START_AFTER_INSTALL", "").strip().lower() in {"1", "true", "yes", "on"}:
         return False
@@ -228,28 +237,39 @@ def copy_if_exists(source: Path, destination: Path) -> None:
         shutil.copy2(source, destination)
 
 
-def preserve_existing(target: Path, backup: Path) -> None:
-    copy_if_exists(target / ".env", backup / ".env")
-    copy_if_exists(target / "data", backup / "data")
-    copy_if_exists(target / "config" / "settings.yaml", backup / "config" / "settings.yaml")
-    copy_if_exists(target / "data" / "reagent_memory.sqlite", backup / "data" / "reagent_memory.sqlite")
+def migrate_legacy_data(target: Path, runtime: Path, log_path: Path) -> None:
+    runtime.mkdir(parents=True, exist_ok=True)
+    for relative in (".env", "data", "config/settings.yaml", "config/name_aliases.yaml"):
+        source = target / relative
+        destination = runtime / relative
+        if not source.exists() or destination.exists():
+            continue
+        write_install_log(log_path, f"Migrating legacy user data: {relative}")
+        copy_if_exists(source, destination)
 
 
-def restore_existing(target: Path, backup: Path) -> None:
-    copy_if_exists(backup / ".env", target / ".env")
-    copy_if_exists(backup / "data", target / "data")
-    copy_if_exists(backup / "config" / "settings.yaml", target / "config" / "settings.yaml")
-    copy_if_exists(backup / "data" / "reagent_memory.sqlite", target / "data" / "reagent_memory.sqlite")
+def remove_program_files(target: Path) -> None:
+    if not target.exists():
+        return
+    for item in target.iterdir():
+        if item.name in {"data", ".env"}:
+            continue
+        if item.is_dir():
+            shutil.rmtree(item)
+        else:
+            item.unlink()
 
 
 def write_uninstaller(target: Path) -> None:
     script = target / "uninstall_installed.ps1"
+    runtime = runtime_data_dir()
     script.write_text(
         textwrap.dedent(
             f"""
             param([switch]$KeepData)
             $ErrorActionPreference = "Stop"
             $InstallDir = "{target}"
+            $RuntimeDir = "{runtime}"
             $ShortcutName = -join ([char[]](0x8bd5, 0x5242, 0x5ba1, 0x6279, 0x52a9, 0x624b))
             $UninstallShortcutName = -join ([char[]](0x5378, 0x8f7d, 0x8bd5, 0x5242, 0x5ba1, 0x6279, 0x52a9, 0x624b))
             Get-CimInstance Win32_Process | Where-Object {{
@@ -259,10 +279,11 @@ def write_uninstaller(target: Path) -> None:
                 Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
             }}
             Start-Sleep -Milliseconds 700
-            if ($KeepData) {{
-                Get-ChildItem -LiteralPath $InstallDir -Force | Where-Object {{ $_.Name -notin @("data", ".env") }} | Remove-Item -Recurse -Force
-            }} elseif (Test-Path $InstallDir) {{
+            if (Test-Path $InstallDir) {{
                 Remove-Item $InstallDir -Recurse -Force
+            }}
+            if (!$KeepData -and (Test-Path $RuntimeDir)) {{
+                Remove-Item $RuntimeDir -Recurse -Force
             }}
             $DesktopShortcut = Join-Path ([Environment]::GetFolderPath("Desktop")) "$ShortcutName.lnk"
             $StartMenuDir = Join-Path ([Environment]::GetFolderPath("StartMenu")) "Programs"
@@ -320,59 +341,9 @@ def create_shortcuts(target: Path) -> None:
     )
 
 
-def start_installed_app(target: Path) -> subprocess.Popen[bytes] | None:
-    exe = target / "ReagentApprovalBot.exe"
-    if not exe.exists():
-        return None
-    creationflags = 0
-    if os.name == "nt":
-        creationflags = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
-    return subprocess.Popen(
-        [str(exe)],
-        cwd=str(target),
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        creationflags=creationflags,
-        close_fds=True,
-    )
-
-
-def verify_started_app(process: subprocess.Popen[bytes] | None, target: Path, log_path: Path) -> None:
-    if process is None:
-        write_install_log(log_path, "Application executable was not found; skipping startup verification.")
-        return
-    time.sleep(2)
-    return_code = process.poll()
-    if return_code is None:
-        write_install_log(log_path, f"Application process started: pid={process.pid}")
-        return
-    launcher_log = target / "data" / "logs" / "launcher.log"
-    raise RuntimeError(
-        "Application started and exited immediately. "
-        f"Exit code: {return_code}. Launcher log: {launcher_log}"
-    )
-
-
-def wait_for_previous_process() -> None:
-    value = os.getenv("REAGENT_APPROVAL_WAIT_FOR_PID", "").strip()
-    if not value:
-        return
-    try:
-        pid = int(value)
-    except ValueError:
-        return
-    if pid <= 0 or pid == os.getpid():
-        return
-    if os.name == "nt":
-        wait_for_windows_process_exit(pid)
-        return
-    wait_for_process_exit_portable(pid)
-
-
-def stop_existing_app_processes(target: Path) -> None:
+def running_app_processes(target: Path) -> list[tuple[int, str]]:
     if os.name != "nt":
-        return
+        return []
     script = textwrap.dedent(
         f"""
         $InstallDir = "{target}"
@@ -380,42 +351,36 @@ def stop_existing_app_processes(target: Path) -> None:
             ($_.Name -eq "ReagentApprovalBot.exe") -or
             ($_.ExecutablePath -and $_.ExecutablePath.StartsWith($InstallDir, [StringComparison]::OrdinalIgnoreCase))
         }} | ForEach-Object {{
-            Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+            "$($_.ProcessId)`t$($_.ExecutablePath)"
         }}
         """
     )
-    subprocess.run(
+    result = subprocess.run(
         ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script],
         check=False,
+        text=True,
+        capture_output=True,
         **hidden_subprocess_kwargs(),
     )
-    time.sleep(0.7)
-
-
-def wait_for_windows_process_exit(pid: int, timeout_seconds: int = 60) -> None:
-    synchronize = 0x00100000
-    handle = ctypes.windll.kernel32.OpenProcess(synchronize, False, pid)
-    if not handle:
-        return
-    try:
-        remaining_ms = max(1, timeout_seconds) * 1000
-        while remaining_ms > 0:
-            result = ctypes.windll.kernel32.WaitForSingleObject(handle, min(1000, remaining_ms))
-            if result == 0:
-                return
-            remaining_ms -= 1000
-    finally:
-        ctypes.windll.kernel32.CloseHandle(handle)
-
-
-def wait_for_process_exit_portable(pid: int, timeout_seconds: int = 60) -> None:
-    deadline = time.monotonic() + max(1, timeout_seconds)
-    while time.monotonic() < deadline:
+    processes: list[tuple[int, str]] = []
+    for line in result.stdout.splitlines():
+        if not line.strip():
+            continue
+        pid_text, _, path = line.partition("\t")
         try:
-            os.kill(pid, 0)
-        except OSError:
-            return
-        time.sleep(1)
+            processes.append((int(pid_text.strip()), path.strip()))
+        except ValueError:
+            continue
+    return processes
+
+
+def ensure_install_dir_writable(target: Path) -> None:
+    target.mkdir(parents=True, exist_ok=True)
+    probe = target / ".install_write_test"
+    try:
+        probe.write_text("ok", encoding="utf-8")
+    finally:
+        probe.unlink(missing_ok=True)
 
 
 
@@ -439,28 +404,32 @@ def show_message(title: str, message: str, *, error: bool = False) -> None:
 def perform_install(progress: ProgressReporter, state: dict[str, Path]) -> Path:
     progress.update("Preparing installation...", "If a folder picker opens, choose the install location.")
     target = install_dir()
+    runtime = runtime_data_dir()
     log_path = target.parent / INSTALL_LOG_NAME
     state["log_path"] = log_path
     log_path.parent.mkdir(parents=True, exist_ok=True)
     write_install_log(log_path, f"Installing Reagent Approval Bot to: {target}")
+    write_install_log(log_path, f"Runtime data directory: {runtime}")
 
-    progress.update("Stopping existing application...", str(target))
-    wait_for_previous_process()
-    stop_existing_app_processes(target)
+    progress.update("Checking running application...", str(target))
+    running = running_app_processes(target)
+    if running:
+        details = "; ".join(f"pid={pid} {path}" for pid, path in running[:5])
+        raise RuntimeError(f"Reagent Approval Bot is still running. Close it and run installer again. {details}")
+
+    progress.update("Checking install directory permissions...", str(target))
+    ensure_install_dir_writable(target)
 
     with tempfile.TemporaryDirectory(prefix="ReagentApprovalBotInstall_") as tmp:
         temp_root = Path(tmp)
         extracted = temp_root / "payload"
-        backup = temp_root / "backup"
         extracted.mkdir(parents=True, exist_ok=True)
-        backup.mkdir(parents=True, exist_ok=True)
 
         if target.exists():
-            write_install_log(log_path, "Preserving existing settings and runtime data...")
-            progress.update("Backing up local settings and data...", "Credentials, logs, rules, and memory DB are kept.")
-            preserve_existing(target, backup)
+            progress.update("Migrating legacy local data...", str(runtime))
+            migrate_legacy_data(target, runtime, log_path)
             progress.update("Removing old application files...", str(target))
-            shutil.rmtree(target)
+            remove_program_files(target)
 
         write_install_log(log_path, "Extracting application files...")
         progress.update("Extracting new application files...", "This can take a few minutes during antivirus scanning.")
@@ -472,19 +441,15 @@ def perform_install(progress: ProgressReporter, state: dict[str, Path]) -> Path:
         for item in extracted.iterdir():
             destination = target / item.name
             if item.is_dir():
+                if destination.exists():
+                    shutil.rmtree(destination)
                 shutil.copytree(item, destination)
             else:
                 shutil.copy2(item, destination)
 
-        progress.update("Restoring local settings and data...", "Existing local data is preserved.")
-        restore_existing(target, backup)
         progress.update("Creating shortcuts and uninstall entry...", "")
         write_uninstaller(target)
         create_shortcuts(target)
-        if os.getenv("REAGENT_APPROVAL_START_AFTER_INSTALL", "").strip().lower() in {"1", "true", "yes", "on"}:
-            progress.update("Starting application...", "If startup fails, the launcher.log path will be shown.")
-            process = start_installed_app(target)
-            verify_started_app(process, target, log_path)
 
     write_install_log(log_path, "Installation complete.")
     return target
