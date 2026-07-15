@@ -205,4 +205,7 @@ def test_launch_portable_updater_generates_script(tmp_path, monkeypatch):
     assert "Expand-Archive" in script_text
     assert "Get-Process -Id" in script_text
     assert "Start-Process -FilePath" in script_text
+    assert 'Copy-Item -LiteralPath (Join-Path $PayloadRoot "*")' not in script_text
+    assert "Get-ChildItem -LiteralPath $PayloadRoot -Force" in script_text
+    assert "Copy-Item -LiteralPath $_.FullName" in script_text
     assert len(popen_calls) == 1

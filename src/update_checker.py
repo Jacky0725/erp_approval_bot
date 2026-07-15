@@ -209,7 +209,7 @@ def updates_dir() -> Path:
     return path
 
 
-def download_update(asset: ReleaseAsset, timeout_seconds: int = 120) -> Path:
+def download_update(asset: ReleaseAsset, timeout_seconds: int = 600) -> Path:
     destination = updates_dir() / asset.name
     tmp = destination.with_suffix(destination.suffix + ".download")
     request = urllib.request.Request(asset.url, headers=github_headers())
@@ -329,7 +329,9 @@ def portable_update_script(zip_path: Path, install_dir: Path, exe_path: Path, cu
             Get-ChildItem -LiteralPath $InstallDir -Force | Where-Object {{
                 $_.Name -notin @("data", ".env")
             }} | Remove-Item -Recurse -Force
-            Copy-Item -LiteralPath (Join-Path $PayloadRoot "*") -Destination $InstallDir -Recurse -Force
+            Get-ChildItem -LiteralPath $PayloadRoot -Force | ForEach-Object {{
+                Copy-Item -LiteralPath $_.FullName -Destination $InstallDir -Recurse -Force
+            }}
 
             Write-UpdateLog "Starting updated application..."
             Start-Process -FilePath $ExePath -WorkingDirectory $InstallDir

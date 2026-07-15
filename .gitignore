@@ -10,3 +10,4 @@ config/rule_candidates.xlsx
 /data/
 /rules.xlsx
 /dist/
+scripts/create_desktop_shortcut.ps1
