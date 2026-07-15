@@ -6,10 +6,12 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import textwrap
 import zipfile
 import ctypes
+from queue import Empty, Queue
 from typing import Any
 
 
@@ -36,6 +38,8 @@ class ProgressReporter:
         self.message_var: Any | None = None
         self.detail_var: Any | None = None
         self.progress: Any | None = None
+        self._main_thread_id = threading.get_ident()
+        self._events: Queue[tuple[str, Any]] = Queue()
         if self.enabled:
             self._create_window()
 
@@ -71,13 +75,69 @@ class ProgressReporter:
     def update(self, message: str, detail: str = "") -> None:
         if not self.root:
             return
+        if threading.get_ident() != self._main_thread_id:
+            self._events.put(("update", (message, detail)))
+            return
+        self._apply_update(message, detail)
+
+    def _apply_update(self, message: str, detail: str = "") -> None:
         try:
             self.message_var.set(message)
             self.detail_var.set(detail)
             self.root.update_idletasks()
-            self.root.update()
         except Exception:
             self.close()
+
+    def run(self, worker: Any) -> Any:
+        if not self.root:
+            return worker()
+
+        result: dict[str, Any] = {}
+
+        def run_worker() -> None:
+            try:
+                result["value"] = worker()
+            except BaseException as exc:  # noqa: BLE001 - surface worker failure after UI loop exits
+                result["error"] = exc
+            finally:
+                self._events.put(("done", None))
+
+        thread = threading.Thread(target=run_worker, name="installer-worker", daemon=True)
+        thread.start()
+        self._schedule_drain()
+        self.root.mainloop()
+        thread.join(timeout=1)
+        if "error" in result:
+            raise result["error"]
+        return result.get("value")
+
+    def _schedule_drain(self) -> None:
+        if not self.root:
+            return
+        try:
+            self.root.after(100, self._drain_events)
+        except Exception:
+            self.close()
+
+    def _drain_events(self) -> None:
+        done = False
+        while True:
+            try:
+                event, payload = self._events.get_nowait()
+            except Empty:
+                break
+            if event == "update":
+                message, detail = payload
+                self._apply_update(message, detail)
+            elif event == "done":
+                done = True
+        if done:
+            try:
+                self.root.quit()
+            except Exception:
+                self.close()
+            return
+        self._schedule_drain()
 
     def close(self) -> None:
         if not self.root:
@@ -130,7 +190,7 @@ def choose_install_parent(default_parent: Path) -> Path | None:
     script = textwrap.dedent(
         f"""
         $shell = New-Object -ComObject Shell.Application
-        $folder = $shell.BrowseForFolder(0, '请选择安装位置。程序会安装到所选目录下的 ReagentApprovalBot 文件夹。', 0, '{default_parent}')
+        $folder = $shell.BrowseForFolder(0, 'Choose install location. The app will be installed into a ReagentApprovalBot folder under the selected directory.', 0, '{default_parent}')
         if ($folder -ne $null) {{ $folder.Self.Path }}
         """
     )
@@ -358,67 +418,6 @@ def wait_for_process_exit_portable(pid: int, timeout_seconds: int = 60) -> None:
         time.sleep(1)
 
 
-def main() -> int:
-    log_path = Path(os.getenv("TEMP", str(Path.home()))) / INSTALL_LOG_NAME
-    progress = ProgressReporter()
-    try:
-        progress.update("正在准备安装...", "如果弹出安装位置选择窗口，请选择安装目录。")
-        target = install_dir()
-        log_path = target.parent / INSTALL_LOG_NAME
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        write_install_log(log_path, f"Installing Reagent Approval Bot to: {target}")
-        progress.update("正在停止旧版程序...", str(target))
-        wait_for_previous_process()
-        stop_existing_app_processes(target)
-        with tempfile.TemporaryDirectory(prefix="ReagentApprovalBotInstall_") as tmp:
-            temp_root = Path(tmp)
-            extracted = temp_root / "payload"
-            backup = temp_root / "backup"
-            extracted.mkdir(parents=True, exist_ok=True)
-            backup.mkdir(parents=True, exist_ok=True)
-
-            if target.exists():
-                write_install_log(log_path, "Preserving existing settings and runtime data...")
-                progress.update("正在备份原有配置和数据...", "会保留账号配置、日志、规则文件和试剂记忆库。")
-                preserve_existing(target, backup)
-                progress.update("正在删除旧版程序文件...", str(target))
-                shutil.rmtree(target)
-
-            write_install_log(log_path, "Extracting application files...")
-            progress.update("正在解压新版程序...", "首次运行或杀毒软件扫描时可能需要几分钟，请稍候。")
-            with zipfile.ZipFile(payload_zip()) as zf:
-                zf.extractall(extracted)
-
-            progress.update("正在复制程序文件...", str(target))
-            target.mkdir(parents=True, exist_ok=True)
-            for item in extracted.iterdir():
-                destination = target / item.name
-                if item.is_dir():
-                    shutil.copytree(item, destination)
-                else:
-                    shutil.copy2(item, destination)
-
-            progress.update("正在恢复本地配置和数据...", "升级安装会保留原有资料。")
-            restore_existing(target, backup)
-            progress.update("正在创建快捷方式和卸载入口...", "")
-            write_uninstaller(target)
-            create_shortcuts(target)
-            if os.getenv("REAGENT_APPROVAL_START_AFTER_INSTALL", "").strip().lower() in {"1", "true", "yes", "on"}:
-                progress.update("正在启动程序...", "如果启动失败，会提示 launcher.log 路径。")
-                process = start_installed_app(target)
-                verify_started_app(process, target, log_path)
-
-        write_install_log(log_path, "Installation complete.")
-        progress.close()
-        show_message(APP_TITLE, f"{INSTALL_DONE_TITLE}\n{target}")
-        return 0
-    except Exception as exc:  # noqa: BLE001 - show install failures to desktop users
-        progress.close()
-        write_install_log(log_path, f"Installation failed: {exc}")
-        show_message(APP_TITLE, f"{INSTALL_FAILED_TITLE}\n{exc}\n\n日志：{log_path}", error=True)
-        return 1
-    finally:
-        progress.close()
 
 
 def write_install_log(path: Path, message: str) -> None:
@@ -435,6 +434,78 @@ def show_message(title: str, message: str, *, error: bool = False) -> None:
         ctypes.windll.user32.MessageBoxW(None, message, title, flags)
         return
     print(f"{title}: {message}")
+
+
+def perform_install(progress: ProgressReporter, state: dict[str, Path]) -> Path:
+    progress.update("Preparing installation...", "If a folder picker opens, choose the install location.")
+    target = install_dir()
+    log_path = target.parent / INSTALL_LOG_NAME
+    state["log_path"] = log_path
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    write_install_log(log_path, f"Installing Reagent Approval Bot to: {target}")
+
+    progress.update("Stopping existing application...", str(target))
+    wait_for_previous_process()
+    stop_existing_app_processes(target)
+
+    with tempfile.TemporaryDirectory(prefix="ReagentApprovalBotInstall_") as tmp:
+        temp_root = Path(tmp)
+        extracted = temp_root / "payload"
+        backup = temp_root / "backup"
+        extracted.mkdir(parents=True, exist_ok=True)
+        backup.mkdir(parents=True, exist_ok=True)
+
+        if target.exists():
+            write_install_log(log_path, "Preserving existing settings and runtime data...")
+            progress.update("Backing up local settings and data...", "Credentials, logs, rules, and memory DB are kept.")
+            preserve_existing(target, backup)
+            progress.update("Removing old application files...", str(target))
+            shutil.rmtree(target)
+
+        write_install_log(log_path, "Extracting application files...")
+        progress.update("Extracting new application files...", "This can take a few minutes during antivirus scanning.")
+        with zipfile.ZipFile(payload_zip()) as zf:
+            zf.extractall(extracted)
+
+        progress.update("Copying application files...", str(target))
+        target.mkdir(parents=True, exist_ok=True)
+        for item in extracted.iterdir():
+            destination = target / item.name
+            if item.is_dir():
+                shutil.copytree(item, destination)
+            else:
+                shutil.copy2(item, destination)
+
+        progress.update("Restoring local settings and data...", "Existing local data is preserved.")
+        restore_existing(target, backup)
+        progress.update("Creating shortcuts and uninstall entry...", "")
+        write_uninstaller(target)
+        create_shortcuts(target)
+        if os.getenv("REAGENT_APPROVAL_START_AFTER_INSTALL", "").strip().lower() in {"1", "true", "yes", "on"}:
+            progress.update("Starting application...", "If startup fails, the launcher.log path will be shown.")
+            process = start_installed_app(target)
+            verify_started_app(process, target, log_path)
+
+    write_install_log(log_path, "Installation complete.")
+    return target
+
+
+def main() -> int:
+    state = {"log_path": Path(os.getenv("TEMP", str(Path.home()))) / INSTALL_LOG_NAME}
+    progress = ProgressReporter()
+    try:
+        target = progress.run(lambda: perform_install(progress, state))
+        progress.close()
+        show_message(APP_TITLE, f"{INSTALL_DONE_TITLE}\n{target}")
+        return 0
+    except Exception as exc:  # noqa: BLE001 - show install failures to desktop users
+        progress.close()
+        log_path = state["log_path"]
+        write_install_log(log_path, f"Installation failed: {exc}")
+        show_message(APP_TITLE, f"{INSTALL_FAILED_TITLE}\n{exc}\n\nLog: {log_path}", error=True)
+        return 1
+    finally:
+        progress.close()
 
 
 if __name__ == "__main__":

@@ -34,3 +34,11 @@ def test_manual_windows_install_can_prompt(monkeypatch):
 
     with patch.object(installer.os, "name", "nt"):
         assert installer.should_prompt_for_install_dir()
+
+
+def test_progress_reporter_run_without_ui_executes_worker(monkeypatch):
+    installer = load_installer_module()
+    monkeypatch.setenv("REAGENT_APPROVAL_SUPPRESS_INSTALL_PROGRESS", "1")
+    progress = installer.ProgressReporter()
+
+    assert progress.run(lambda: "done") == "done"
