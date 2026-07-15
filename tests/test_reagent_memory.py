@@ -292,7 +292,7 @@ class ReagentMemoryTest(unittest.TestCase):
             self.assertEqual(row["need_manual_review"], 0)
             self.assertEqual(row["conflict"], 0)
 
-    def test_business_normal_keyword_overrides_unknown_memory_rule(self) -> None:
+    def test_unknown_keyword_overrides_business_normal_memory_rule(self) -> None:
         tmp, memory = self.make_memory()
         with tmp:
             memory.add_record(
@@ -306,7 +306,7 @@ class ReagentMemoryTest(unittest.TestCase):
             )
             row = memory.find_any(raw_name="\u8bd5\u5242\uff08\u672a\u77e5\uff09")
 
-            self.assertEqual(row["final_category"], "\u666e\u901a\u7c7b")
+            self.assertEqual(row["final_category"], "\u672a\u77e5\u7c7b")
             self.assertEqual(row["reusable"], 1)
             self.assertEqual(row["need_manual_review"], 0)
             self.assertEqual(row["conflict"], 0)
@@ -322,7 +322,7 @@ class ReagentMemoryTest(unittest.TestCase):
             )
             drug_row = memory.find_any(raw_name="\u672a\u77e5\u836f\u7269")
 
-            self.assertEqual(drug_row["final_category"], "\u666e\u901a\u7c7b")
+            self.assertEqual(drug_row["final_category"], "\u672a\u77e5\u7c7b")
             self.assertEqual(drug_row["reusable"], 1)
             self.assertEqual(drug_row["need_manual_review"], 0)
             self.assertEqual(drug_row["conflict"], 0)
@@ -338,7 +338,7 @@ class ReagentMemoryTest(unittest.TestCase):
             )
             venlafaxine_row = memory.find_any(raw_name="\u672a\u77e5\u76d0\u9178\u6587\u62c9\u6cd5\u8f9b")
 
-            self.assertEqual(venlafaxine_row["final_category"], "\u666e\u901a\u7c7b")
+            self.assertEqual(venlafaxine_row["final_category"], "\u672a\u77e5\u7c7b")
             self.assertEqual(venlafaxine_row["reusable"], 1)
             self.assertEqual(venlafaxine_row["need_manual_review"], 0)
             self.assertEqual(venlafaxine_row["conflict"], 0)
@@ -354,7 +354,7 @@ class ReagentMemoryTest(unittest.TestCase):
             )
             biology_row = memory.find_any(raw_name="\u672a\u77e5\u7ec6\u80de\u67d3\u8272\u6807\u5b9a\u6db2")
 
-            self.assertEqual(biology_row["final_category"], "\u666e\u901a\u7c7b")
+            self.assertEqual(biology_row["final_category"], "\u672a\u77e5\u7c7b")
             self.assertEqual(biology_row["reusable"], 1)
             self.assertEqual(biology_row["need_manual_review"], 0)
             self.assertEqual(biology_row["conflict"], 0)
@@ -372,7 +372,7 @@ class ReagentMemoryTest(unittest.TestCase):
                 raw_name="\u672a\u77e5\u4e00\u6b21\u6027\u75c5\u6bd2\u91c7\u6837\u7ba1"
             )
 
-            self.assertEqual(disposable_virus_row["final_category"], "\u666e\u901a\u7c7b")
+            self.assertEqual(disposable_virus_row["final_category"], "\u672a\u77e5\u7c7b")
             self.assertEqual(disposable_virus_row["reusable"], 1)
             self.assertEqual(disposable_virus_row["need_manual_review"], 0)
             self.assertEqual(disposable_virus_row["conflict"], 0)

@@ -555,11 +555,9 @@ class ApprovalFlowTodoLoopTest(unittest.TestCase):
             "\u6c2f\u5316\u94cd\u6807\u5b9a\u6eb6\u6db2",
             "\u5432\u54da\u6807\u51c6\u6eb6\u6db2",
             "\u86cb\u767d\u514d\u75ab\u6297\u4f53\u8bd5\u5242",
-            "\u672a\u77e5\u7ec6\u80de\u57f9\u517b\u6db2",
             "\u4e00\u6b21\u6027\u75c5\u6bd2\u91c7\u6837\u7ba1",
             "\u75c5\u6bd2\u4fdd\u5b58\u6db2",
             "\u82cf\u6728\u7d20\u67d3\u8272\u6db2",
-            "\u8bd5\u5242\uff08\u672a\u77e5\uff09",
             "\u5361\u9a6c\u897f\u5e73\u836f\u7269\u5bf9\u7167\u54c1",
             "\u76d0\u9178\u6587\u62c9\u6cd5\u8f9b",
         ):
@@ -578,6 +576,27 @@ class ApprovalFlowTodoLoopTest(unittest.TestCase):
                 self.assertEqual(suggestion["\u6700\u7ec8\u5efa\u8bae\u7c7b\u522b"], "\u666e\u901a\u7c7b")
                 self.assertFalse(suggestion["\u9700\u4eba\u5de5\u590d\u6838"])
                 self.assertEqual(suggestion["\u67e5\u8be2\u6765\u6e90"], "business_rule")
+
+    def test_unknown_keyword_skips_business_normal_direct_suggestion(self) -> None:
+        bot = Bot()
+        engine = RuleEngine.from_excel(ROOT_DIR / "config" / "rules.xlsx")
+
+        for name in (
+            "\u672a\u77e5\u7ec6\u80de\u57f9\u517b\u6db2",
+            "\u8bd5\u5242\uff08\u672a\u77e5\uff09",
+            "\u672a\u77e5\u4e00\u6b21\u6027\u75c5\u6bd2\u91c7\u6837\u7ba1",
+        ):
+            with self.subTest(name=name):
+                suggestion = bot.direct_business_rule_suggestion(
+                    {
+                        "\u5e8f\u53f7": "27",
+                        "\u8bd5\u5242\u540d\u79f0": name,
+                        "CAS\u53f7": "-",
+                    },
+                    engine,
+                )
+
+                self.assertIsNone(suggestion)
 
     def test_parallel_processing_keeps_table_order_with_direct_rules(self) -> None:
         class OrderedBot(Bot):

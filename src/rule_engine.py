@@ -176,6 +176,15 @@ class RuleEngine:
         if not text:
             return self._manual_result("无法判断：试剂信息为空。")
 
+        if self._looks_unknown(text):
+            return {
+                "final_category": UNKNOWN_CATEGORY,
+                "matched_categories": [UNKNOWN_CATEGORY],
+                "reason": "试剂名称或文本包含“未知”等关键词，按业务规则判定为未知类。",
+                "confidence": 1.0,
+                "need_manual_review": True,
+            }
+
         if self._is_business_normal_name(reagent_info):
             return {
                 "final_category": NORMAL_CATEGORY,

@@ -69,8 +69,6 @@ def business_normal_name_reason(raw_name: str, *extra_values: Any) -> str:
 
 
 def unknown_reagent_name_reason(raw_name: str, *extra_values: Any) -> str:
-    if business_normal_name_reason(raw_name, *extra_values):
-        return ""
     text = " ".join(str(value or "") for value in (raw_name, *extra_values))
     normalized = re.sub(r"\s+", "", text).lower()
     for pattern in UNKNOWN_REAGENT_NAME_PATTERNS:

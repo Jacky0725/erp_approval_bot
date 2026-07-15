@@ -153,7 +153,6 @@ class StructuredRulesTest(unittest.TestCase):
             "3-Bromo-6-nitroindole \u8bd5\u5242",
             "\u78f7\u9178\u7f13\u51b2\u6db2",
             "\u86cb\u767d\u514d\u75ab\u6297\u4f53\u8bd5\u5242",
-            "\u672a\u77e5\u7ec6\u80de\u57f9\u517b\u6db2",
             "\u4e00\u6b21\u6027\u75c5\u6bd2\u91c7\u6837\u7ba1",
             "\u75c5\u6bd2\u4fdd\u5b58\u6db2",
             "\u82cf\u6728\u7d20\u67d3\u8272\u6db2",
@@ -173,6 +172,25 @@ class StructuredRulesTest(unittest.TestCase):
 
                 self.assertEqual(result["final_category"], "\u666e\u901a\u7c7b")
                 self.assertFalse(result["need_manual_review"])
+
+    def test_unknown_keyword_overrides_business_normal_keywords(self) -> None:
+        for name in (
+            "\u672a\u77e5\u7ec6\u80de\u57f9\u517b\u6db2",
+            "\u8bd5\u5242\uff08\u672a\u77e5\uff09",
+            "\u672a\u77e5\u4e00\u6b21\u6027\u75c5\u6bd2\u91c7\u6837\u7ba1",
+        ):
+            with self.subTest(name=name):
+                result = self.engine.classify(
+                    {
+                        "reagent_name": name,
+                        "standard_name": name,
+                        "text": name,
+                        "allow_default_normal": True,
+                    }
+                )
+
+                self.assertEqual(result["final_category"], "\u672a\u77e5\u7c7b")
+                self.assertTrue(result["need_manual_review"])
 
     def test_indole_derivative_matches_odor_class(self) -> None:
         result = self.engine.classify(
