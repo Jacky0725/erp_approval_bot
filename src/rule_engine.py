@@ -176,6 +176,15 @@ class RuleEngine:
         if not text:
             return self._manual_result("无法判断：试剂信息为空。")
 
+        if self._contains_mercury_name(reagent_info):
+            return {
+                "final_category": "不建议接收类",
+                "matched_categories": ["不建议接收类"],
+                "reason": "试剂名称含“汞”，按业务规则判定为拒收类。",
+                "confidence": 0.95,
+                "need_manual_review": False,
+            }
+
         if self._looks_unknown(text):
             return {
                 "final_category": UNKNOWN_CATEGORY,
@@ -518,6 +527,16 @@ class RuleEngine:
             if token in name_text:
                 hits.append(f"含{token}")
         return list(dict.fromkeys(hits))
+
+    @staticmethod
+    def _contains_mercury_name(reagent_info: dict[str, Any]) -> bool:
+        parts = []
+        for key in ("name", "reagent_name", "chemical_name", "standard_name", "cleaned_name", "english_name"):
+            value = reagent_info.get(key)
+            if value:
+                parts.append(str(value))
+        name_text = "".join(parts).lower()
+        return "\u6c5e" in name_text or "mercury" in name_text or "mercuric" in name_text or "mercurous" in name_text
 
     @staticmethod
     def _heavy_metal_name_hits(reagent_info: dict[str, Any]) -> list[str]:

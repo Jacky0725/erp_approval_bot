@@ -93,6 +93,26 @@ class StructuredRulesTest(unittest.TestCase):
                 self.assertEqual(result["final_category"], "不建议接收类")
                 self.assertFalse(result["need_manual_review"])
 
+    def test_mercury_name_overrides_business_normal_keywords(self) -> None:
+        for name in [
+            "三氟甲烷磺酸汞",
+            "汞标准溶液",
+            "Mercury standard solution",
+        ]:
+            with self.subTest(name=name):
+                result = self.engine.classify(
+                    {
+                        "reagent_name": name,
+                        "standard_name": name,
+                        "english_name": name,
+                        "text": name,
+                        "allow_default_normal": True,
+                    }
+                )
+
+                self.assertEqual(result["final_category"], "不建议接收类")
+                self.assertFalse(result["need_manual_review"])
+
     def test_perchloric_acid_concentration_rules(self) -> None:
         low = self.engine.classify({"reagent_name": "70%\u9ad8\u6c2f\u9178", "allow_default_normal": True})
         high = self.engine.classify({"reagent_name": "75%\u9ad8\u6c2f\u9178", "allow_default_normal": True})
