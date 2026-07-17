@@ -27,10 +27,21 @@ def test_online_update_install_does_not_prompt_for_folder(monkeypatch):
     assert not installer.should_prompt_for_install_dir()
 
 
-def test_manual_windows_install_can_prompt(monkeypatch):
+def test_manual_windows_install_does_not_prompt_by_default(monkeypatch):
     installer = load_installer_module()
     monkeypatch.delenv("REAGENT_APPROVAL_START_AFTER_INSTALL", raising=False)
     monkeypatch.delenv("REAGENT_APPROVAL_SILENT_INSTALL", raising=False)
+    monkeypatch.delenv("REAGENT_APPROVAL_PROMPT_INSTALL_DIR", raising=False)
+
+    with patch.object(installer.os, "name", "nt"):
+        assert not installer.should_prompt_for_install_dir()
+
+
+def test_manual_windows_install_can_prompt_when_requested(monkeypatch):
+    installer = load_installer_module()
+    monkeypatch.delenv("REAGENT_APPROVAL_START_AFTER_INSTALL", raising=False)
+    monkeypatch.delenv("REAGENT_APPROVAL_SILENT_INSTALL", raising=False)
+    monkeypatch.setenv("REAGENT_APPROVAL_PROMPT_INSTALL_DIR", "1")
 
     with patch.object(installer.os, "name", "nt"):
         assert installer.should_prompt_for_install_dir()

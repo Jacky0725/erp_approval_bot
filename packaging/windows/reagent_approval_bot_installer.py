@@ -188,6 +188,8 @@ def runtime_data_dir() -> Path:
 
 
 def should_prompt_for_install_dir() -> bool:
+    if os.getenv("REAGENT_APPROVAL_PROMPT_INSTALL_DIR", "").strip().lower() not in {"1", "true", "yes", "on"}:
+        return False
     if os.getenv("REAGENT_APPROVAL_START_AFTER_INSTALL", "").strip().lower() in {"1", "true", "yes", "on"}:
         return False
     if os.getenv("REAGENT_APPROVAL_SILENT_INSTALL", "").strip().lower() in {"1", "true", "yes", "on"}:
