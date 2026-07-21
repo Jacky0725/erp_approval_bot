@@ -43,7 +43,7 @@ class RuleEngineTest(unittest.TestCase):
         self.assertTrue(result["need_manual_review"])
 
     def test_unmatched_reagent_needs_manual_review(self) -> None:
-        result = self.engine.classify({"reagent_name": "完全不存在的模拟试剂XYZ"})
+        result = self.engine.classify({"reagent_name": "完全不存在的样品XYZ"})
 
         self.assertEqual(result["final_category"], "")
         self.assertEqual(result["matched_categories"], [])

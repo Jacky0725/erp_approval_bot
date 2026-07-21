@@ -598,6 +598,57 @@ class ApprovalFlowTodoLoopTest(unittest.TestCase):
 
                 self.assertIsNone(suggestion)
 
+    def test_direct_business_rule_suggestion_allows_low_priority_normal_keywords(self) -> None:
+        bot = Bot()
+        engine = RuleEngine.from_excel(ROOT_DIR / "config" / "rules.xlsx")
+
+        for name in (
+            "\u7eb3\u7c73\u6750\u6599",
+            "\u4e19\u70ef\u9178\u5355\u4f53",
+            "\u7845\u80f6\u62c5\u4f53",
+            "\u52a9\u6ee4\u5242",
+            "\u8131\u8272\u5242",
+            "\u6a21\u62df\u6837\u54c1",
+            "\u50ac\u5316\u5242",
+            "\u4eba\u5de5\u6d77\u6c34",
+        ):
+            with self.subTest(name=name):
+                suggestion = bot.direct_business_rule_suggestion(
+                    {
+                        "\u5e8f\u53f7": "28",
+                        "\u8bd5\u5242\u540d\u79f0": name,
+                        "CAS\u53f7": "-",
+                    },
+                    engine,
+                )
+
+                self.assertIsNotNone(suggestion)
+                assert suggestion is not None
+                self.assertEqual(suggestion["\u6700\u7ec8\u5efa\u8bae\u7c7b\u522b"], "\u666e\u901a\u7c7b")
+                self.assertFalse(suggestion["\u9700\u4eba\u5de5\u590d\u6838"])
+                self.assertEqual(suggestion["\u67e5\u8be2\u6765\u6e90"], "business_rule")
+
+    def test_direct_business_rule_suggestion_skips_low_priority_normal_conflicts(self) -> None:
+        bot = Bot()
+        engine = RuleEngine.from_excel(ROOT_DIR / "config" / "rules.xlsx")
+
+        for name in (
+            "\u7eb3\u7c73\u786b\u9178\u94ec\u94be",
+            "\u6c5e\u50ac\u5316\u5242",
+            "3-Bromo-6-nitroindole \u5355\u4f53",
+        ):
+            with self.subTest(name=name):
+                suggestion = bot.direct_business_rule_suggestion(
+                    {
+                        "\u5e8f\u53f7": "29",
+                        "\u8bd5\u5242\u540d\u79f0": name,
+                        "CAS\u53f7": "-",
+                    },
+                    engine,
+                )
+
+                self.assertIsNone(suggestion)
+
     def test_parallel_processing_keeps_table_order_with_direct_rules(self) -> None:
         class OrderedBot(Bot):
             def __init__(self, root_dir: Path) -> None:

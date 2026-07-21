@@ -250,6 +250,15 @@ class RuleEngine:
                 ),
             )
 
+        if not matches and self._is_low_priority_business_normal_name(reagent_info):
+            return {
+                "final_category": NORMAL_CATEGORY,
+                "matched_categories": [NORMAL_CATEGORY],
+                "reason": "试剂名称命中低优先级普通类业务关键词（纳米/单体/担体/助滤/脱色/模拟/催化/人工），且未命中其它风险类别，按普通类处理。",
+                "confidence": 0.9,
+                "need_manual_review": False,
+            }
+
         if not matches:
             if reagent_info.get("allow_default_normal"):
                 return {
@@ -753,6 +762,33 @@ class RuleEngine:
         return RuleEngine._is_pharmacopoeia_color_standard(reagent_info) or any(
             RuleEngine._normalize_text(token) in name_text for token in tokens
         )
+
+    @staticmethod
+    def _is_low_priority_business_normal_name(reagent_info: dict[str, Any]) -> bool:
+        name_text = RuleEngine._normalize_text(
+            " ".join(
+                str(reagent_info.get(key) or "")
+                for key in (
+                    "name",
+                    "reagent_name",
+                    "chemical_name",
+                    "standard_name",
+                    "cleaned_name",
+                    "english_name",
+                )
+            )
+        )
+        tokens = (
+            "\u7eb3\u7c73",
+            "\u5355\u4f53",
+            "\u62c5\u4f53",
+            "\u52a9\u6ee4",
+            "\u8131\u8272",
+            "\u6a21\u62df",
+            "\u50ac\u5316",
+            "\u4eba\u5de5",
+        )
+        return any(RuleEngine._normalize_text(token) in name_text for token in tokens)
 
     @staticmethod
     def _is_hydrochloride_salt(reagent_info: dict[str, Any]) -> bool:

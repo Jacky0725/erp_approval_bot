@@ -212,6 +212,51 @@ class StructuredRulesTest(unittest.TestCase):
                 self.assertEqual(result["final_category"], "\u672a\u77e5\u7c7b")
                 self.assertTrue(result["need_manual_review"])
 
+    def test_low_priority_business_normal_keywords_apply_without_other_matches(self) -> None:
+        names = [
+            "\u7eb3\u7c73\u6750\u6599",
+            "\u4e19\u70ef\u9178\u5355\u4f53",
+            "\u7845\u80f6\u62c5\u4f53",
+            "\u52a9\u6ee4\u5242",
+            "\u8131\u8272\u5242",
+            "\u6a21\u62df\u6837\u54c1",
+            "\u50ac\u5316\u5242",
+            "\u4eba\u5de5\u6d77\u6c34",
+        ]
+        for name in names:
+            with self.subTest(name=name):
+                result = self.engine.classify(
+                    {
+                        "reagent_name": name,
+                        "standard_name": name,
+                        "text": name,
+                    }
+                )
+
+                self.assertEqual(result["final_category"], "\u666e\u901a\u7c7b")
+                self.assertFalse(result["need_manual_review"])
+
+    def test_low_priority_business_normal_keywords_yield_to_other_categories(self) -> None:
+        cases = [
+            ("\u7eb3\u7c73\u786b\u9178\u94ec\u94be", "\u91cd\u91d1\u5c5e\u7c7b"),
+            ("\u6c5e\u50ac\u5316\u5242", "\u4e0d\u5efa\u8bae\u63a5\u6536\u7c7b"),
+            ("3-Bromo-6-nitroindole \u5355\u4f53", "\u5f02\u5473"),
+            ("\u5432\u54da\u4eba\u5de5\u5408\u6210\u7269", "\u5f02\u5473"),
+        ]
+        for name, expected in cases:
+            with self.subTest(name=name):
+                result = self.engine.classify(
+                    {
+                        "reagent_name": name,
+                        "standard_name": name,
+                        "english_name": name,
+                        "text": name,
+                        "allow_default_normal": True,
+                    }
+                )
+
+                self.assertEqual(result["final_category"], expected)
+
     def test_indole_derivative_matches_odor_class(self) -> None:
         result = self.engine.classify(
             {
