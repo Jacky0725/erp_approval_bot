@@ -53,6 +53,12 @@ WEB_RUN_STATE_PATH = LOG_DIR / "web_run_state.yaml"
 TODO_TASKS_PATH = LOG_DIR / "todo_tasks.xlsx"
 TODO_TASKS_JSON_PATH = LOG_DIR / "todo_tasks.json"
 
+WEB_WRITE_MODE_LABELS = {
+    "multi_page": "全清单分页保存",
+    "generate_library": "保存并生成试剂库",
+}
+RETIRED_WEB_WRITE_MODES = {"disabled", "test_one", "save_one", "single_page", ""}
+
 
 WORKFLOW_STEPS = [
     {"id": "login", "label": "登录 ERP"},
@@ -64,6 +70,15 @@ WORKFLOW_STEPS = [
     {"id": "rule", "label": "规则判定"},
     {"id": "write", "label": "网页写入"},
 ]
+
+
+def normalize_web_write_mode(value: Any) -> str:
+    normalized = str(value or "").strip().lower()
+    if normalized in WEB_WRITE_MODE_LABELS:
+        return normalized
+    if normalized in RETIRED_WEB_WRITE_MODES:
+        return "multi_page"
+    return "multi_page"
 
 
 BLOCKING_REVIEW_STATUSES = {
@@ -1331,13 +1346,16 @@ def runtime_config_snapshot() -> dict[str, Any]:
         "target_list_number": os.getenv("TARGET_LIST_NUMBER", ""),
         "process_all_todos": os.getenv("PROCESS_ALL_TODOS", "false"),
         "process_all_todos_max": os.getenv("PROCESS_ALL_TODOS_MAX", "50"),
-        "approval_write_mode": os.getenv(
-            "APPROVAL_WRITE_MODE",
-            str(approval.get("write_mode", "disabled")),
+        "approval_write_mode": normalize_web_write_mode(
+            os.getenv("APPROVAL_WRITE_MODE", str(approval.get("write_mode", "multi_page")))
         ),
         "approval_write_min_confidence": os.getenv(
             "APPROVAL_WRITE_MIN_CONFIDENCE",
             str(approval.get("write_min_confidence", 0.8)),
+        ),
+        "approval_write_batch_size": os.getenv(
+            "APPROVAL_WRITE_BATCH_SIZE",
+            str(approval.get("write_batch_size", 3)),
         ),
         "approval_parallel_workers": os.getenv(
             "APPROVAL_PARALLEL_WORKERS",
@@ -1349,7 +1367,7 @@ def runtime_config_snapshot() -> dict[str, Any]:
         "scheduler_daily_time": schedule.get("daily_time", "16:00"),
         "scheduler_use_default_run_policy": "true" if schedule.get("use_default_run_policy", True) else "false",
         "scheduler_process_all_todos_max": str(schedule.get("process_all_todos_max", 50)),
-        "scheduler_approval_write_mode": schedule.get("approval_write_mode", "multi_page"),
+        "scheduler_approval_write_mode": normalize_web_write_mode(schedule.get("approval_write_mode", "multi_page")),
         "scheduler_approval_write_min_confidence": str(schedule.get("approval_write_min_confidence", "0.8")),
         "scheduler_auto_pass": "true" if schedule.get("auto_pass") else "false",
         "scheduler_skip_manual_review_lists": "true" if schedule.get("skip_manual_review_lists", True) else "false",
@@ -1384,8 +1402,9 @@ def save_runtime_config(form: dict[str, str]) -> dict[str, Any]:
         "TARGET_LIST_NUMBER": form.get("target_list_number", "").strip(),
         "PROCESS_ALL_TODOS": form.get("process_all_todos", "false").strip().lower(),
         "PROCESS_ALL_TODOS_MAX": form.get("process_all_todos_max", "50").strip() or "50",
-        "APPROVAL_WRITE_MODE": form.get("approval_write_mode", "disabled").strip() or "disabled",
+        "APPROVAL_WRITE_MODE": normalize_web_write_mode(form.get("approval_write_mode", "multi_page")),
         "APPROVAL_WRITE_MIN_CONFIDENCE": form.get("approval_write_min_confidence", "0.8").strip() or "0.8",
+        "APPROVAL_WRITE_BATCH_SIZE": form.get("approval_write_batch_size", "3").strip() or "3",
         "LLM_PROVIDER": provider.id,
         "LLM_BASE_URL": llm_base_url,
         "LLM_MODEL": llm_model,
@@ -1426,6 +1445,10 @@ def save_runtime_config(form: dict[str, str]) -> dict[str, Any]:
         env_updates["APPROVAL_WRITE_MIN_CONFIDENCE"],
         approval.get("write_min_confidence", 0.8),
     )
+    approval["write_batch_size"] = coerce_int(
+        env_updates["APPROVAL_WRITE_BATCH_SIZE"],
+        approval.get("write_batch_size", 3),
+    )
     approval["parallel_workers"] = coerce_int(
         form.get("approval_parallel_workers", ""),
         approval.get("parallel_workers", 3),
@@ -1446,9 +1469,8 @@ def save_runtime_config(form: dict[str, str]) -> dict[str, Any]:
         form.get("scheduler_process_all_todos_max", ""),
         scheduler.get("process_all_todos_max", 50),
     )
-    scheduler["approval_write_mode"] = (
-        form.get("scheduler_approval_write_mode", "").strip()
-        or scheduler.get("approval_write_mode", "multi_page")
+    scheduler["approval_write_mode"] = normalize_web_write_mode(
+        form.get("scheduler_approval_write_mode", "") or scheduler.get("approval_write_mode", "multi_page")
     )
     scheduler["approval_write_min_confidence"] = (
         form.get("scheduler_approval_write_min_confidence", "").strip()

@@ -112,6 +112,7 @@ class ApprovalFlowMixin:
         stage_logger = getattr(self, "stage_logger", None) or StageLogger()
         self.stage_logger = stage_logger
         self.save_results = []
+        self.web_write_failures = []
         self.auto_match_succeeded = False
         self.pagination_check_succeeded = False
         with stage_logger.stage("perform_auto_match"):
@@ -152,6 +153,9 @@ class ApprovalFlowMixin:
 
         with stage_logger.stage("write_approval_suggestions"):
             saved_paths = self.save_approval_suggestions_outputs(suggestions)
+            failure_path = self.write_web_write_failures()
+            if failure_path is not None:
+                saved_paths.append(failure_path)
         print(f"Saved approval suggestions: {saved_paths[0] if saved_paths else '-'}")
         self.record_save_result(
             "local_approval_suggestions",
@@ -168,19 +172,24 @@ class ApprovalFlowMixin:
         max_todos = self.max_process_all_todos_count()
 
         try:
-            self.enter_reagent_judgement_page(page)
-            tasks = self.read_all_todo_tasks(page)
-            all_list_numbers = self.todo_list_numbers(tasks)
-            list_numbers = self.filter_scheduled_todo_list_numbers(all_list_numbers)
-            print(f"Todo list refresh: {len(all_list_numbers)} total task(s) across all visible todo pages.")
-            if len(list_numbers) != len(all_list_numbers):
-                print(f"Scheduled review filter kept {len(list_numbers)} task(s) for automatic approval.")
-
-            for list_number in list_numbers:
+            while True:
                 if len(processed_list_numbers) >= max_todos:
                     break
-                if list_number in processed_list_numbers:
-                    continue
+
+                self.enter_reagent_judgement_page(page)
+                tasks = self.read_all_todo_tasks(page)
+                all_list_numbers = self.todo_list_numbers(tasks)
+                list_numbers = self.filter_scheduled_todo_list_numbers(all_list_numbers)
+                print(f"Todo list refresh: {len(all_list_numbers)} total task(s) across all visible todo pages.")
+                if len(list_numbers) != len(all_list_numbers):
+                    print(f"Scheduled review filter kept {len(list_numbers)} task(s) for automatic approval.")
+
+                list_number = self.next_unprocessed_list_number(
+                    [{"试剂清单号": item} for item in list_numbers],
+                    processed_list_numbers,
+                )
+                if not list_number:
+                    break
 
                 print(f"Processing todo detail {len(processed_list_numbers) + 1}: {list_number}")
                 self.target_list_number = list_number
@@ -203,7 +212,6 @@ class ApprovalFlowMixin:
         processed_count = 0
 
         try:
-            self.enter_reagent_judgement_page(page)
             print(f"Selected todo list number(s): {', '.join(selected)}")
 
             for list_number in selected:
@@ -211,9 +219,22 @@ class ApprovalFlowMixin:
                     print(f"Stopped selected-todo processing after PROCESS_ALL_TODOS_MAX={max_todos}.")
                     break
 
+                normalized_list_number = self.extract_list_number(list_number)
+                self.enter_reagent_judgement_page(page)
+                current_todos = self.todo_list_numbers(self.read_all_todo_tasks(page))
+                if normalized_list_number not in current_todos:
+                    print(
+                        f"Selected todo skipped because it is no longer in the current ERP todo list: {list_number}"
+                    )
+                    if current_todos:
+                        print("Current ERP todo list numbers:")
+                        for current in current_todos:
+                            print(f"- {current}")
+                    continue
+
                 processed_count += 1
-                print(f"Processing selected todo detail {processed_count}: {list_number}")
-                self.target_list_number = list_number
+                print(f"Processing selected todo detail {processed_count}: {normalized_list_number}")
+                self.target_list_number = normalized_list_number
                 self.generate_approval_suggestions(page)
                 self.enter_reagent_judgement_page(page)
         finally:
@@ -378,7 +399,10 @@ class ApprovalFlowMixin:
                         break
                     continue
                 if self.approval_write_mode() == "multi_page" and write_result.get("attempted"):
-                    print("Multi-page mode saved one reagent; re-sorting and re-reading the current page.")
+                    print(
+                        "Multi-page mode completed a serial write batch; "
+                        "re-sorting and re-reading the current page."
+                    )
                     try:
                         self.sort_property_column_until_unmatched_visible(page)
                     except Exception as error:
@@ -547,7 +571,11 @@ class ApprovalFlowMixin:
                 )
                 continue
 
-            memory_match = memory.lookup(cas=cas, raw_name=reagent_name)
+            memory_match = self.lookup_reusable_memory(
+                memory,
+                cas=cas,
+                raw_name=reagent_name,
+            )
             if memory_match:
                 if not self.memory_match_is_safe(reagent, memory_match, rule_engine=rule_engine):
                     self.disable_unsafe_memory_match(memory, memory_match, reagent)
@@ -595,7 +623,8 @@ class ApprovalFlowMixin:
                     "reason": f"name normalization failed before memory lookup: {error}",
                 }
 
-            memory_match = memory.lookup(
+            memory_match = self.lookup_reusable_memory(
+                memory,
                 cas=name_result.get("cas") or cas,
                 standard_name=name_result.get("standard_name", ""),
                 cleaned_name=name_result.get("cleaned_name", ""),
@@ -689,6 +718,25 @@ class ApprovalFlowMixin:
             self.remember_erp_suggestion(memory, suggestions_by_index[item["index"]])
 
         return [suggestions_by_index[index] for index in sorted(suggestions_by_index)]
+
+    @classmethod
+    def lookup_reusable_memory(
+        cls,
+        memory: ReagentMemory,
+        *,
+        cas: str = "",
+        standard_name: str = "",
+        cleaned_name: str = "",
+        raw_name: str = "",
+    ) -> dict[str, Any] | None:
+        normalized_cas = cls.normalize_cas(cas)
+        if normalized_cas and normalized_cas not in {"-", "无", "n/a", "na", "none"}:
+            return memory.lookup(cas=normalized_cas)
+        return memory.lookup(
+            standard_name=standard_name,
+            cleaned_name=cleaned_name,
+            raw_name=raw_name,
+        )
 
     def queue_manual_review_if_suggestion_requires_it(
         self,
@@ -1314,11 +1362,13 @@ class ApprovalFlowMixin:
         elif mode in {"single_page", "generate_library"}:
             pass
         elif mode == "multi_page":
+            batch_size = self.approval_write_batch_size()
             print(
-                "Multi-page write mode uses single-row transactions; "
-                f"1 of {len(candidates)} writable candidate(s) will be saved before re-reading the page."
+                "Multi-page write mode uses serial per-row transactions; "
+                f"{min(batch_size, len(candidates))} of {len(candidates)} writable candidate(s) "
+                "will be saved before re-reading the page."
             )
-            candidates = candidates[:1]
+            candidates = candidates[:batch_size]
         else:
             print(f"Unknown APPROVAL_WRITE_MODE={mode}; no webpage fields will be changed.")
             return result
@@ -1454,9 +1504,15 @@ class ApprovalFlowMixin:
             )
             if verified:
                 result["handled"].add(work_key)
+                self.clear_web_write_failure(suggestion)
                 consecutive_failures = 0
                 if not self.settle_after_successful_write(page, writer, sequence):
                     result["failed"].add(work_key)
+                    self.record_web_write_failure(
+                        suggestion,
+                        category,
+                        "保存后页面仍处于编辑状态，程序无法确认该行已稳定完成。",
+                    )
                     print(
                         f"Page edit state did not settle after saving sequence {sequence}; "
                         "the current page will be stabilized before continuing."
@@ -1465,6 +1521,11 @@ class ApprovalFlowMixin:
                         break
             else:
                 result["failed"].add(work_key)
+                self.record_web_write_failure(
+                    suggestion,
+                    category,
+                    last_failure_detail or f"could not write {category}",
+                )
                 self.add_manual_review_item_from_write_failure(
                     suggestion,
                     last_failure_detail or f"could not write {category}",
@@ -1472,8 +1533,8 @@ class ApprovalFlowMixin:
                 consecutive_failures += 1
                 if mode == "multi_page":
                     print(
-                        "Stopping this multi-page write round after a failed webpage write; "
-                        "the failed reagent was recorded according to its suggestion confidence and the page will be re-sorted/re-read."
+                        "Stopping this multi-page write batch after a failed webpage write; "
+                        "the failed reagent was recorded and the page will be re-sorted/re-read."
                     )
                     if not self.stabilize_reagent_detail_after_write_failure(page):
                         print("Stopping this multi-page write round because the page could not be stabilized.")
@@ -1492,6 +1553,92 @@ class ApprovalFlowMixin:
                 return result
 
         return result
+
+    def approval_write_batch_size(self) -> int:
+        approval_settings = getattr(self, "settings", {}).get("approval", {}) or {}
+        value = os.getenv("APPROVAL_WRITE_BATCH_SIZE") or approval_settings.get("write_batch_size", 3)
+        try:
+            return max(1, min(10, int(value)))
+        except (TypeError, ValueError):
+            return 3
+
+    def record_web_write_failure(self, suggestion: dict[str, Any], category: str, reason: str) -> None:
+        if getattr(self, "web_write_failures", None) is None:
+            self.web_write_failures = []
+        detail_info = getattr(self, "_current_detail_info", {}) or {}
+        failure_key = self.web_write_failure_key(suggestion)
+        self.web_write_failures = [
+            item
+            for item in self.web_write_failures
+            if str(item.get("_failure_key") or "") != failure_key
+        ]
+        self.web_write_failures.append(
+            {
+                "_failure_key": failure_key,
+                "试剂清单号": self.current_detail_list_number(),
+                "序号": suggestion.get("序号", ""),
+                "试剂名称": suggestion.get("试剂名称", ""),
+                "CAS号": suggestion.get("CAS号", ""),
+                "清洗后名称": suggestion.get("清洗后名称", ""),
+                "标准化名称": suggestion.get("标准化名称", ""),
+                "拟写入物化特性": category,
+                "规则判定类别": suggestion.get("规则判定类别", ""),
+                "最终建议类别": suggestion.get("最终建议类别", ""),
+                "置信度": suggestion.get("置信度", ""),
+                "需人工复核": suggestion.get("需人工复核", ""),
+                "写入失败原因": self.natural_web_write_failure_reason(reason),
+                "客户名称": detail_info.get("客户名称", ""),
+                "申请人": detail_info.get("申请人", ""),
+            }
+        )
+
+    def clear_web_write_failure(self, suggestion: dict[str, Any]) -> None:
+        failures = getattr(self, "web_write_failures", None)
+        if not failures:
+            return
+        failure_key = self.web_write_failure_key(suggestion)
+        self.web_write_failures = [
+            item
+            for item in failures
+            if str(item.get("_failure_key") or "") != failure_key
+        ]
+
+    def web_write_failure_key(self, suggestion: dict[str, Any]) -> str:
+        return f"{self.current_detail_list_number()}::{self.suggestion_work_key(suggestion)}"
+
+    def write_web_write_failures(self) -> Any:
+        failures = getattr(self, "web_write_failures", None) or []
+        output_path = self._log_dir() / "web_write_failures.xlsx"
+        if not failures:
+            try:
+                if output_path.exists():
+                    output_path.unlink()
+                    print(f"Removed stale web write failures: {output_path}")
+            except Exception as error:
+                print(f"Could not remove stale web write failures: {error}")
+            return None
+        dataframe = pd.DataFrame(failures)
+        if "_failure_key" in dataframe.columns:
+            dataframe = dataframe.drop(columns=["_failure_key"])
+        return self.write_excel_with_fallback(dataframe, output_path)
+
+    @staticmethod
+    def natural_web_write_failure_reason(reason: str) -> str:
+        text = str(reason or "").strip()
+        if not text:
+            return "网页写入失败，程序没有拿到明确的失败原因。"
+        if "could not select" in text:
+            category = text.replace("could not select", "").strip()
+            return f"程序打开了技术判定，但没有在物化特性下拉框中成功选中 {category}。"
+        if "row not found" in text:
+            return "当前页没有重新定位到这条试剂，可能是保存后页面刷新、分页或排序变化导致。"
+        if "technical judgement" in text:
+            return "程序没有找到该行的“技术判定”入口，无法进入编辑状态。"
+        if "row shows" in text:
+            return f"程序尝试保存后，页面显示值与预期不一致：{text}。"
+        if "edit" in text:
+            return f"页面编辑状态没有正常恢复：{text}。"
+        return text
 
     def add_manual_review_item_from_write_failure(self, suggestion: dict[str, Any], reason: str) -> None:
         if self.write_failure_can_skip_manual_review(suggestion):
@@ -1784,8 +1931,11 @@ class ApprovalFlowMixin:
         return bool(parts) and all(part in candidates for part in parts)
 
     def approval_write_mode(self) -> str:
-        configured = (getattr(self, "settings", {}).get("approval", {}) or {}).get("write_mode", "disabled")
-        return str(os.getenv("APPROVAL_WRITE_MODE") or configured or "disabled").strip().lower()
+        configured = (getattr(self, "settings", {}).get("approval", {}) or {}).get("write_mode", "multi_page")
+        normalized = str(os.getenv("APPROVAL_WRITE_MODE") or configured or "multi_page").strip().lower()
+        if normalized in {"multi_page", "generate_library"}:
+            return normalized
+        return "multi_page"
 
     def high_confidence_write_candidates(self, suggestions: list[dict[str, Any]]) -> list[dict[str, Any]]:
         threshold = float(os.getenv("APPROVAL_WRITE_MIN_CONFIDENCE") or getattr(self, "settings", {}).get("approval", {}).get("write_min_confidence", 0.8))
@@ -1914,6 +2064,7 @@ class ApprovalFlowMixin:
             "\u67e5\u8be2\u5931\u8d25\u539f\u56e0": search_result.get("failure_reason", ""),
             "\u662f\u5426\u4f7f\u7528\u5927\u6a21\u578b\u751f\u6210\u5019\u9009\u540d": search_result.get("used_llm_search_candidates", False),
             "\u5927\u6a21\u578b\u5019\u9009\u641c\u7d22\u8bcd": ", ".join(search_result.get("llm_search_candidates", []) or []),
+            "是否使用LLM知识托底": search_result.get("used_llm_knowledge_fallback", False),
             "\u95ea\u70b9": extracted.get("flash_point", ""),
             "\u6cb8\u70b9": extracted.get("boiling_point", ""),
             "\u6bd2\u6027": extracted.get("toxicity", ""),

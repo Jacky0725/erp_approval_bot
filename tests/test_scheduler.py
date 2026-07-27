@@ -74,7 +74,7 @@ class SchedulerTest(unittest.TestCase):
             )
 
         self.assertEqual(config["process_all_todos_max"], 12)
-        self.assertEqual(config["approval_write_mode"], "single_page")
+        self.assertEqual(config["approval_write_mode"], "multi_page")
         self.assertEqual(config["approval_write_min_confidence"], "0.9")
         self.assertTrue(config["auto_pass"])
 

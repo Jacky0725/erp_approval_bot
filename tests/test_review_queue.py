@@ -122,6 +122,29 @@ class ReviewQueueTest(unittest.TestCase):
         self.assertEqual(len(queue), 2)
         self.assertEqual(queue["cas"].tolist(), ["111-11-1", "222-22-2"])
 
+    def test_existing_manual_review_reason_is_updated(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bot = ReviewQueueBot(root)
+            bot._current_detail_info = {"?????": "SJ1", "???": "tester"}
+            reagent = {
+                "??": "1",
+                "????": "?????",
+                "CAS?": "111-11-1",
+                "??": "10",
+                "????": "g",
+                "????": "1",
+            }
+
+            bot.add_manual_review_item(reagent, {"standard_name": "?????"}, reason="?????")
+            bot.add_manual_review_item(reagent, {"standard_name": "?????"}, reason="??????????")
+
+            queue = pd.read_excel(root / "review_queue.xlsx", dtype=str).fillna("")
+
+        self.assertEqual(len(queue), 1)
+        self.assertIn("?????", queue.loc[0, "reason"])
+        self.assertIn("??????????", queue.loc[0, "reason"])
+
 
 if __name__ == "__main__":
     unittest.main()

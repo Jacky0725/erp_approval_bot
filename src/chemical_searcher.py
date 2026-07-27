@@ -148,6 +148,17 @@ class ChemicalSearcher:
         if nonstandard_reason:
             reason = f"{reason}；{nonstandard_reason}"
 
+        llm_fallback = self._llm_knowledge_fallback(
+            reagent_name=name,
+            cas=cas_no,
+            search_name=search_name,
+            name_result=name_result,
+            failed_queries=failed_queries,
+            reason=reason,
+        )
+        if llm_fallback:
+            return self._remember_result(cache_key, llm_fallback)
+
         return self._remember_result(cache_key, self._manual_result(
             name=search_name or name,
             cas=cas_no,
@@ -342,6 +353,54 @@ class ChemicalSearcher:
             )
         return result
 
+    def _llm_knowledge_fallback(
+        self,
+        reagent_name: str,
+        cas: str,
+        search_name: str,
+        name_result: dict[str, Any],
+        failed_queries: list[str],
+        reason: str,
+    ) -> dict[str, Any] | None:
+        fallback = LlmExtractor(settings=self.settings).generate_knowledge_fallback(
+            {
+                "raw_name": reagent_name,
+                "name": reagent_name,
+                "cas": cas,
+                "standard_name": name_result.get("standard_name", ""),
+                "cleaned_name": name_result.get("cleaned_name", ""),
+                "english_name": name_result.get("english_name", ""),
+                "aliases": name_result.get("aliases", []),
+                "failed_queries": failed_queries,
+                "no_web_evidence_reason": reason,
+            }
+        )
+        raw_text = str(fallback.get("raw_text") or "").strip()
+        if not raw_text:
+            return None
+
+        result = self._result(
+            name=search_name or reagent_name,
+            cas=cas,
+            source="LLM knowledge fallback",
+            url="",
+            raw_text=raw_text,
+        )
+        result["need_manual_review"] = True
+        result["name_normalization"] = name_result
+        result["query"] = search_name or reagent_name or cas
+        result["relevance_passed"] = False
+        result["source_confidence"] = min(self._normalize_confidence(fallback.get("confidence")), 0.65)
+        result["evidence_quality"] = "llm_knowledge_low"
+        result["failure_reason"] = (
+            f"{reason}; no trusted web evidence was found, so low-confidence LLM knowledge fallback was used. "
+            f"{fallback.get('reason') or ''}"
+        ).strip()
+        result["fallback_source"] = "LLM knowledge fallback"
+        result["fallback_url"] = ""
+        result["used_llm_knowledge_fallback"] = True
+        return result
+
     @staticmethod
     def _query_candidates(cas: str, standard_name: str, cleaned_name: str, english_name: str = "") -> list[str]:
         candidates: list[str] = []
@@ -355,6 +414,14 @@ class ChemicalSearcher:
             if value and value not in candidates:
                 candidates.append(value)
         return candidates
+
+    @staticmethod
+    def _normalize_confidence(value: Any) -> float:
+        try:
+            confidence = float(value)
+        except (TypeError, ValueError):
+            return 0.0
+        return max(0.0, min(1.0, confidence))
 
     @staticmethod
     def _validation_names(
