@@ -12,6 +12,17 @@ import yaml
 
 
 STATE_FILENAME = "scheduler_state.yaml"
+ACTIVE_WRITE_MODES = {"multi_page", "generate_library"}
+RETIRED_WRITE_MODES = {"disabled", "test_one", "save_one", "single_page", ""}
+
+
+def normalize_web_write_mode(value: Any) -> str:
+    normalized = str(value or "").strip().lower()
+    if normalized in ACTIVE_WRITE_MODES:
+        return normalized
+    if normalized in RETIRED_WRITE_MODES:
+        return "multi_page"
+    return "multi_page"
 
 
 def normalize_checkbox(value: Any) -> str:
@@ -28,6 +39,7 @@ def scheduler_defaults() -> dict[str, Any]:
         "process_all_todos_max": 50,
         "approval_write_mode": "multi_page",
         "approval_write_min_confidence": "0.8",
+        "approval_write_batch_size": "3",
         "auto_pass": False,
         "skip_manual_review_lists": True,
     }
@@ -51,19 +63,24 @@ def scheduler_config(settings: dict[str, Any] | None) -> dict[str, Any]:
             1,
             coerce_int(os.getenv("PROCESS_ALL_TODOS_MAX") or result.get("process_all_todos_max"), 50),
         )
-        result["approval_write_mode"] = (
+        result["approval_write_mode"] = normalize_web_write_mode(
             os.getenv("APPROVAL_WRITE_MODE")
             or str(approval.get("write_mode") or result.get("approval_write_mode") or "multi_page")
-        ).strip() or "multi_page"
+        )
         result["approval_write_min_confidence"] = (
             os.getenv("APPROVAL_WRITE_MIN_CONFIDENCE")
             or str(approval.get("write_min_confidence") or result.get("approval_write_min_confidence") or "0.8")
         ).strip() or "0.8"
+        result["approval_write_batch_size"] = (
+            os.getenv("APPROVAL_WRITE_BATCH_SIZE")
+            or str(approval.get("write_batch_size") or result.get("approval_write_batch_size") or "3")
+        ).strip() or "3"
         result["auto_pass"] = coerce_bool(os.getenv("AUTO_PASS") or result.get("auto_pass"))
     else:
         result["process_all_todos_max"] = max(1, coerce_int(result.get("process_all_todos_max"), 50))
-        result["approval_write_mode"] = str(result.get("approval_write_mode") or "multi_page").strip() or "multi_page"
+        result["approval_write_mode"] = normalize_web_write_mode(result.get("approval_write_mode") or "multi_page")
         result["approval_write_min_confidence"] = str(result.get("approval_write_min_confidence") or "0.8").strip() or "0.8"
+        result["approval_write_batch_size"] = str(result.get("approval_write_batch_size") or "3").strip() or "3"
         result["auto_pass"] = coerce_bool(result.get("auto_pass"))
     result["skip_manual_review_lists"] = coerce_bool(result.get("skip_manual_review_lists", True))
     return result
@@ -114,6 +131,7 @@ def scheduled_run_options(config: dict[str, Any]) -> dict[str, str]:
         "PROCESS_ALL_TODOS_MAX": str(config.get("process_all_todos_max") or 50),
         "APPROVAL_WRITE_MODE": str(config.get("approval_write_mode") or "multi_page"),
         "APPROVAL_WRITE_MIN_CONFIDENCE": str(config.get("approval_write_min_confidence") or "0.8"),
+        "APPROVAL_WRITE_BATCH_SIZE": str(config.get("approval_write_batch_size") or "3"),
         "AUTO_PASS": normalize_checkbox(config.get("auto_pass")),
         "SCHEDULED_RUN": "true",
         "SCHEDULED_SKIP_MANUAL_REVIEW_LISTS": normalize_checkbox(config.get("skip_manual_review_lists", True)),

@@ -22,5 +22,6 @@ class BrowserBot(
     settings: dict[str, Any]
     root_dir: Path
     save_results: list[dict[str, Any]] | None = None
+    web_write_failures: list[dict[str, Any]] | None = None
     auto_match_succeeded: bool = False
     pagination_check_succeeded: bool = False

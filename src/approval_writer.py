@@ -87,7 +87,11 @@ class ApprovalWriter:
         property_name = str(property_name or "").strip()
         if not property_name:
             return []
-        return erp_candidates_for_rule_category(property_name, self.settings or {})
+        candidates = erp_candidates_for_rule_category(property_name, self.settings or {})
+        erp_options = set(erp_property_options(self.settings or {}))
+        erp_first = [candidate for candidate in candidates if candidate in erp_options]
+        aliases = [candidate for candidate in candidates if candidate not in erp_options]
+        return list(dict.fromkeys([*erp_first, *aliases]))
 
     def save(self, page: Page, row: Locator) -> bool:
         return self._click_row_action(page, row, "\u4fdd\u5b58")
@@ -156,6 +160,10 @@ class ApprovalWriter:
         configured = str(selectors.get("property_select", "") or "").strip()
         candidates = []
         self._scroll_property_column_into_view(page)
+        if self._click_row_property_select(page, row):
+            page.wait_for_timeout(200)
+            if self._visible_property_dropdown(page):
+                return True
         if row is not None:
             candidates.extend(
                 [
@@ -182,9 +190,6 @@ class ApprovalWriter:
                         return True
             except (Error, TimeoutError):
                 continue
-        if self._click_row_property_select(page, row):
-            page.wait_for_timeout(200)
-            return self._visible_property_dropdown(page)
         if self._click_row_peer_select(page, row):
             page.wait_for_timeout(200)
             return self._visible_property_dropdown(page)
@@ -874,6 +879,17 @@ class ApprovalWriter:
             if not candidates:
                 return False
 
+            input_box: Locator | None = None
+            if row is not None:
+                property_input_index = ApprovalWriter._row_property_input_global_index(page, row)
+                if property_input_index is not None:
+                    try:
+                        property_input = page.locator("input[role='combobox']").nth(property_input_index)
+                        if property_input.is_visible(timeout=150):
+                            input_box = property_input
+                    except (Error, TimeoutError):
+                        input_box = None
+
             active_index = page.evaluate(
                 """
                 () => {
@@ -883,8 +899,9 @@ class ApprovalWriter:
                 }
                 """
             )
-            input_box = candidates[-1]
-            if isinstance(active_index, int) and active_index >= 0:
+            if input_box is None:
+                input_box = candidates[-1]
+            if input_box is candidates[-1] and isinstance(active_index, int) and active_index >= 0:
                 all_inputs = page.locator("input[role='combobox']")
                 try:
                     active_input = all_inputs.nth(active_index)
@@ -904,6 +921,67 @@ class ApprovalWriter:
             return True
         except (Error, TimeoutError):
             return False
+
+    @staticmethod
+    def _row_property_input_global_index(page: Page, row: Locator) -> int | None:
+        identity = ApprovalWriter._row_identity(row)
+        try:
+            index = page.evaluate(
+                """
+                ({ rowKey, top, height }) => {
+                  const wantedHeader = '\\u7269\\u5316\\u7279\\u6027';
+                  const visible = (node) => {
+                    if (!node) return false;
+                    const rect = node.getBoundingClientRect();
+                    const style = window.getComputedStyle(node);
+                    return rect.width > 0 && rect.height > 0
+                      && style.visibility !== 'hidden'
+                      && style.display !== 'none';
+                  };
+                  const text = (node) => (node.innerText || node.textContent || '').replace(/\\s+/g, '').trim();
+                  const header = Array.from(document.querySelectorAll('thead th'))
+                    .filter((node) => visible(node) && text(node).includes(wantedHeader))
+                    .map((node) => ({ node, rect: node.getBoundingClientRect() }))
+                    .sort((a, b) => b.rect.width - a.rect.width)[0];
+                  const headerCenter = header ? header.rect.left + header.rect.width / 2 : null;
+                  const rowCenter = Number.isFinite(top)
+                    ? top + (Number.isFinite(height) ? height / 2 : 0)
+                    : null;
+                  const sameRow = (tr) => {
+                    if (!tr) return false;
+                    if (rowKey && tr.getAttribute('data-row-key') === rowKey) return true;
+                    if (Number.isFinite(rowCenter)) {
+                      const rect = tr.getBoundingClientRect();
+                      return Math.abs((rect.top + rect.height / 2) - rowCenter) < 14;
+                    }
+                    return false;
+                  };
+                  const rowNode = Array.from(document.querySelectorAll('tbody tr.ant-table-row')).find(sameRow);
+                  if (!rowNode) return null;
+                  const cells = Array.from(rowNode.querySelectorAll('td')).filter(visible);
+                  let propertyCell = null;
+                  if (Number.isFinite(headerCenter)) {
+                    propertyCell = cells
+                      .map((cell) => {
+                        const rect = cell.getBoundingClientRect();
+                        return { cell, distance: Math.abs((rect.left + rect.width / 2) - headerCenter) };
+                      })
+                      .sort((a, b) => a.distance - b.distance)[0]?.cell;
+                  }
+                  propertyCell = propertyCell || cells.find((cell) => text(cell).includes('\\u9009\\u62e9\\u641c\\u7d22'));
+                  if (!propertyCell) return null;
+                  const input = Array.from(propertyCell.querySelectorAll('input[role="combobox"]')).find(visible);
+                  if (!input) return null;
+                  return Array.from(document.querySelectorAll('input[role="combobox"]')).indexOf(input);
+                }
+                """,
+                identity,
+            )
+            if isinstance(index, int) and index >= 0:
+                return index
+        except (Error, TimeoutError):
+            return None
+        return None
 
     @staticmethod
     def _confirm_property_option_by_keyboard(page: Page, candidate_name: str) -> bool:

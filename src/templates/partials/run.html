@@ -51,6 +51,10 @@
                 最低置信度
                 <input name="approval_write_min_confidence" value="{{ runtime.approval_write_min_confidence }}">
               </label>
+              <label>
+                每批写入条数
+                <input name="approval_write_batch_size" value="{{ runtime.approval_write_batch_size }}">
+              </label>
             </div>
             <div class="switches">
               <label class="check"><input type="checkbox" name="process_all_todos" value="true"> 未勾选清单时处理全部待办</label>

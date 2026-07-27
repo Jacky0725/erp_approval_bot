@@ -131,6 +131,78 @@ class ApprovalSuggestionExportTest(unittest.TestCase):
             aggregate = pd.read_excel(log_dir / "approval_suggestions_all.xlsx")
             self.assertEqual(set(aggregate["试剂清单号"].astype(str)), {"SJ202606300009", "SJ202606300010"})
 
+    def test_web_write_failures_are_exported_with_natural_reason(self) -> None:
+        class ExportBot(ApprovalFlowMixin, ExcelExportsMixin):
+            pass
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            bot = ExportBot()
+            bot.root_dir = Path(temp_dir)
+            bot.settings = {"paths": {"audit_log_dir": "logs"}}
+            bot._current_detail_info = {"当前清单号": "SJ202607200001", "客户名称": "测试客户", "申请人": "tester"}
+            bot.web_write_failures = []
+
+            bot.record_web_write_failure(
+                {
+                    "序号": "9",
+                    "试剂名称": "测试试剂",
+                    "CAS号": "64-17-5",
+                    "清洗后名称": "乙醇",
+                    "标准化名称": "乙醇",
+                    "规则判定类别": "易燃液体",
+                    "最终建议类别": "易燃类",
+                    "置信度": 0.92,
+                    "需人工复核": False,
+                },
+                "易燃类",
+                "could not select 易燃类",
+            )
+            output_path = bot.write_web_write_failures()
+
+            self.assertIsNotNone(output_path)
+            assert output_path is not None
+            frame = pd.read_excel(output_path)
+            self.assertEqual(frame.loc[0, "试剂清单号"], "SJ202607200001")
+            self.assertIn("没有在物化特性下拉框中成功选中 易燃类", frame.loc[0, "写入失败原因"])
+
+    def test_web_write_failure_is_cleared_after_later_success(self) -> None:
+        class ExportBot(ApprovalFlowMixin, ExcelExportsMixin):
+            pass
+
+        bot = ExportBot()
+        bot._current_detail_info = {"当前清单号": "SJ202607200001"}
+        suggestion = {
+            "序号": "9",
+            "试剂名称": "测试试剂",
+            "CAS号": "64-17-5",
+        }
+        bot.web_write_failures = []
+
+        bot.record_web_write_failure(suggestion, "易燃类", "could not select 易燃类")
+        self.assertEqual(len(bot.web_write_failures), 1)
+        bot.clear_web_write_failure(suggestion)
+
+        self.assertEqual(bot.web_write_failures, [])
+
+    def test_empty_web_write_failures_removes_stale_file(self) -> None:
+        class ExportBot(ApprovalFlowMixin, ExcelExportsMixin):
+            pass
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            bot = ExportBot()
+            bot.root_dir = Path(temp_dir)
+            bot.settings = {"paths": {"audit_log_dir": "logs"}}
+            log_dir = Path(temp_dir) / "logs"
+            log_dir.mkdir(parents=True)
+            stale_path = log_dir / "web_write_failures.xlsx"
+            stale_path.write_text("stale", encoding="utf-8")
+            bot.web_write_failures = []
+
+            result = bot.write_web_write_failures()
+
+            self.assertIsNone(result)
+            self.assertFalse(stale_path.exists())
+
 
 class ApprovalFlowTodoLoopTest(unittest.TestCase):
     def test_todo_list_numbers_strip_urgent_suffix(self) -> None:
@@ -174,6 +246,12 @@ class ApprovalFlowTodoLoopTest(unittest.TestCase):
             def enter_reagent_judgement_page(self, page: object) -> None:
                 return None
 
+            def read_all_todo_tasks(self, page: object) -> list[dict[str, str]]:
+                return [
+                    {"\u8bd5\u5242\u6e05\u5355\u53f7": "SJ202606170001"},
+                    {"\u8bd5\u5242\u6e05\u5355\u53f7": "SJ202606170002"},
+                ]
+
             def generate_approval_suggestions(self, page: object) -> None:
                 self.processed.append(self.target_list_number)
 
@@ -182,6 +260,48 @@ class ApprovalFlowTodoLoopTest(unittest.TestCase):
         bot.generate_selected_todo_approval_suggestions(object())
 
         self.assertEqual(bot.processed, ["SJ202606170001", "SJ202606170002"])
+
+    def test_selected_todos_skip_items_no_longer_in_refreshed_todo_list(self) -> None:
+        class SelectedBot(Bot):
+            def __init__(self) -> None:
+                self.target_list_numbers = ["SJ202606170001", "SJ202606170002"]
+                self.processed: list[str] = []
+
+            def enter_reagent_judgement_page(self, page: object) -> None:
+                return None
+
+            def read_all_todo_tasks(self, page: object) -> list[dict[str, str]]:
+                return [{"\u8bd5\u5242\u6e05\u5355\u53f7": "SJ202606170002"}]
+
+            def generate_approval_suggestions(self, page: object) -> None:
+                self.processed.append(self.target_list_number)
+
+        bot = SelectedBot()
+
+        bot.generate_selected_todo_approval_suggestions(object())
+
+        self.assertEqual(bot.processed, ["SJ202606170002"])
+
+    def test_selected_todo_with_urgent_suffix_matches_refreshed_list_number(self) -> None:
+        class SelectedBot(Bot):
+            def __init__(self) -> None:
+                self.target_list_numbers = ["SJ202607200002 加急"]
+                self.processed: list[str] = []
+
+            def enter_reagent_judgement_page(self, page: object) -> None:
+                return None
+
+            def read_all_todo_tasks(self, page: object) -> list[dict[str, str]]:
+                return [{"\u8bd5\u5242\u6e05\u5355\u53f7": "SJ202607200002"}]
+
+            def generate_approval_suggestions(self, page: object) -> None:
+                self.processed.append(self.target_list_number)
+
+        bot = SelectedBot()
+
+        bot.generate_selected_todo_approval_suggestions(object())
+
+        self.assertEqual(bot.processed, ["SJ202607200002"])
 
     def test_all_todos_uses_all_pages_snapshot(self) -> None:
         class AllTodoBot(Bot):
@@ -1097,6 +1217,37 @@ class ApprovalFlowTodoLoopTest(unittest.TestCase):
 
             self.assertFalse(saved)
             self.assertIsNone(memory.lookup(raw_name="\u6d4b\u8bd5\u8bd5\u5242"))
+
+    def test_memory_lookup_with_erp_cas_does_not_fall_back_to_name_only_match(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            memory = ReagentMemory.from_settings(
+                {"paths": {"reagent_memory_sqlite": "data/memory.sqlite"}},
+                root,
+            )
+            memory.add_record(
+                raw_name="多聚甲醛溶液",
+                cleaned_name="多聚甲醛溶液",
+                standard_name="多聚甲醛溶液",
+                cas="",
+                final_category="普通类",
+                confidence=0.95,
+            )
+
+            self.assertIsNone(
+                Bot.lookup_reusable_memory(
+                    memory,
+                    cas="43094-80-0",
+                    raw_name="多聚甲醛溶液",
+                )
+            )
+            self.assertIsNotNone(
+                Bot.lookup_reusable_memory(
+                    memory,
+                    cas="",
+                    raw_name="多聚甲醛溶液",
+                )
+            )
 
     def test_write_failure_for_reusable_suggestion_skips_manual_review_queue(self) -> None:
         class WriteFailureBot(Bot):

@@ -504,9 +504,6 @@
         body.innerHTML = tableEmptyHtml(8, "暂无建议结果", "生成审批建议后，结果会显示在这里。");
         renderEvidence(null);
         return;
-        body.innerHTML = '<tr class="suggestion-empty-row"><td colspan="8">暂无建议结果</td></tr>';
-        renderEvidence(null);
-        return;
       }
       rows.forEach((row) => {
         const manual = String(row["需人工复核"] || "").toLowerCase();

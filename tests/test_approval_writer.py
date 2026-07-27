@@ -17,8 +17,8 @@ class ApprovalWriterTest(unittest.TestCase):
     def test_strong_reaction_property_alias(self) -> None:
         writer = ApprovalWriter()
 
-        self.assertEqual(writer.property_name_candidates("强反应性"), ["强反应性", "强反应"])
-        self.assertEqual(writer.property_name_candidates("易燃液体"), ["易燃液体", "易燃类"])
+        self.assertEqual(writer.property_name_candidates("强反应性"), ["强反应", "强反应性"])
+        self.assertEqual(writer.property_name_candidates("易燃液体"), ["易燃类", "易燃液体"])
 
     def test_configured_property_aliases_are_used(self) -> None:
         writer = ApprovalWriter(
@@ -31,7 +31,7 @@ class ApprovalWriterTest(unittest.TestCase):
             }
         )
 
-        self.assertEqual(writer.property_name_candidates("易燃液体"), ["易燃液体", "易燃类"])
+        self.assertEqual(writer.property_name_candidates("易燃液体"), ["易燃类", "易燃液体"])
 
 
 class ApprovalWriterDropdownBindingTest(unittest.TestCase):

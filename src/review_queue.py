@@ -204,7 +204,16 @@ class ReviewQueueMixin:
                 )
 
         if not existing_match.empty and bool(existing_match.any()):
-            print(f"Manual review queue already contains search-failure item: {list_number} / {chemical_name}")
+            updated = self._update_existing_manual_review_reason(
+                queue,
+                existing_match,
+                reason,
+            )
+            if updated:
+                review_queue_path = self.write_excel_with_fallback(queue, review_queue_path)
+                print(f"Updated manual review queue reason: {review_queue_path}")
+            else:
+                print(f"Manual review queue already contains search-failure item: {list_number} / {chemical_name}")
             return
 
         row = {
@@ -227,3 +236,36 @@ class ReviewQueueMixin:
         queue = pd.concat([queue, pd.DataFrame([row])], ignore_index=True)
         review_queue_path = self.write_excel_with_fallback(queue, review_queue_path)
         print(f"Added search-failure item to manual review queue: {review_queue_path}")
+
+    @staticmethod
+    def _update_existing_manual_review_reason(
+        queue: pd.DataFrame,
+        existing_match: pd.Series,
+        new_reason: str,
+    ) -> bool:
+        new_reason = str(new_reason or "").strip()
+        if not new_reason:
+            return False
+        reason_column = "reason"
+        if reason_column not in queue.columns:
+            queue[reason_column] = ""
+
+        updated = False
+        timestamp = pd.Timestamp.now().isoformat(timespec="seconds")
+        for index in queue[existing_match].index:
+            old_reason = str(queue.at[index, reason_column] or "").strip()
+            if not old_reason:
+                merged_reason = new_reason
+            elif new_reason in old_reason:
+                continue
+            elif old_reason in new_reason:
+                merged_reason = new_reason
+            else:
+                merged_reason = f"{old_reason} | {new_reason}"
+
+            if merged_reason != old_reason:
+                queue.at[index, reason_column] = merged_reason
+                if "timestamp" in queue.columns:
+                    queue.at[index, "timestamp"] = timestamp
+                updated = True
+        return updated

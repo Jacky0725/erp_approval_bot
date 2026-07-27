@@ -118,8 +118,16 @@ class ChemicalSearcherTest(unittest.TestCase):
         self.assertEqual(result["name_normalization"]["concentration"], "0.1mol/L")
 
     def test_search_failure_returns_manual_review_with_normalization(self) -> None:
+        class NoKnowledgeFallbackExtractor:
+            def __init__(self, *args: Any, **kwargs: Any) -> None:
+                pass
+
+            def generate_knowledge_fallback(self, reagent_info: dict[str, Any]) -> dict[str, Any]:
+                return {"raw_text": "", "reason": "disabled in test", "confidence": 0.0, "used_llm": False}
+
         searcher = RecordingSearcher(root_dir=ROOT_DIR, succeed=False)
-        result = searcher.search("NaOH 0.1mol/L 分析纯")
+        with patch("chemical_searcher.LlmExtractor", NoKnowledgeFallbackExtractor):
+            result = searcher.search("NaOH 0.1mol/L 分析纯")
 
         self.assertTrue(result["need_manual_review"])
         self.assertEqual(result["name_normalization"]["standard_name"], "氢氧化钠")
@@ -335,6 +343,87 @@ class ChemicalSearcherTest(unittest.TestCase):
         self.assertTrue(result["need_manual_review"])
         self.assertEqual(result["fallback_source"], "GuideChem")
         self.assertIn("low", result["failure_reason"])
+
+    def test_llm_knowledge_fallback_is_used_when_no_web_evidence_exists(self) -> None:
+        class FakeExtractor:
+            def __init__(self, *args: Any, **kwargs: Any) -> None:
+                pass
+
+            def generate_search_candidates(self, reagent_info: dict[str, Any]) -> dict[str, Any]:
+                return {"candidates": ["unknown reagent SDS"], "used_llm": True}
+
+            def generate_knowledge_fallback(self, reagent_info: dict[str, Any]) -> dict[str, Any]:
+                return {
+                    "raw_text": (
+                        "LLM knowledge fallback; no web evidence: likely flammable solvent; "
+                        "properties are uncertain and require manual verification."
+                    ),
+                    "reason": "No trusted web evidence was found.",
+                    "confidence": 0.9,
+                    "used_llm": True,
+                }
+
+        class EmptyResearcher:
+            def __init__(self, *args: Any, **kwargs: Any) -> None:
+                pass
+
+            def research(
+                self,
+                queries: list[str],
+                cas: str = "",
+                validation_names: list[str] | None = None,
+                limit: int = 5,
+            ) -> list[ResearchPage]:
+                return []
+
+        searcher = RecordingSearcher(root_dir=ROOT_DIR, succeed=False, allow_fallback=True)
+        with patch("chemical_searcher.LlmExtractor", FakeExtractor), patch("chemical_searcher.WebResearcher", EmptyResearcher):
+            result = searcher.search("unknown reagent")
+
+        self.assertTrue(result["need_manual_review"])
+        self.assertEqual(result["source"], "LLM knowledge fallback")
+        self.assertEqual(result["fallback_source"], "LLM knowledge fallback")
+        self.assertEqual(result["evidence_quality"], "llm_knowledge_low")
+        self.assertLessEqual(result["source_confidence"], 0.65)
+        self.assertTrue(result["used_llm_knowledge_fallback"])
+        self.assertIn("no trusted web evidence", result["failure_reason"])
+
+    def test_llm_knowledge_fallback_handles_non_numeric_confidence(self) -> None:
+        class FakeExtractor:
+            def __init__(self, *args: Any, **kwargs: Any) -> None:
+                pass
+
+            def generate_search_candidates(self, reagent_info: dict[str, Any]) -> dict[str, Any]:
+                return {"candidates": [], "used_llm": False}
+
+            def generate_knowledge_fallback(self, reagent_info: dict[str, Any]) -> dict[str, Any]:
+                return {
+                    "raw_text": "LLM knowledge fallback; no web evidence: uncertain material.",
+                    "reason": "No trusted web evidence was found.",
+                    "confidence": "low",
+                    "used_llm": True,
+                }
+
+        class EmptyResearcher:
+            def __init__(self, *args: Any, **kwargs: Any) -> None:
+                pass
+
+            def research(
+                self,
+                queries: list[str],
+                cas: str = "",
+                validation_names: list[str] | None = None,
+                limit: int = 5,
+            ) -> list[ResearchPage]:
+                return []
+
+        searcher = RecordingSearcher(root_dir=ROOT_DIR, succeed=False, allow_fallback=True)
+        with patch("chemical_searcher.LlmExtractor", FakeExtractor), patch("chemical_searcher.WebResearcher", EmptyResearcher):
+            result = searcher.search("unknown reagent")
+
+        self.assertTrue(result["need_manual_review"])
+        self.assertEqual(result["source_confidence"], 0.0)
+        self.assertEqual(result["evidence_quality"], "llm_knowledge_low")
 
     def test_nonstandard_selenium_name_gets_manual_review_candidates(self) -> None:
         name_result = {

@@ -344,6 +344,7 @@ def api_settings(
     process_all_todos_max: Annotated[str, Form()] = "50",
     approval_write_mode: Annotated[str, Form()] = "multi_page",
     approval_write_min_confidence: Annotated[str, Form()] = "0.8",
+    approval_write_batch_size: Annotated[str, Form()] = "3",
     approval_parallel_workers: Annotated[str, Form()] = "3",
     auto_pass: Annotated[str, Form()] = "",
     scheduler_enabled: Annotated[str, Form()] = "",
@@ -381,6 +382,7 @@ def api_settings(
             "process_all_todos_max": process_all_todos_max,
             "approval_write_mode": approval_write_mode,
             "approval_write_min_confidence": approval_write_min_confidence,
+            "approval_write_batch_size": approval_write_batch_size,
             "approval_parallel_workers": approval_parallel_workers,
             "auto_pass": normalize_checkbox(auto_pass),
             "scheduler_enabled": normalize_checkbox(scheduler_enabled),
@@ -419,6 +421,7 @@ def api_run(
     process_all_todos_max: Annotated[str, Form()] = "50",
     approval_write_mode: Annotated[str, Form()] = "multi_page",
     approval_write_min_confidence: Annotated[str, Form()] = "0.8",
+    approval_write_batch_size: Annotated[str, Form()] = "3",
     auto_pass: Annotated[str, Form()] = "false",
 ) -> JSONResponse:
     allowed_actions = {"suggestions", "todo_export", "debug_capture", "judgement_capture"}
@@ -431,6 +434,7 @@ def api_run(
         process_all_todos_max=process_all_todos_max,
         approval_write_mode=approval_write_mode,
         approval_write_min_confidence=approval_write_min_confidence,
+        approval_write_batch_size=approval_write_batch_size,
         auto_pass=auto_pass,
     )
     return JSONResponse(manager.start(action, options))
@@ -500,6 +504,7 @@ def run_options(
     process_all_todos_max: str,
     approval_write_mode: str,
     approval_write_min_confidence: str,
+    approval_write_batch_size: str,
     auto_pass: str,
 ) -> dict[str, str]:
     return {
@@ -509,6 +514,7 @@ def run_options(
         "PROCESS_ALL_TODOS_MAX": process_all_todos_max.strip() or "50",
         "APPROVAL_WRITE_MODE": normalize_web_write_mode(approval_write_mode),
         "APPROVAL_WRITE_MIN_CONFIDENCE": approval_write_min_confidence.strip() or "0.8",
+        "APPROVAL_WRITE_BATCH_SIZE": approval_write_batch_size.strip() or "3",
         "AUTO_PASS": normalize_checkbox(auto_pass),
     }
 

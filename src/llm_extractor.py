@@ -154,6 +154,77 @@ class LlmExtractor:
     def extract_reagent_fields(self, text: str) -> dict[str, Any]:
         return self.extract_properties(raw_text=text)
 
+    def generate_knowledge_fallback(self, reagent_info: dict[str, Any]) -> dict[str, Any]:
+        """Return low-confidence chemical knowledge when no web evidence exists."""
+        if not self._has_api_key():
+            return {
+                "raw_text": "",
+                "reason": "LLM knowledge fallback skipped because no API key is configured.",
+                "confidence": 0.0,
+                "used_llm": False,
+            }
+
+        prompt = f"""
+No trusted website evidence was found for this reagent. Use only conservative,
+general chemical knowledge to produce a low-confidence physical-property
+summary for later rule-based classification.
+
+Return strict JSON only:
+
+{{
+  "raw_text": string,
+  "reason": string,
+  "confidence": number
+}}
+
+Requirements:
+- Do not claim that this is web evidence.
+- raw_text must clearly start with "LLM knowledge fallback; no web evidence:"
+- Include uncertainty where appropriate.
+- If the name is not a recognizable chemical, say that clearly.
+- Do not decide approval pass/fail.
+- Keep confidence <= 0.65.
+
+reagent_info:
+{json.dumps(reagent_info, ensure_ascii=False)}
+""".strip()
+        try:
+            client = self._client()
+            response = client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "You provide conservative chemical-knowledge fallback summaries as strict JSON. "
+                            "You do not browse the web and you do not make approval decisions."
+                        ),
+                    },
+                    {"role": "user", "content": prompt},
+                ],
+                response_format={"type": "json_object"},
+                temperature=0,
+            )
+            parsed = json.loads(response.choices[0].message.content or "{}")
+        except Exception as error:
+            return {
+                "raw_text": "",
+                "reason": f"LLM knowledge fallback failed: {error}",
+                "confidence": 0.0,
+                "used_llm": False,
+            }
+
+        raw_text = str(parsed.get("raw_text") or "").strip()
+        if raw_text and not raw_text.lower().startswith("llm knowledge fallback; no web evidence:"):
+            raw_text = f"LLM knowledge fallback; no web evidence: {raw_text}"
+        confidence = min(self._normalize_confidence(parsed.get("confidence")), 0.65)
+        return {
+            "raw_text": raw_text,
+            "reason": str(parsed.get("reason") or "Generated low-confidence LLM knowledge fallback.").strip(),
+            "confidence": confidence,
+            "used_llm": bool(raw_text),
+        }
+
     def generate_search_candidates(self, reagent_info: dict[str, Any]) -> dict[str, Any]:
         local_candidates = self._local_search_candidates(reagent_info)
         prompt = f"""
@@ -444,3 +515,9 @@ raw_text:
     def _extract_cas(text: str) -> str:
         match = re.search(r"\b\d{2,7}-\d{2}-\d\b", text)
         return match.group(0) if match else ""
+
+    def _has_api_key(self) -> bool:
+        provider = get_llm_provider(self.provider)
+        if not provider.requires_api_key:
+            return True
+        return bool(resolve_llm_api_key(self.provider))

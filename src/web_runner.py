@@ -56,6 +56,12 @@ TODO_TASKS_PATH = LOG_DIR / "todo_tasks.xlsx"
 TODO_TASKS_JSON_PATH = LOG_DIR / "todo_tasks.json"
 ALLOWED_WEB_WRITE_MODES = {"multi_page", "generate_library"}
 
+WEB_WRITE_MODE_LABELS = {
+    "multi_page": "全清单分页保存",
+    "generate_library": "保存并生成试剂库",
+}
+RETIRED_WEB_WRITE_MODES = {"disabled", "test_one", "save_one", "single_page", ""}
+
 
 WORKFLOW_STEPS = [
     {"id": "login", "label": "登录 ERP"},
@@ -69,9 +75,13 @@ WORKFLOW_STEPS = [
 ]
 
 
-def normalize_web_write_mode(value: str | None, *, default: str = "multi_page") -> str:
-    mode = str(value or "").strip().lower()
-    return mode if mode in ALLOWED_WEB_WRITE_MODES else default
+def normalize_web_write_mode(value: Any, *, default: str = "multi_page") -> str:
+    normalized = str(value or "").strip().lower()
+    if normalized in ALLOWED_WEB_WRITE_MODES:
+        return normalized
+    if normalized in RETIRED_WEB_WRITE_MODES:
+        return "multi_page"
+    return default if default in ALLOWED_WEB_WRITE_MODES else "multi_page"
 
 
 BLOCKING_REVIEW_STATUSES = {
@@ -1457,6 +1467,10 @@ def runtime_config_snapshot() -> dict[str, Any]:
             "APPROVAL_WRITE_MIN_CONFIDENCE",
             str(approval.get("write_min_confidence", 0.8)),
         ),
+        "approval_write_batch_size": os.getenv(
+            "APPROVAL_WRITE_BATCH_SIZE",
+            str(approval.get("write_batch_size", 3)),
+        ),
         "approval_parallel_workers": os.getenv(
             "APPROVAL_PARALLEL_WORKERS",
             str(approval.get("parallel_workers", 3)),
@@ -1504,6 +1518,7 @@ def save_runtime_config(form: dict[str, str]) -> dict[str, Any]:
         "PROCESS_ALL_TODOS_MAX": form.get("process_all_todos_max", "50").strip() or "50",
         "APPROVAL_WRITE_MODE": normalize_web_write_mode(form.get("approval_write_mode", "")),
         "APPROVAL_WRITE_MIN_CONFIDENCE": form.get("approval_write_min_confidence", "0.8").strip() or "0.8",
+        "APPROVAL_WRITE_BATCH_SIZE": form.get("approval_write_batch_size", "3").strip() or "3",
         "LLM_PROVIDER": provider.id,
         "LLM_BASE_URL": llm_base_url,
         "LLM_MODEL": llm_model,
@@ -1546,6 +1561,10 @@ def save_runtime_config(form: dict[str, str]) -> dict[str, Any]:
     approval["write_min_confidence"] = coerce_float(
         env_updates["APPROVAL_WRITE_MIN_CONFIDENCE"],
         approval.get("write_min_confidence", 0.8),
+    )
+    approval["write_batch_size"] = coerce_int(
+        env_updates["APPROVAL_WRITE_BATCH_SIZE"],
+        approval.get("write_batch_size", 3),
     )
     approval["parallel_workers"] = coerce_int(
         form.get("approval_parallel_workers", ""),

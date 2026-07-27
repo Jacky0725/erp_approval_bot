@@ -158,10 +158,12 @@ class WorkflowSummaryTest(unittest.TestCase):
             process_all_todos_max="50",
             approval_write_mode="disabled",
             approval_write_min_confidence="0.8",
+            approval_write_batch_size="3",
             auto_pass="",
         )
 
         self.assertEqual(options["APPROVAL_WRITE_MODE"], "multi_page")
+        self.assertEqual(options["APPROVAL_WRITE_BATCH_SIZE"], "3")
 
 
 if __name__ == "__main__":
