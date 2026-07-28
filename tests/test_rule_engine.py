@@ -23,6 +23,42 @@ class RuleEngineTest(unittest.TestCase):
         self.assertIn("特殊酸", result["matched_categories"])
         self.assertFalse(result["need_manual_review"])
 
+    def test_common_mineral_acid_suppresses_special_acid_suggestion(self) -> None:
+        engine = RuleEngine(
+            rules=[
+                Rule(
+                    category="特殊酸",
+                    explanation="",
+                    examples="",
+                    explanation_keywords=(),
+                    example_keywords=(),
+                ),
+                Rule(
+                    category="常规酸",
+                    explanation="",
+                    examples="",
+                    explanation_keywords=(),
+                    example_keywords=(),
+                ),
+            ],
+            priority=["特殊酸", "常规酸"],
+        )
+
+        for name in ("10%HCL", "2mol HCl", "发烟盐酸", "硝酸", "硫酸"):
+            with self.subTest(name=name):
+                result = engine.classify(
+                    {
+                        "reagent_name": name,
+                        "standard_name": name,
+                        "suggested_categories": ["特殊酸"],
+                    }
+                )
+
+                self.assertEqual(result["final_category"], "常规酸")
+                self.assertIn("常规酸", result["matched_categories"])
+                self.assertNotIn("特殊酸", result["matched_categories"])
+                self.assertFalse(result["need_manual_review"])
+
     def test_uses_priority_when_multiple_categories_match(self) -> None:
         result = self.engine.classify({"reagent_name": "三溴化硼"})
 

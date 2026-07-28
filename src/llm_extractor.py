@@ -64,6 +64,9 @@ Rules:
 - A hydrochloride salt is not hydrochloric acid. Do not infer strong acid,
   special acid, or corrosive acid behavior only from "hydrochloride",
   "\u76d0\u9178\u76d0", or an organic compound name ending with hydrochloride salt.
+- Ordinary hydrochloric acid / HCl / 盐酸, nitric acid / HNO3 / 硝酸,
+  and sulfuric acid / H2SO4 / 硫酸 should be treated as regular acids
+  unless the source material clearly gives another higher-priority risk.
 """.strip()
 
 
@@ -377,19 +380,12 @@ raw_text:
         result = dict(DEFAULT_RESULT)
         result.update({"name": name, "cas": cas})
 
-        special_hidden = "special hazardous chemicals do not display product information" in combined
-        hydrochloric = any(token in combined for token in ("发烟盐酸", "盐酸", "hydrochloric acid", "7647-01-0"))
-        fuming = "发烟" in combined or "fuming" in combined
+        mineral_acid = LlmExtractor._ordinary_mineral_acid_label(combined)
 
-        if hydrochloric:
+        if mineral_acid:
             result["corrosive"] = True
-            categories.extend(["特殊酸", "腐蚀性"])
-            evidence.append("Known hydrochloric acid / 盐酸: corrosive strong acid.")
-            if fuming:
-                categories.insert(0, "发烟类")
-                evidence.append("ERP name contains 发烟/fuming, indicating fuming acid.")
-            if special_hidden:
-                evidence.append("Chemsrc states special hazardous chemicals do not display product information.")
+            categories.extend(["常规酸", "腐蚀性"])
+            evidence.append(f"Known ordinary mineral acid ({mineral_acid}); classify as regular acid by business rule.")
 
         if any(token in combined for token in ("h314", "causes severe skin burns", "corrosive", "r34", "腐蚀")):
             result["corrosive"] = True
@@ -408,6 +404,19 @@ raw_text:
         result["evidence"] = LlmExtractor._dedupe_strings(evidence)
         result["confidence"] = 0.75
         return result
+
+    @staticmethod
+    def _ordinary_mineral_acid_label(text: str) -> str:
+        normalized = text.lower()
+        acid_terms = (
+            ("盐酸", ("hcl", "hydrochloric acid", "7647-01-0", "盐酸")),
+            ("硝酸", ("hno3", "nitric acid", "7697-37-2", "硝酸")),
+            ("硫酸", ("h2so4", "sulfuric acid", "sulphuric acid", "7664-93-9", "硫酸")),
+        )
+        for label, terms in acid_terms:
+            if any(term in normalized for term in terms):
+                return label
+        return ""
 
     @staticmethod
     def _suppress_incompatibility_only_oxidizing(result: dict[str, Any], raw_text: str) -> dict[str, Any]:

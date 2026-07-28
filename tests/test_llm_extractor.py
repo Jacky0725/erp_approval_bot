@@ -12,6 +12,41 @@ from llm_extractor import LlmExtractor  # noqa: E402
 
 
 class LlmExtractorFallbackTest(unittest.TestCase):
+    def test_common_mineral_acids_fallback_to_regular_acid(self) -> None:
+        extractor = LlmExtractor()
+        for name, raw_text in (
+            ("10% HCl", "hydrochloric acid solution CAS 7647-01-0"),
+            ("发烟盐酸", "hydrochloric acid fuming solution"),
+            ("硝酸", "nitric acid solution CAS 7697-37-2"),
+            ("硫酸", "sulfuric acid solution CAS 7664-93-9"),
+        ):
+            with self.subTest(name=name):
+                result = extractor._merge_local_hazard_fallback(
+                    {
+                        "name": name,
+                        "cas": "",
+                        "flash_point": "",
+                        "boiling_point": "",
+                        "toxicity": "",
+                        "corrosive": None,
+                        "oxidizing": None,
+                        "flammable": None,
+                        "water_reactive": None,
+                        "explosive_risk": None,
+                        "heavy_metal": None,
+                        "suggested_categories": [],
+                        "evidence": [],
+                        "confidence": 0.0,
+                    },
+                    raw_text=raw_text,
+                    name=name,
+                    cas="",
+                )
+
+                self.assertTrue(result["corrosive"])
+                self.assertIn("常规酸", result["suggested_categories"])
+                self.assertNotIn("特殊酸", result["suggested_categories"])
+
     def test_fuming_hydrochloric_acid_fallback(self) -> None:
         extractor = LlmExtractor()
         result = extractor._merge_local_hazard_fallback(
@@ -37,8 +72,8 @@ class LlmExtractorFallbackTest(unittest.TestCase):
         )
 
         self.assertTrue(result["corrosive"])
-        self.assertIn("发烟类", result["suggested_categories"])
-        self.assertIn("特殊酸", result["suggested_categories"])
+        self.assertIn("常规酸", result["suggested_categories"])
+        self.assertNotIn("特殊酸", result["suggested_categories"])
         self.assertGreaterEqual(result["confidence"], 0.75)
         self.assertTrue(result["evidence"])
 

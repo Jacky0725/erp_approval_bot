@@ -398,7 +398,10 @@ class RuleEngine:
 
     @staticmethod
     def _category_suggestion_hits(category: str, reagent_info: dict[str, Any]) -> list[str]:
-        if category == "\u7279\u6b8a\u9178" and RuleEngine._is_hydrochloride_salt(reagent_info):
+        if category == "\u7279\u6b8a\u9178" and (
+            RuleEngine._is_hydrochloride_salt(reagent_info)
+            or RuleEngine._is_ordinary_mineral_acid(reagent_info)
+        ):
             return []
         if category == "\u6eb4\u7898\u7c7b":
             return []
@@ -505,8 +508,14 @@ class RuleEngine:
         if category == "\u5f02\u5473":
             hits.extend(RuleEngine._indole_name_hits(reagent_info))
 
-        if category == "\u7279\u6b8a\u9178" and RuleEngine._is_hydrochloride_salt(reagent_info):
+        if category == "\u7279\u6b8a\u9178" and (
+            RuleEngine._is_hydrochloride_salt(reagent_info)
+            or RuleEngine._is_ordinary_mineral_acid(reagent_info)
+        ):
             return []
+
+        if category == "\u5e38\u89c4\u9178" and RuleEngine._is_ordinary_mineral_acid(reagent_info):
+            hits.append("\u76d0\u9178/\u785d\u9178/\u786b\u9178/HCl/HNO3/H2SO4 \u6309\u5e38\u89c4\u9178")
 
         if category == "\u6613\u7206\u7c7b" and RuleEngine._contains_azide(text):
             hits.append("\u53e0\u6c2e/\u53e0\u5316/azide")
@@ -799,6 +808,30 @@ class RuleEngine:
             )
         )
         return "\u76d0\u9178\u76d0" in name_text or "hydrochloride" in name_text
+
+    @staticmethod
+    def _is_ordinary_mineral_acid(reagent_info: dict[str, Any]) -> bool:
+        name_text = RuleEngine._normalize_text(
+            " ".join(
+                str(reagent_info.get(key) or "")
+                for key in ("name", "reagent_name", "chemical_name", "standard_name", "cleaned_name", "english_name")
+            )
+        )
+        if not name_text:
+            return False
+        acid_tokens = (
+            "hcl",
+            "hydrochloricacid",
+            "\u76d0\u9178",
+            "hno3",
+            "nitricacid",
+            "\u785d\u9178",
+            "h2so4",
+            "sulfuricacid",
+            "sulphuricacid",
+            "\u786b\u9178",
+        )
+        return any(token in name_text for token in acid_tokens)
 
     @staticmethod
     def _first_percent_concentration(text: str) -> float | None:
