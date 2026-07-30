@@ -117,6 +117,7 @@
     setCheckbox(settingsForm, "scheduler_skip_manual_review_lists", initialRuntime.scheduler_skip_manual_review_lists || "true");
     setCheckbox(settingsForm, "dingtalk_notification_enabled", initialRuntime.dingtalk_notification_enabled);
     setCheckbox(settingsForm, "dingtalk_at_all", initialRuntime.dingtalk_at_all || "true");
+    setCheckbox(settingsForm, "dingtalk_stream_enabled", initialRuntime.dingtalk_stream_enabled);
     setSelectValue(settingsForm, "scheduler_mode", initialRuntime.scheduler_mode);
     setSelectValue(settingsForm, "scheduler_approval_write_mode", initialRuntime.scheduler_approval_write_mode);
     setText("#writeModeText", approvalWriteModeLabel(initialRuntime.approval_write_mode));
@@ -447,8 +448,8 @@
       state.className = "save-state saved";
       settingsForm.querySelector('[name="erp_password"]').value = "";
       settingsForm.querySelector('[name="llm_api_key"]').value = "";
-      settingsForm.querySelector('[name="dingtalk_webhook"]').value = "";
-      settingsForm.querySelector('[name="dingtalk_secret"]').value = "";
+      settingsForm.querySelector('[name="dingtalk_stream_client_secret"]').value = "";
+      settingsForm.querySelector('[name="dingtalk_stream_api_token"]').value = "";
       settingsForm.querySelector('[name="update_token"]').value = "";
       await refreshStatus({forceReview: true});
     });

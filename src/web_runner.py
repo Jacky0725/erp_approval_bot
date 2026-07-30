@@ -31,6 +31,7 @@ from dingtalk_notifier import (
     dingtalk_notification_config,
     send_task_result_notification,
 )
+from dingtalk_stream_bot import dingtalk_stream_config
 from category_mapper import (
     category_mapping_summary,
     erp_property_options,
@@ -542,7 +543,7 @@ class AutomationJobManager:
                 approval=approval_summary(self.root_dir),
                 review_queue=review_queue_summary(self.root_dir),
             )
-            result = send_task_result_notification(settings, message)
+            result = send_task_result_notification(settings, message, root_dir=self.root_dir)
             if result.get("sent") or result.get("skipped"):
                 return
             self._record_notification_failure(f"DingTalk notification failed: {result.get('error') or result}")
@@ -1426,6 +1427,7 @@ def runtime_config_snapshot() -> dict[str, Any]:
     approval = settings.get("approval", {}) or {}
     schedule = scheduler_config(settings)
     dingtalk = dingtalk_notification_config(settings)
+    dingtalk_stream = dingtalk_stream_config(settings)
     llm = settings.get("llm", {}) or {}
     mapping = category_mapping_summary(settings, ROOT_DIR)
     provider = get_llm_provider(os.getenv("LLM_PROVIDER") or llm.get("provider") or "siliconflow")
@@ -1486,9 +1488,19 @@ def runtime_config_snapshot() -> dict[str, Any]:
         "scheduler_auto_pass": "true" if schedule.get("auto_pass") else "false",
         "scheduler_skip_manual_review_lists": "true" if schedule.get("skip_manual_review_lists", True) else "false",
         "dingtalk_notification_enabled": "true" if dingtalk.get("enabled") else "false",
-        "dingtalk_webhook_configured": bool(os.getenv("DINGTALK_ROBOT_WEBHOOK", "").strip()),
-        "dingtalk_secret_configured": bool(os.getenv("DINGTALK_ROBOT_SECRET", "").strip()),
         "dingtalk_at_all": "true" if dingtalk.get("at_all", True) else "false",
+        "dingtalk_stream_enabled": "true" if dingtalk_stream.get("enabled") else "false",
+        "dingtalk_stream_corp_id": dingtalk_stream.get("corp_id", ""),
+        "dingtalk_stream_agent_id": dingtalk_stream.get("agent_id", ""),
+        "dingtalk_stream_robot_code": dingtalk_stream.get("robot_code", ""),
+        "dingtalk_stream_open_conversation_id": dingtalk_stream.get("open_conversation_id", ""),
+        "dingtalk_stream_client_id": os.getenv(str(dingtalk_stream.get("client_id_env")), ""),
+        "dingtalk_stream_client_secret_configured": bool(
+            os.getenv(str(dingtalk_stream.get("client_secret_env")), "").strip()
+        ),
+        "dingtalk_stream_api_token_configured": bool(
+            os.getenv(str(dingtalk_stream.get("api_token_env")), "").strip()
+        ),
         "llm_provider": provider.id,
         "llm_provider_label": provider.label,
         "llm_provider_options": provider_options(),
@@ -1539,12 +1551,15 @@ def save_runtime_config(form: dict[str, str]) -> dict[str, Any]:
         env_updates["LLM_API_KEY"] = api_key
         env_updates[provider.api_key_env] = api_key
 
-    dingtalk_webhook = form.get("dingtalk_webhook", "").strip()
-    if dingtalk_webhook:
-        env_updates["DINGTALK_ROBOT_WEBHOOK"] = dingtalk_webhook
-    dingtalk_secret = form.get("dingtalk_secret", "").strip()
-    if dingtalk_secret:
-        env_updates["DINGTALK_ROBOT_SECRET"] = dingtalk_secret
+    dingtalk_stream_client_id = form.get("dingtalk_stream_client_id", "").strip()
+    if dingtalk_stream_client_id:
+        env_updates["DINGTALK_STREAM_CLIENT_ID"] = dingtalk_stream_client_id
+    dingtalk_stream_client_secret = form.get("dingtalk_stream_client_secret", "").strip()
+    if dingtalk_stream_client_secret:
+        env_updates["DINGTALK_STREAM_CLIENT_SECRET"] = dingtalk_stream_client_secret
+    dingtalk_stream_api_token = form.get("dingtalk_stream_api_token", "").strip()
+    if dingtalk_stream_api_token:
+        env_updates["DINGTALK_STREAM_API_TOKEN"] = dingtalk_stream_api_token
 
     update_env_file(ENV_PATH, env_updates)
 
@@ -1602,9 +1617,18 @@ def save_runtime_config(form: dict[str, str]) -> dict[str, Any]:
     notification = settings.setdefault("notification", {})
     dingtalk = notification.setdefault("dingtalk", {})
     dingtalk["enabled"] = form.get("dingtalk_notification_enabled", "false").strip().lower() == "true"
-    dingtalk["webhook_env"] = "DINGTALK_ROBOT_WEBHOOK"
-    dingtalk["secret_env"] = "DINGTALK_ROBOT_SECRET"
     dingtalk["at_all"] = form.get("dingtalk_at_all", "false").strip().lower() == "true"
+
+    stream = settings.setdefault("dingtalk_stream", {})
+    stream["enabled"] = form.get("dingtalk_stream_enabled", "false").strip().lower() == "true"
+    stream["corp_id"] = form.get("dingtalk_stream_corp_id", "").strip()
+    stream["agent_id"] = form.get("dingtalk_stream_agent_id", "").strip()
+    stream["robot_code"] = form.get("dingtalk_stream_robot_code", "").strip()
+    stream["open_conversation_id"] = form.get("dingtalk_stream_open_conversation_id", "").strip()
+    stream["client_id_env"] = "DINGTALK_STREAM_CLIENT_ID"
+    stream["client_secret_env"] = "DINGTALK_STREAM_CLIENT_SECRET"
+    stream["api_token_env"] = "DINGTALK_STREAM_API_TOKEN"
+    stream["require_at_in_group"] = True
 
     save_settings(settings)
 

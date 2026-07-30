@@ -24,15 +24,35 @@
         <section class="settings-section">
           <div class="settings-section-head">
             <div>
-              <h3>钉钉机器人通知</h3>
-              <p>任务成功或失败后向钉钉群发送简洁摘要，通知失败只写入运行日志。</p>
+              <h3>钉钉机器人</h3>
+              <p>Stream 机器人负责接收群命令；通知开关用于任务成功或失败后向钉钉群发送简洁摘要。</p>
             </div>
           </div>
+          <div class="settings-subsection">
+            <div class="settings-subsection-head">
+              <h4>Stream 接收命令</h4>
+              <p>在钉钉群里 @机器人 后接收“状态、执行审批、执行审批 &lt;清单号&gt;、帮助”命令。</p>
+            </div>
+          <div class="settings-grid settings-grid-dingtalk-stream">
+            <label class="check settings-check-field"><input type="checkbox" name="dingtalk_stream_enabled" value="true"> 启用 Stream 接收命令</label>
+            <label>CorpId <input name="dingtalk_stream_corp_id" value="{{ runtime.dingtalk_stream_corp_id }}" placeholder="ding..."></label>
+            <label>AgentId <input name="dingtalk_stream_agent_id" value="{{ runtime.dingtalk_stream_agent_id }}" placeholder="4322749407"></label>
+            <label>Robot Code <input name="dingtalk_stream_robot_code" value="{{ runtime.dingtalk_stream_robot_code }}" placeholder="企业机器人 robotCode / App ID"></label>
+            <label>默认群 openConversationId <input name="dingtalk_stream_open_conversation_id" value="{{ runtime.dingtalk_stream_open_conversation_id }}" placeholder="群里 @ 机器人后可自动绑定"></label>
+            <label>Client ID <input name="dingtalk_stream_client_id" value="{{ runtime.dingtalk_stream_client_id }}" placeholder="ding..."></label>
+            <label>Client Secret <input name="dingtalk_stream_client_secret" type="password" placeholder="{% if runtime.dingtalk_stream_client_secret_configured %}已配置，留空则不修改{% else %}留空则尝试使用 API Token{% endif %}"></label>
+            <label>API Token <input name="dingtalk_stream_api_token" type="password" placeholder="{% if runtime.dingtalk_stream_api_token_configured %}已配置，留空则不修改{% else %}钉钉 Stream 模式 API Token{% endif %}"></label>
+          </div>
+          </div>
+          <div class="settings-subsection dingtalk-notify-subsection">
+            <div class="settings-subsection-head">
+              <h4>通知发送</h4>
+              <p>任务成功或失败后发送摘要；通知失败只写入运行日志。</p>
+            </div>
           <div class="settings-grid settings-grid-dingtalk">
             <label class="check settings-check-field"><input type="checkbox" name="dingtalk_notification_enabled" value="true"> 启用钉钉通知</label>
-            <label>钉钉 Webhook <input name="dingtalk_webhook" type="password" placeholder="{% if runtime.dingtalk_webhook_configured %}已配置，留空则不修改{% else %}https://oapi.dingtalk.com/robot/send?...{% endif %}"></label>
-            <label>钉钉加签密钥 <input name="dingtalk_secret" type="password" placeholder="{% if runtime.dingtalk_secret_configured %}已配置，留空则不修改{% else %}可选：SEC...{% endif %}"></label>
             <label class="check settings-check-field"><input type="checkbox" name="dingtalk_at_all" value="true"> 通知时 @ 所有人</label>
+          </div>
           </div>
         </section>
 

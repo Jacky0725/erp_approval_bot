@@ -2604,6 +2604,35 @@ body[data-page="run"] #run .button-row:not(.compact) {
   gap: 10px;
 }
 
+.settings-subsection {
+  display: grid;
+  gap: 10px;
+}
+
+.settings-subsection + .settings-subsection {
+  padding-top: 12px;
+  border-top: 1px solid #edf0f3;
+}
+
+.settings-subsection-head {
+  display: grid;
+  gap: 3px;
+}
+
+.settings-subsection-head h4 {
+  margin: 0;
+  color: #111827;
+  font-size: 13px;
+  font-weight: 740;
+}
+
+.settings-subsection-head p {
+  margin: 0;
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 560;
+}
+
 .settings-grid-connection {
   grid-template-columns: minmax(280px, 2fr) minmax(180px, 1fr) minmax(180px, 1fr);
 }
@@ -2625,7 +2654,11 @@ body[data-page="run"] #run .button-row:not(.compact) {
 }
 
 .settings-grid-dingtalk {
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(2, minmax(220px, 1fr));
+}
+
+.settings-grid-dingtalk-stream {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
 .settings-field-wide {
@@ -3019,7 +3052,8 @@ body[data-page="run"] #run .button-row:not(.compact) {
   .settings-grid-policy,
   .settings-grid-scheduler,
   .settings-grid-scheduler-policy,
-  .settings-grid-dingtalk {
+  .settings-grid-dingtalk,
+  .settings-grid-dingtalk-stream {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
@@ -3049,6 +3083,7 @@ body[data-page="run"] #run .button-row:not(.compact) {
   .settings-grid-scheduler,
   .settings-grid-scheduler-policy,
   .settings-grid-dingtalk,
+  .settings-grid-dingtalk-stream,
   .scheduler-status {
     grid-template-columns: 1fr;
   }

@@ -16,6 +16,7 @@ from fastapi.templating import Jinja2Templates
 from dotenv import load_dotenv
 
 from llm_providers import fetch_provider_models, provider_options
+from dingtalk_stream_bot import DingTalkStreamBot
 from scheduler import ApprovalScheduler
 from update_checker import check_for_update, current_process_is_frozen, download_update, launch_update_package
 from web_runner import (
@@ -48,14 +49,23 @@ LOG_DIR = ROOT_DIR / "data" / "logs"
 
 load_dotenv(ENV_PATH, override=True)
 scheduler = ApprovalScheduler(root_dir=ROOT_DIR, settings_loader=load_settings, job_manager=manager)
+dingtalk_stream_bot = DingTalkStreamBot(
+    settings_loader=load_settings,
+    job_manager=manager,
+    run_options_builder=lambda list_number: dingtalk_run_options(list_number),
+    status_provider=manager.status,
+    root_dir=ROOT_DIR,
+)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     scheduler.start()
+    dingtalk_stream_bot.start()
     try:
         yield
     finally:
+        dingtalk_stream_bot.stop()
         scheduler.stop()
 
 
@@ -136,6 +146,7 @@ def dashboard_context(request: Request, active_page: str) -> dict:
         "review_queue": review_queue_summary(),
         "todo_tasks": todo_tasks_summary(),
         "scheduler": scheduler.status(),
+        "dingtalk_stream": dingtalk_stream_bot.status(),
         "static_version": static_asset_version(),
         "dashboard_data": {
             "activePage": active_page,
@@ -148,6 +159,7 @@ def dashboard_context(request: Request, active_page: str) -> dict:
                 "model": runtime.get("llm_model") or "",
             },
             "scheduler": scheduler.status(),
+            "dingtalkStream": dingtalk_stream_bot.status(),
             "updates": {
                 "currentVersion": runtime.get("app_version") or "",
                 "frozen": runtime.get("app_frozen") or False,
@@ -215,6 +227,7 @@ def api_status() -> JSONResponse:
             "review_queue": review_queue_summary(),
             "todo_tasks": todo_tasks_summary(),
             "scheduler": scheduler.status(),
+            "dingtalk_stream": dingtalk_stream_bot.status(),
         }
     )
 
@@ -358,9 +371,15 @@ def api_settings(
     scheduler_auto_pass: Annotated[str, Form()] = "",
     scheduler_skip_manual_review_lists: Annotated[str, Form()] = "",
     dingtalk_notification_enabled: Annotated[str, Form()] = "",
-    dingtalk_webhook: Annotated[str, Form()] = "",
-    dingtalk_secret: Annotated[str, Form()] = "",
     dingtalk_at_all: Annotated[str, Form()] = "",
+    dingtalk_stream_enabled: Annotated[str, Form()] = "",
+    dingtalk_stream_corp_id: Annotated[str, Form()] = "",
+    dingtalk_stream_agent_id: Annotated[str, Form()] = "",
+    dingtalk_stream_robot_code: Annotated[str, Form()] = "",
+    dingtalk_stream_open_conversation_id: Annotated[str, Form()] = "",
+    dingtalk_stream_client_id: Annotated[str, Form()] = "",
+    dingtalk_stream_client_secret: Annotated[str, Form()] = "",
+    dingtalk_stream_api_token: Annotated[str, Form()] = "",
     update_token: Annotated[str, Form()] = "",
     llm_provider: Annotated[str, Form()] = "siliconflow",
     llm_base_url: Annotated[str, Form()] = "",
@@ -396,9 +415,15 @@ def api_settings(
             "scheduler_auto_pass": normalize_checkbox(scheduler_auto_pass),
             "scheduler_skip_manual_review_lists": normalize_checkbox(scheduler_skip_manual_review_lists),
             "dingtalk_notification_enabled": normalize_checkbox(dingtalk_notification_enabled),
-            "dingtalk_webhook": dingtalk_webhook,
-            "dingtalk_secret": dingtalk_secret,
             "dingtalk_at_all": normalize_checkbox(dingtalk_at_all),
+            "dingtalk_stream_enabled": normalize_checkbox(dingtalk_stream_enabled),
+            "dingtalk_stream_corp_id": dingtalk_stream_corp_id,
+            "dingtalk_stream_agent_id": dingtalk_stream_agent_id,
+            "dingtalk_stream_robot_code": dingtalk_stream_robot_code,
+            "dingtalk_stream_open_conversation_id": dingtalk_stream_open_conversation_id,
+            "dingtalk_stream_client_id": dingtalk_stream_client_id,
+            "dingtalk_stream_client_secret": dingtalk_stream_client_secret,
+            "dingtalk_stream_api_token": dingtalk_stream_api_token,
             "update_token": update_token,
             "llm_provider": llm_provider,
             "llm_base_url": llm_base_url,
@@ -410,7 +435,15 @@ def api_settings(
         }
     )
     scheduler.reload()
-    return JSONResponse({"saved": True, "runtime": snapshot, "scheduler": scheduler.status()})
+    dingtalk_stream_bot.reload()
+    return JSONResponse(
+        {
+            "saved": True,
+            "runtime": snapshot,
+            "scheduler": scheduler.status(),
+            "dingtalk_stream": dingtalk_stream_bot.status(),
+        }
+    )
 
 
 @app.post("/api/run")
@@ -517,6 +550,20 @@ def run_options(
         "APPROVAL_WRITE_BATCH_SIZE": approval_write_batch_size.strip() or "3",
         "AUTO_PASS": normalize_checkbox(auto_pass),
     }
+
+
+def dingtalk_run_options(list_number: str = "") -> dict[str, str]:
+    runtime = runtime_config_snapshot()
+    target_list_number = str(list_number or "").strip()
+    return run_options(
+        target_list_numbers=target_list_number,
+        process_all_todos="false" if target_list_number else "true",
+        process_all_todos_max=str(runtime.get("process_all_todos_max") or "50"),
+        approval_write_mode=str(runtime.get("approval_write_mode") or "multi_page"),
+        approval_write_min_confidence=str(runtime.get("approval_write_min_confidence") or "0.8"),
+        approval_write_batch_size=str(runtime.get("approval_write_batch_size") or "3"),
+        auto_pass=str(runtime.get("auto_pass") or "false"),
+    )
 
 
 def normalize_checkbox(value: str) -> str:
