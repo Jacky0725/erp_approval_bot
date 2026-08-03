@@ -11,3 +11,4 @@ config/rule_candidates.xlsx
 /rules.xlsx
 /dist/
 scripts/create_desktop_shortcut.ps1
+.codex-ui-audit/
