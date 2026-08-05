@@ -6,6 +6,7 @@ from typing import Any
 from playwright.sync_api import Error, Locator, Page, TimeoutError
 
 from category_mapper import erp_candidates_for_rule_category, erp_property_options
+from ui_waits import wait_until_dropdown_options, wait_until_spinner_hidden
 
 
 @dataclass
@@ -161,7 +162,7 @@ class ApprovalWriter:
         candidates = []
         self._scroll_property_column_into_view(page)
         if self._click_row_property_select(page, row):
-            page.wait_for_timeout(200)
+            wait_until_dropdown_options(page, timeout_ms=2500)
             if self._visible_property_dropdown(page):
                 return True
         if row is not None:
@@ -185,13 +186,13 @@ class ApprovalWriter:
             try:
                 if candidate.count() and candidate.is_visible():
                     candidate.click(timeout=3000)
-                    page.wait_for_timeout(200)
+                    wait_until_dropdown_options(page, timeout_ms=2500)
                     if self._visible_property_dropdown(page):
                         return True
             except (Error, TimeoutError):
                 continue
         if self._click_row_peer_select(page, row):
-            page.wait_for_timeout(200)
+            wait_until_dropdown_options(page, timeout_ms=2500)
             return self._visible_property_dropdown(page)
         return False
 
@@ -200,8 +201,10 @@ class ApprovalWriter:
             return True
         if ApprovalWriter._click_property_option(page, candidate_name):
             return True
+        if row is not None and ApprovalWriter._search_and_select_bound_property_option(page, candidate_name, row):
+            return True
         if ApprovalWriter._type_property_search_text_real(page, candidate_name, row):
-            page.wait_for_timeout(300)
+            wait_until_dropdown_options(page, timeout_ms=2500)
             if row is not None and ApprovalWriter._click_property_option_in_bound_dropdown(page, candidate_name, row):
                 return True
             if ApprovalWriter._click_property_option(page, candidate_name):
@@ -221,7 +224,7 @@ class ApprovalWriter:
         if self._select_property_option_by_keyboard_order(page, candidate_name, row):
             return True
         if ApprovalWriter._type_property_search_text(page, candidate_name):
-            page.wait_for_timeout(250)
+            wait_until_dropdown_options(page, timeout_ms=2500)
             if row is not None and ApprovalWriter._click_property_option_in_bound_dropdown(page, candidate_name, row):
                 return True
             if ApprovalWriter._click_property_option(page, candidate_name):
@@ -239,6 +242,27 @@ class ApprovalWriter:
             if ApprovalWriter._confirm_property_option_by_keyboard(page, candidate_name):
                 return True
         return False
+
+    @staticmethod
+    def _search_and_select_bound_property_option(page: Page, candidate_name: str, row: Locator) -> bool:
+        if not ApprovalWriter._focus_row_property_combobox(page, row):
+            return False
+        try:
+            page.keyboard.press("Control+A")
+            page.keyboard.press("Backspace")
+            page.keyboard.insert_text(candidate_name)
+            page.wait_for_timeout(260)
+            if ApprovalWriter._click_property_option_in_bound_dropdown(page, candidate_name, row):
+                return True
+            page.keyboard.press("ArrowDown")
+            page.wait_for_timeout(80)
+            page.keyboard.press("Enter")
+            page.wait_for_timeout(260)
+            return not ApprovalWriter._visible_property_dropdown(page) or ApprovalWriter._row_property_selection_looks_committed(
+                page, row, candidate_name
+            )
+        except (Error, TimeoutError):
+            return False
 
     def _scroll_dropdown_to_configured_option(self, page: Page, candidate_name: str) -> bool:
         option_names = erp_property_options(self.settings or {})
@@ -1018,6 +1042,30 @@ class ApprovalWriter:
         return False
 
     @staticmethod
+    def _focus_row_property_combobox(page: Page, row: Locator) -> bool:
+        property_input_index = ApprovalWriter._row_property_input_global_index(page, row)
+        if property_input_index is not None:
+            try:
+                input_box = page.locator("input[role='combobox']").nth(property_input_index)
+                if input_box.is_visible(timeout=250):
+                    input_box.click(timeout=1200)
+                    return True
+            except (Error, TimeoutError):
+                pass
+        try:
+            if ApprovalWriter._click_row_property_select(page, row):
+                page.wait_for_timeout(180)
+                property_input_index = ApprovalWriter._row_property_input_global_index(page, row)
+                if property_input_index is not None:
+                    input_box = page.locator("input[role='combobox']").nth(property_input_index)
+                    if input_box.is_visible(timeout=250):
+                        input_box.click(timeout=1200)
+                        return True
+        except (Error, TimeoutError):
+            pass
+        return ApprovalWriter._focus_row_combobox(row)
+
+    @staticmethod
     def _select_property_option_by_keyboard(
         page: Page,
         candidate_name: str,
@@ -1031,7 +1079,7 @@ class ApprovalWriter:
             return False
 
         try:
-            if row is not None and ApprovalWriter._focus_row_combobox(row):
+            if row is not None and ApprovalWriter._focus_row_property_combobox(page, row):
                 focused = True
             else:
                 focused = bool(
@@ -1402,6 +1450,50 @@ class ApprovalWriter:
             return
 
     @staticmethod
+    def dropdown_debug_state(page: Page) -> dict[str, Any]:
+        try:
+            return dict(
+                page.evaluate(
+                    """
+                    () => {
+                      const visible = (node) => {
+                        if (!node) return false;
+                        const rect = node.getBoundingClientRect();
+                        const style = window.getComputedStyle(node);
+                        return rect.width > 0 && rect.height > 0
+                          && style.visibility !== 'hidden'
+                          && style.display !== 'none';
+                      };
+                      const text = (node) => (node.innerText || node.textContent || '').replace(/\\s+/g, ' ').trim();
+                      const active = document.activeElement;
+                      const activeSelect = active?.closest?.('.ant-select');
+                      return {
+                        activeTag: active?.tagName || '',
+                        activeId: active?.id || '',
+                        activeControls: active?.getAttribute?.('aria-controls') || '',
+                        activeValue: active?.value || '',
+                        activeSelectText: activeSelect ? text(activeSelect) : '',
+                        dropdowns: Array.from(document.querySelectorAll('.ant-select-dropdown:not(.ant-select-dropdown-hidden)'))
+                          .filter(visible)
+                          .map((dropdown) => ({
+                            id: dropdown.id || '',
+                            text: text(dropdown),
+                            options: Array.from(dropdown.querySelectorAll('.ant-select-item-option'))
+                              .filter(visible)
+                              .map((option) => text(option))
+                              .filter(Boolean),
+                            scrollTop: dropdown.querySelector('.rc-virtual-list-holder')?.scrollTop || 0,
+                          })),
+                      };
+                    }
+                    """
+                )
+                or {}
+            )
+        except (Error, TimeoutError):
+            return {}
+
+    @staticmethod
     def _click_row_action(page: Page, row: Locator, action_text: str) -> bool:
         candidates = [
             row.get_by_role("button", name=action_text).first,
@@ -1411,6 +1503,7 @@ class ApprovalWriter:
             try:
                 if candidate.count() and candidate.is_visible():
                     candidate.click(timeout=3000)
+                    wait_until_spinner_hidden(page, timeout_ms=5000)
                     return True
             except (Error, TimeoutError):
                 continue

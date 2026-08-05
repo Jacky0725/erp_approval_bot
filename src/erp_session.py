@@ -445,12 +445,30 @@ class ErpSessionMixin:
 
     def wait_for_app_shell(self, page: Page) -> None:
         try:
-            page.wait_for_load_state("domcontentloaded", timeout=8000)
+            page.wait_for_load_state("domcontentloaded", timeout=5000)
         except TimeoutError:
             print("DOM content was not fully confirmed after login; continuing with current page.")
 
+        shell_selectors = [
+            ".ant-layout-sider",
+            ".ant-menu",
+            "aside",
+            "nav",
+            "[class*='sider' i]",
+            "[class*='menu' i]",
+        ]
+        for selector in shell_selectors:
+            try:
+                page.wait_for_selector(selector, state="visible", timeout=1500)
+                print(f"ERP shell detected by selector: {selector}")
+                return
+            except TimeoutError:
+                continue
+            except Error:
+                continue
+
         try:
-            page.wait_for_selector("text=\u8bd5\u5242\u7ba1\u7406, text=\u5e02\u573a\u7ba1\u7406", timeout=8000)
+            page.wait_for_selector("text=\u8bd5\u5242\u7ba1\u7406, text=\u5e02\u573a\u7ba1\u7406", timeout=3000)
         except TimeoutError:
             print("ERP shell menu text was not confirmed; continuing so target page click can retry/fail explicitly.")
 

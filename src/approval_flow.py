@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import json
 import os
 import re
 from typing import Any
@@ -14,11 +15,13 @@ from category_mapper import to_erp_property
 from chemical_searcher import ChemicalSearcher
 from llm_extractor import LlmExtractor
 from name_normalizer import NameNormalizer
+from non_reagent_classifier import NonReagentClassifier
 from reagent_name_rules import UNKNOWN_CATEGORY, unknown_reagent_name_reason
 from reagent_memory import ReagentMemory
 from rule_engine import RuleEngine
 from rule_maintainer import RuleMaintainer
 from stage_logger import StageLogger
+from ui_waits import wait_until_row_value, wait_until_spinner_hidden
 
 
 class ApprovalFlowMixin:
@@ -553,6 +556,7 @@ class ApprovalFlowMixin:
         pending_reagents: list[dict[str, Any]] = []
         memory = ReagentMemory.from_settings(self.settings, self.root_dir)
         normalizer = NameNormalizer(settings=self.settings, root_dir=self.root_dir)
+        non_reagent_classifier = NonReagentClassifier(settings=self.settings, root_dir=self.root_dir)
         for index, reagent in enumerate(unmatched_reagents, start=1):
             reagent_name = reagent.get(name_key, "").strip()
             cas = reagent.get(cas_key, "").strip()
@@ -573,6 +577,27 @@ class ApprovalFlowMixin:
                 print(
                     "Direct unknown reagent rule suggestion: "
                     f"{reagent.get('\u5e8f\u53f7', '')} {reagent_name} -> {UNKNOWN_CATEGORY}"
+                )
+                continue
+
+            non_reagent_classification = non_reagent_classifier.classify(
+                reagent_name,
+                reagent.get("\u89c4\u683c", ""),
+                reagent.get("\u89c4\u683c\u5355\u4f4d", ""),
+            )
+            if non_reagent_classification:
+                reason = str(non_reagent_classification.get("reason") or "").strip()
+                suggestion = self._direct_business_suggestion(
+                    reagent,
+                    reagent_name,
+                    non_reagent_classification,
+                    reason,
+                )
+                suggestions_by_index[index] = suggestion
+                self.remember_erp_suggestion(memory, suggestion)
+                print(
+                    "Direct non-reagent item suggestion: "
+                    f"{reagent.get('\u5e8f\u53f7', '')} {reagent_name} -> {non_reagent_classification.get('final_category', '')}"
                 )
                 continue
 
@@ -1345,6 +1370,11 @@ class ApprovalFlowMixin:
 
     def apply_approval_write_mode(self, page: Page, suggestions: list[dict[str, Any]]) -> dict[str, set[str]]:
         result: dict[str, set[str]] = {"attempted": set(), "handled": set(), "failed": set()}
+        if self.dry_run_enabled():
+            print("Dry-run mode is enabled; no webpage fields, saves, approvals, or library generation will be changed.")
+            result["handled"].update(self.suggestion_work_key(suggestion) for suggestion in suggestions)
+            return result
+
         mode = self.approval_write_mode()
         if mode == "disabled":
             print("Approval write mode is disabled; no webpage fields will be changed.")
@@ -1440,7 +1470,7 @@ class ApprovalFlowMixin:
                     self.cleanup_failed_write(page, writer, row, sequence, last_failure_detail)
                     continue
 
-                page.wait_for_timeout(500)
+                wait_until_spinner_hidden(page, timeout_ms=3000)
                 selected_value = ""
                 selected = False
                 for selection_attempt in range(1, 3):
@@ -1450,10 +1480,14 @@ class ApprovalFlowMixin:
                             f"attempt {selection_attempt}/2."
                         )
                     selected = writer.choose_property(page, category, row)
-                    page.wait_for_timeout(500)
                     if not selected:
                         continue
-                    selected_value = self.read_reagent_property_by_sequence(page, sequence)
+                    selected_value = wait_until_row_value(
+                        page,
+                        lambda: self.read_reagent_property_by_sequence(page, sequence),
+                        lambda value: bool(value.strip()) and value.strip() not in {"-", "选择搜索"},
+                        timeout_ms=3000,
+                    )
                     if self.property_value_matches(selected_value, category, writer):
                         break
                     if selected_value in {"", "-", "\u9009\u62e9\u641c\u7d22"}:
@@ -1488,8 +1522,13 @@ class ApprovalFlowMixin:
                     return result
 
                 saved = writer.save(page, row)
-                page.wait_for_timeout(800)
-                saved_value = self.read_reagent_property_by_sequence(page, sequence)
+                wait_until_spinner_hidden(page, timeout_ms=5000)
+                saved_value = wait_until_row_value(
+                    page,
+                    lambda: self.read_reagent_property_by_sequence(page, sequence),
+                    lambda value: self.property_value_matches(value, category, writer),
+                    timeout_ms=5000,
+                )
                 verified = saved and self.property_value_matches(saved_value, category, writer)
                 print(f"Save verified for sequence {sequence}: {verified} (clicked_save={saved})")
                 if verified:
@@ -1695,7 +1734,7 @@ class ApprovalFlowMixin:
     def stabilize_reagent_detail_after_write_failure(self, page: Page) -> bool:
         try:
             self.wait_for_reagent_table_ready(page)
-            page.wait_for_timeout(800)
+            wait_until_spinner_hidden(page, timeout_ms=5000)
         except Exception as error:
             print(f"Reagent table was not ready while stabilizing after write failure: {error}")
             return self.recover_reagent_detail_page_after_write_failure(page, "stabilize after write failure")
@@ -1963,6 +2002,18 @@ class ApprovalFlowMixin:
             print(f"Saved write failure HTML: {html_path}")
         except Exception as error:
             print(f"Could not save write failure HTML for sequence {sequence}: {error}")
+        try:
+            debug_path = self._log_dir() / f"{prefix}.json"
+            debug_payload = {
+                "sequence": sequence,
+                "attempt": attempt,
+                "reason": reason,
+                "dropdown": ApprovalWriter.dropdown_debug_state(page),
+            }
+            debug_path.write_text(json.dumps(debug_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            print(f"Saved write failure debug JSON: {debug_path}")
+        except Exception as error:
+            print(f"Could not save write failure debug JSON for sequence {sequence}: {error}")
 
     def approval_write_failure_break_limit(self) -> int:
         approval_settings = getattr(self, "settings", {}).get("approval", {}) or {}
@@ -2023,11 +2074,25 @@ class ApprovalFlowMixin:
         return bool(parts) and all(part in candidates for part in parts)
 
     def approval_write_mode(self) -> str:
-        configured = (getattr(self, "settings", {}).get("approval", {}) or {}).get("write_mode", "multi_page")
-        normalized = str(os.getenv("APPROVAL_WRITE_MODE") or configured or "multi_page").strip().lower()
-        if normalized in {"multi_page", "generate_library"}:
+        configured = (getattr(self, "settings", {}).get("approval", {}) or {}).get("write_mode", "disabled")
+        normalized = str(os.getenv("APPROVAL_WRITE_MODE") or configured or "disabled").strip().lower()
+        if normalized in {"disabled", "multi_page", "generate_library"}:
             return normalized
-        return "multi_page"
+        print(f"Unknown APPROVAL_WRITE_MODE={normalized or '<empty>'}; write mode fails closed as disabled.")
+        return "disabled"
+
+    def dry_run_enabled(self) -> bool:
+        env_value = os.getenv("APP_DRY_RUN") or os.getenv("DRY_RUN")
+        if env_value is not None and env_value.strip():
+            return self._truthy(env_value)
+        app_settings = (getattr(self, "settings", {}).get("app", {}) or {})
+        return self._truthy(app_settings.get("dry_run", False))
+
+    @staticmethod
+    def _truthy(value: Any) -> bool:
+        if isinstance(value, bool):
+            return value
+        return str(value or "").strip().lower() in {"1", "true", "yes", "y", "on"}
 
     def high_confidence_write_candidates(self, suggestions: list[dict[str, Any]]) -> list[dict[str, Any]]:
         threshold = float(os.getenv("APPROVAL_WRITE_MIN_CONFIDENCE") or getattr(self, "settings", {}).get("approval", {}).get("write_min_confidence", 0.8))
@@ -2197,6 +2262,10 @@ class ApprovalFlowMixin:
         )
 
     def try_auto_pass_current_task(self, page: Page) -> None:
+        if self.dry_run_enabled():
+            print("Auto-pass skipped; dry-run mode is enabled.")
+            return
+
         if not self.auto_pass_enabled():
             print("Auto-pass skipped; AUTO_PASS is not true.")
             return

@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from scheduler import ApprovalScheduler, next_run_at, scheduled_run_options, scheduler_config
+from scheduler import ApprovalScheduler, atomic_write_text, next_run_at, normalize_web_write_mode, scheduled_run_options, scheduler_config
 
 
 class FakeJobManager:
@@ -74,9 +74,25 @@ class SchedulerTest(unittest.TestCase):
             )
 
         self.assertEqual(config["process_all_todos_max"], 12)
-        self.assertEqual(config["approval_write_mode"], "multi_page")
+        self.assertEqual(config["approval_write_mode"], "disabled")
         self.assertEqual(config["approval_write_min_confidence"], "0.9")
         self.assertTrue(config["auto_pass"])
+
+    def test_scheduler_write_mode_fails_closed_for_retired_and_unknown_values(self) -> None:
+        self.assertEqual(normalize_web_write_mode("save_one"), "disabled")
+        self.assertEqual(normalize_web_write_mode("single_page"), "disabled")
+        self.assertEqual(normalize_web_write_mode("unknown"), "disabled")
+        self.assertEqual(normalize_web_write_mode("multi_page"), "multi_page")
+
+    def test_scheduler_atomic_write_text_replaces_existing_file(self) -> None:
+        with TemporaryDirectory() as tmp:
+            path = Path(tmp) / "scheduler_state.yaml"
+            path.write_text("last_result: old\n", encoding="utf-8")
+
+            atomic_write_text(path, "last_result: new\n")
+
+            self.assertEqual(path.read_text(encoding="utf-8"), "last_result: new\n")
+            self.assertEqual(list(Path(tmp).glob("*.tmp")), [])
 
     def test_trigger_due_run_skips_when_job_is_running(self) -> None:
         with TemporaryDirectory() as tmp:

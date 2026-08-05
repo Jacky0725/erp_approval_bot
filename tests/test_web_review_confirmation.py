@@ -98,6 +98,56 @@ class WebReviewConfirmationTest(unittest.TestCase):
             memory = ReagentMemory.from_settings({}, root)
             self.assertIsNone(memory.lookup(cas="123-45-6"))
 
+    def test_confirm_review_item_resolves_duplicate_pending_review_keys(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            data_dir = root / "data"
+            data_dir.mkdir(parents=True)
+            queue_path = data_dir / "review_queue.xlsx"
+            pd.DataFrame(
+                [
+                    {
+                        "timestamp": "2026-06-25T10:00:00",
+                        "试剂清单号": "SJ1",
+                        "序号": "1",
+                        "试剂名称": "重复试剂",
+                        "cas": "",
+                        "standard_name": "重复试剂",
+                        "cleaned_name": "重复试剂",
+                        "reason": "第一次加入复核",
+                        "status": "pending",
+                    },
+                    {
+                        "timestamp": "2026-06-25T10:05:00",
+                        "试剂清单号": "SJ1",
+                        "序号": "1",
+                        "试剂名称": "重复试剂",
+                        "cas": "",
+                        "standard_name": "重复试剂",
+                        "cleaned_name": "重复试剂",
+                        "reason": "第二次加入复核",
+                        "status": "pending",
+                    },
+                ]
+            ).to_excel(queue_path, index=False)
+
+            summary = review_queue_summary(root)
+            self.assertEqual(summary["pending"], 1)
+            result = confirm_review_item(
+                {
+                    "review_key": summary["preview"][0]["review_key"],
+                    "final_category": "未知类",
+                    "reason": "人工确认未知类",
+                },
+                root,
+            )
+
+            self.assertTrue(result["confirmed"])
+            self.assertEqual(review_queue_summary(root)["pending"], 0)
+            resolved = pd.read_excel(queue_path, dtype=str).fillna("")
+            self.assertEqual(set(resolved["status"].astype(str)), {"confirmed"})
+            self.assertEqual(set(resolved["manual_result"].astype(str)), {"未知类"})
+
     def test_confirm_review_item_accepts_reject_alias_as_writable_erp_decision(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

@@ -10,7 +10,7 @@ import time
 from typing import Annotated
 
 from fastapi import FastAPI, Form, HTTPException, Request
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from dotenv import load_dotenv
@@ -232,6 +232,14 @@ def api_status() -> JSONResponse:
     )
 
 
+@app.get("/CLodopfuncs.js")
+def clodop_probe() -> Response:
+    return Response(
+        content="window.getCLodop = window.getCLodop || function(){ return null; };\n",
+        media_type="application/javascript",
+    )
+
+
 @app.get("/api/update/check")
 def api_update_check() -> JSONResponse:
     return JSONResponse(check_for_update().as_dict())
@@ -355,7 +363,7 @@ def api_settings(
     target_list_numbers: Annotated[str, Form()] = "",
     process_all_todos: Annotated[str, Form()] = "",
     process_all_todos_max: Annotated[str, Form()] = "50",
-    approval_write_mode: Annotated[str, Form()] = "multi_page",
+    approval_write_mode: Annotated[str, Form()] = "disabled",
     approval_write_min_confidence: Annotated[str, Form()] = "0.8",
     approval_write_batch_size: Annotated[str, Form()] = "3",
     approval_parallel_workers: Annotated[str, Form()] = "3",
@@ -366,7 +374,7 @@ def api_settings(
     scheduler_daily_time: Annotated[str, Form()] = "16:00",
     scheduler_use_default_run_policy: Annotated[str, Form()] = "",
     scheduler_process_all_todos_max: Annotated[str, Form()] = "50",
-    scheduler_approval_write_mode: Annotated[str, Form()] = "multi_page",
+    scheduler_approval_write_mode: Annotated[str, Form()] = "disabled",
     scheduler_approval_write_min_confidence: Annotated[str, Form()] = "0.8",
     scheduler_auto_pass: Annotated[str, Form()] = "",
     scheduler_skip_manual_review_lists: Annotated[str, Form()] = "",
@@ -452,7 +460,7 @@ def api_run(
     target_list_numbers: Annotated[str, Form()] = "",
     process_all_todos: Annotated[str, Form()] = "",
     process_all_todos_max: Annotated[str, Form()] = "50",
-    approval_write_mode: Annotated[str, Form()] = "multi_page",
+    approval_write_mode: Annotated[str, Form()] = "disabled",
     approval_write_min_confidence: Annotated[str, Form()] = "0.8",
     approval_write_batch_size: Annotated[str, Form()] = "3",
     auto_pass: Annotated[str, Form()] = "false",
@@ -494,7 +502,7 @@ def api_restart() -> JSONResponse:
 @app.post("/api/review/confirm")
 async def api_review_confirm(request: Request) -> JSONResponse:
     if manager.status().get("running"):
-        raise HTTPException(status_code=409, detail="当前自动化任务正在运行，结束后再确认人工复核项。")
+        raise HTTPException(status_code=409, detail="当前自动化任务正在运行，请先停止或等待任务结束后，再确认人工复核项。")
     payload = await request.json()
     return JSONResponse(confirm_review_item(payload))
 
@@ -502,7 +510,7 @@ async def api_review_confirm(request: Request) -> JSONResponse:
 @app.delete("/api/review")
 async def api_review_delete(request: Request) -> JSONResponse:
     if manager.status().get("running"):
-        raise HTTPException(status_code=409, detail="当前自动化任务正在运行，结束后再删除人工复核项。")
+        raise HTTPException(status_code=409, detail="当前自动化任务正在运行，请先停止或等待任务结束后，再删除人工复核项。")
     payload = await request.json()
     result = delete_review_item(payload)
     if not result.get("deleted"):
@@ -559,7 +567,7 @@ def dingtalk_run_options(list_number: str = "") -> dict[str, str]:
         target_list_numbers=target_list_number,
         process_all_todos="false" if target_list_number else "true",
         process_all_todos_max=str(runtime.get("process_all_todos_max") or "50"),
-        approval_write_mode=str(runtime.get("approval_write_mode") or "multi_page"),
+        approval_write_mode=str(runtime.get("approval_write_mode") or "disabled"),
         approval_write_min_confidence=str(runtime.get("approval_write_min_confidence") or "0.8"),
         approval_write_batch_size=str(runtime.get("approval_write_batch_size") or "3"),
         auto_pass=str(runtime.get("auto_pass") or "false"),

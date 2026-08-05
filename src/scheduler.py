@@ -13,16 +13,33 @@ import yaml
 
 STATE_FILENAME = "scheduler_state.yaml"
 ACTIVE_WRITE_MODES = {"multi_page", "generate_library"}
-RETIRED_WRITE_MODES = {"disabled", "test_one", "save_one", "single_page", ""}
+DISABLED_WRITE_MODES = {"disabled", "test_one", "save_one", "single_page", ""}
 
 
 def normalize_web_write_mode(value: Any) -> str:
     normalized = str(value or "").strip().lower()
     if normalized in ACTIVE_WRITE_MODES:
         return normalized
-    if normalized in RETIRED_WRITE_MODES:
-        return "multi_page"
-    return "multi_page"
+    if normalized in DISABLED_WRITE_MODES:
+        return "disabled"
+    return "disabled"
+
+
+def atomic_write_text(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    try:
+        with tmp_path.open("w", encoding="utf-8") as file:
+            file.write(text)
+            file.flush()
+            os.fsync(file.fileno())
+        os.replace(tmp_path, path)
+    finally:
+        if tmp_path.exists():
+            try:
+                tmp_path.unlink()
+            except OSError:
+                pass
 
 
 def normalize_checkbox(value: Any) -> str:
@@ -37,7 +54,7 @@ def scheduler_defaults() -> dict[str, Any]:
         "daily_time": "16:00",
         "use_default_run_policy": True,
         "process_all_todos_max": 50,
-        "approval_write_mode": "multi_page",
+        "approval_write_mode": "disabled",
         "approval_write_min_confidence": "0.8",
         "approval_write_batch_size": "3",
         "auto_pass": False,
@@ -65,7 +82,7 @@ def scheduler_config(settings: dict[str, Any] | None) -> dict[str, Any]:
         )
         result["approval_write_mode"] = normalize_web_write_mode(
             os.getenv("APPROVAL_WRITE_MODE")
-            or str(approval.get("write_mode") or result.get("approval_write_mode") or "multi_page")
+            or str(approval.get("write_mode") or result.get("approval_write_mode") or "disabled")
         )
         result["approval_write_min_confidence"] = (
             os.getenv("APPROVAL_WRITE_MIN_CONFIDENCE")
@@ -78,7 +95,7 @@ def scheduler_config(settings: dict[str, Any] | None) -> dict[str, Any]:
         result["auto_pass"] = coerce_bool(os.getenv("AUTO_PASS") or result.get("auto_pass"))
     else:
         result["process_all_todos_max"] = max(1, coerce_int(result.get("process_all_todos_max"), 50))
-        result["approval_write_mode"] = normalize_web_write_mode(result.get("approval_write_mode") or "multi_page")
+        result["approval_write_mode"] = normalize_web_write_mode(result.get("approval_write_mode") or "disabled")
         result["approval_write_min_confidence"] = str(result.get("approval_write_min_confidence") or "0.8").strip() or "0.8"
         result["approval_write_batch_size"] = str(result.get("approval_write_batch_size") or "3").strip() or "3"
         result["auto_pass"] = coerce_bool(result.get("auto_pass"))
@@ -129,7 +146,7 @@ def scheduled_run_options(config: dict[str, Any]) -> dict[str, str]:
         "TARGET_LIST_NUMBERS": "",
         "PROCESS_ALL_TODOS": "true",
         "PROCESS_ALL_TODOS_MAX": str(config.get("process_all_todos_max") or 50),
-        "APPROVAL_WRITE_MODE": str(config.get("approval_write_mode") or "multi_page"),
+        "APPROVAL_WRITE_MODE": str(config.get("approval_write_mode") or "disabled"),
         "APPROVAL_WRITE_MIN_CONFIDENCE": str(config.get("approval_write_min_confidence") or "0.8"),
         "APPROVAL_WRITE_BATCH_SIZE": str(config.get("approval_write_batch_size") or "3"),
         "AUTO_PASS": normalize_checkbox(config.get("auto_pass")),
@@ -192,7 +209,7 @@ class ApprovalScheduler:
                 "daily_time": self._config.get("daily_time", "16:00"),
                 "use_default_run_policy": normalize_checkbox(self._config.get("use_default_run_policy", True)),
                 "process_all_todos_max": self._config.get("process_all_todos_max", 50),
-                "approval_write_mode": self._config.get("approval_write_mode", "multi_page"),
+                "approval_write_mode": self._config.get("approval_write_mode", "disabled"),
                 "approval_write_min_confidence": self._config.get("approval_write_min_confidence", "0.8"),
                 "auto_pass": normalize_checkbox(self._config.get("auto_pass")),
                 "skip_manual_review_lists": normalize_checkbox(self._config.get("skip_manual_review_lists", True)),
@@ -274,5 +291,4 @@ class ApprovalScheduler:
             "last_message": self._last_message,
             "next_run_at": self._next_run_at.isoformat(timespec="seconds") if self._next_run_at else "",
         }
-        with path.open("w", encoding="utf-8") as file:
-            yaml.safe_dump(payload, file, allow_unicode=True, sort_keys=False)
+        atomic_write_text(path, yaml.safe_dump(payload, allow_unicode=True, sort_keys=False))

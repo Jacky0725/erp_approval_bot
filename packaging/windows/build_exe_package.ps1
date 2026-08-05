@@ -84,6 +84,9 @@ $hiddenImports = @(
     "web_app",
     "web_runner",
     "fastapi",
+    "fastapi.responses",
+    "fastapi.staticfiles",
+    "fastapi.templating",
     "uvicorn",
     "uvicorn.logging",
     "uvicorn.loops",
@@ -97,25 +100,45 @@ $hiddenImports = @(
     "uvicorn.lifespan.on",
     "jinja2",
     "pandas",
+    "pandas._libs.tslibs.timedeltas",
+    "pandas._libs.tslibs.np_datetime",
+    "pandas._libs.tslibs.nattype",
+    "pandas._libs.tslibs.timezones",
     "openpyxl",
+    "openpyxl.cell._writer",
+    "openpyxl.styles",
+    "openpyxl.styles.builtins",
     "yaml",
     "dotenv",
     "playwright",
     "playwright.sync_api",
-    "openai"
+    "openai",
+    "dingtalk_stream"
 )
 
 $collectAll = @(
-    "playwright",
-    "pandas",
-    "openpyxl",
-    "fastapi",
-    "starlette",
-    "pydantic",
-    "uvicorn",
-    "jinja2",
-    "openai",
-    "python_multipart"
+    "playwright"
+)
+
+$excludeModules = @(
+    "pytest",
+    "unittest",
+    "test",
+    "tests",
+    "matplotlib",
+    "PIL",
+    "lxml",
+    "IPython",
+    "jupyter",
+    "notebook",
+    "scipy",
+    "pyarrow",
+    "sklearn",
+    "tensorflow",
+    "torch",
+    "cv2",
+    "docutils",
+    "sphinx"
 )
 
 $args = @(
@@ -143,20 +166,60 @@ foreach ($item in $hiddenImports) {
 foreach ($item in $collectAll) {
     $args += @("--collect-all", $item)
 }
+foreach ($item in $excludeModules) {
+    $args += @("--exclude-module", $item)
+}
 $args += $Launcher
 
 Write-Host "Building $BuildName $Arch with PyInstaller..."
 & $Python @args
 
-$cleanupPaths = @(
-    (Join-Path $DistAppDir "_internal\pandas\tests"),
-    (Join-Path $DistAppDir "_internal\app\src\__pycache__")
-)
-foreach ($path in $cleanupPaths) {
-    if (Test-Path $path) {
-        Remove-Item $path -Recurse -Force
+function Remove-IfExists([string]$Path) {
+    if (Test-Path $Path) {
+        Remove-Item $Path -Recurse -Force
     }
 }
+
+function Remove-ChildDirectoriesByName([string]$Root, [string[]]$Names) {
+    if (!(Test-Path $Root)) {
+        return
+    }
+    Get-ChildItem $Root -Directory -Recurse -Force -ErrorAction SilentlyContinue |
+        Where-Object { $Names -contains $_.Name } |
+        Sort-Object FullName -Descending |
+        ForEach-Object { Remove-IfExists $_.FullName }
+}
+
+function Remove-ChildFilesByPattern([string]$Root, [string[]]$Patterns) {
+    if (!(Test-Path $Root)) {
+        return
+    }
+    foreach ($pattern in $Patterns) {
+        Get-ChildItem $Root -File -Recurse -Force -Filter $pattern -ErrorAction SilentlyContinue |
+            ForEach-Object { Remove-Item $_.FullName -Force }
+    }
+}
+
+function Remove-BrowserLocales([string]$BrowserDir) {
+    if (!(Test-Path $BrowserDir)) {
+        return
+    }
+    Get-ChildItem $BrowserDir -Directory -Recurse -Force -Filter "locales" -ErrorAction SilentlyContinue |
+        ForEach-Object {
+            Get-ChildItem $_.FullName -File -Filter "*.pak" -ErrorAction SilentlyContinue |
+                Where-Object { $_.BaseName -notin @("zh-CN", "en-US") } |
+                Remove-Item -Force
+        }
+}
+
+Remove-IfExists (Join-Path $DistAppDir "_internal\matplotlib")
+Remove-IfExists (Join-Path $DistAppDir "_internal\PIL")
+Remove-IfExists (Join-Path $DistAppDir "_internal\lxml")
+Remove-IfExists (Join-Path $DistAppDir "_internal\app\tests")
+Remove-IfExists (Join-Path $DistAppDir "_internal\app\.pytest_cache")
+Remove-ChildDirectoriesByName $DistAppDir @("__pycache__", "tests", "test", "testing", "examples", "doc", "docs")
+Remove-ChildFilesByPattern $DistAppDir @("*.pyc", "*.pyo", "*.pyd.map", "*.pdb")
+
 $BundledBrowserRoot = Join-Path $DistAppDir "_internal\ms-playwright"
 if ($BrowserBundle -eq "headless") {
     Get-ChildItem $BundledBrowserRoot -Directory -ErrorAction SilentlyContinue |
@@ -167,6 +230,8 @@ if ($BrowserBundle -eq "headless") {
         Where-Object { $_.Name -notlike "chromium_headless_shell-*" -and $_.Name -notlike "chromium-*" } |
         Remove-Item -Recurse -Force
 }
+Get-ChildItem $BundledBrowserRoot -Directory -ErrorAction SilentlyContinue |
+    ForEach-Object { Remove-BrowserLocales $_.FullName }
 
 $Readme = Join-Path $DistAppDir "README-WINDOWS.txt"
 @"

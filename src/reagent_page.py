@@ -7,6 +7,8 @@ from typing import Any
 import pandas as pd
 from playwright.sync_api import Error, Locator, Page, TimeoutError
 
+from ui_waits import wait_until_table_stable
+
 
 class ReagentPageMixin:
 
@@ -157,9 +159,10 @@ class ReagentPageMixin:
             if first_page.count() and first_page.is_visible():
                 class_name = first_page.get_attribute("class") or ""
                 if "ant-pagination-item-active" not in class_name:
+                    before_page = self.current_todo_page_number(page)
                     first_page.click()
                     self.wait_for_table_ready(page)
-                    page.wait_for_timeout(500)
+                    wait_until_table_stable(page, lambda: self.current_todo_page_number(page), before_page)
             return True
         except Error:
             print("Could not move to the first todo page; continuing from current page.")
@@ -194,7 +197,7 @@ class ReagentPageMixin:
             before_page = self.current_todo_page_number(page)
             next_button.click()
             self.wait_for_table_ready(page)
-            page.wait_for_timeout(600)
+            wait_until_table_stable(page, lambda: self.current_todo_page_number(page), before_page)
             after_page = self.current_todo_page_number(page)
             moved = after_page != before_page or not after_page
             return moved, moved
@@ -542,9 +545,10 @@ class ReagentPageMixin:
             if first_page.count() and first_page.is_visible():
                 class_name = first_page.get_attribute("class") or ""
                 if "ant-pagination-item-active" not in class_name:
+                    before_signature = self.reagent_table_signature(page)
                     first_page.click()
                     self.wait_for_reagent_table_ready(page)
-                    page.wait_for_timeout(500)
+                    wait_until_table_stable(page, lambda: self.reagent_table_signature(page), before_signature)
             return True
         except Error:
             print("Could not move to the first reagent page; continuing from current page.")
@@ -579,7 +583,8 @@ class ReagentPageMixin:
                 print(f"Normal page-size selector click failed; retrying with DOM click: {error}")
                 if not self.click_page_size_changer_by_dom(page, str(size)):
                     raise
-            page.wait_for_timeout(300)
+            # Short animation buffer before Ant Design renders the page-size dropdown.
+            page.wait_for_timeout(100)
 
             options = [
                 page.locator(".ant-select-dropdown:not(.ant-select-dropdown-hidden) .ant-select-item-option")
@@ -815,7 +820,8 @@ class ReagentPageMixin:
                 self.wait_for_reagent_table_ready(page)
             except Error:
                 pass
-            page.wait_for_timeout(250)
+            # Short animation buffer between pagination probes.
+            page.wait_for_timeout(100)
             after_page = self.current_reagent_page_number(page)
             if before_page and after_page and after_page != before_page:
                 return True

@@ -61,6 +61,20 @@ class ApprovalFlowPropertyMatchTest(unittest.TestCase):
         with patch.dict(os.environ, {"AUTO_PASS": "false"}, clear=False):
             AutoPassBot().try_auto_pass_current_task(object())
 
+    def test_dry_run_skips_auto_pass_even_when_enabled(self) -> None:
+        class AutoPassBot(Bot):
+            def __init__(self) -> None:
+                self.settings = {"app": {"dry_run": True}}
+
+            def read_detail_info(self, page: object) -> dict[str, str]:
+                raise AssertionError("dry-run should not read page detail info for auto-pass")
+
+            def click_top_approve_button(self, page: object) -> None:
+                raise AssertionError("dry-run should not click approve")
+
+        with patch.dict(os.environ, {"AUTO_PASS": "true"}, clear=False):
+            AutoPassBot().try_auto_pass_current_task(object())
+
     def test_auto_pass_page_precheck_failure_blocks_without_raising(self) -> None:
         class AutoPassBot(Bot):
             def __init__(self) -> None:
@@ -81,6 +95,44 @@ class ApprovalFlowPropertyMatchTest(unittest.TestCase):
 
         with patch.dict(os.environ, {"AUTO_PASS": "true"}, clear=False):
             AutoPassBot().try_auto_pass_current_task(object())
+
+    def test_dry_run_blocks_webpage_write_candidates(self) -> None:
+        class DryRunBot(Bot):
+            def __init__(self) -> None:
+                self.settings = {
+                    "app": {"dry_run": True},
+                    "approval": {"write_mode": "multi_page", "write_min_confidence": 0.7},
+                    "reagent": {"physicochemical_property_options": ["\u666e\u901a\u7c7b"]},
+                }
+
+            def find_reagent_row_by_sequence(self, page: object, sequence: str, reagent_name: str, cas: str) -> object:
+                raise AssertionError("dry-run should not look up editable rows")
+
+        suggestion = {
+            "\u5e8f\u53f7": "1",
+            "\u8bd5\u5242\u540d\u79f0": "\u53ef\u5199\u5165\u8bd5\u5242",
+            "CAS\u53f7": "64-17-5",
+            "\u6700\u7ec8\u5efa\u8bae\u7c7b\u522b": "\u666e\u901a\u7c7b",
+            "\u7f6e\u4fe1\u5ea6": 0.95,
+            "\u9700\u4eba\u5de5\u590d\u6838": False,
+        }
+
+        with patch.dict(os.environ, {}, clear=True):
+            result = DryRunBot().apply_approval_write_mode(object(), [suggestion])
+
+        self.assertEqual(result["attempted"], set())
+        self.assertEqual(result["failed"], set())
+        self.assertEqual(len(result["handled"]), 1)
+
+    def test_approval_write_mode_unknown_values_fail_closed(self) -> None:
+        bot = Bot()
+        bot.settings = {"approval": {"write_mode": "single_page"}}
+
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(bot.approval_write_mode(), "disabled")
+
+        with patch.dict(os.environ, {"APPROVAL_WRITE_MODE": "surprise"}, clear=True):
+            self.assertEqual(bot.approval_write_mode(), "disabled")
 
 
 class ApprovalSuggestionExportTest(unittest.TestCase):
@@ -717,6 +769,88 @@ class ApprovalFlowTodoLoopTest(unittest.TestCase):
                 )
 
                 self.assertIsNone(suggestion)
+
+    def test_non_reagent_item_skips_web_search_and_is_normal(self) -> None:
+        class NonReagentBot(Bot):
+            def __init__(self) -> None:
+                self.settings = {
+                    "paths": {"reagent_memory_sqlite": "data/test_non_reagent_memory.sqlite"},
+                    "approval": {"parallel_workers": 3},
+                }
+                self.root_dir = Path(tempfile.mkdtemp())
+
+            def read_current_page_reagents(self, page: object) -> list[dict[str, str]]:
+                return [
+                    {
+                        "\u5e8f\u53f7": "1",
+                        "\u8bd5\u5242\u540d\u79f0": "15ml\u79bb\u5fc3\u7ba1",
+                        "CAS\u53f7": "-",
+                        "\u7269\u5316\u7279\u6027": "-",
+                    }
+                ]
+
+            def search_reagents_parallel(self, pending_reagents: list[dict[str, object]]) -> dict[int, dict[str, object]]:
+                raise AssertionError("non-reagent items should not reach website search")
+
+        bot = NonReagentBot()
+        engine = RuleEngine.from_excel(ROOT_DIR / "config" / "rules.xlsx")
+
+        suggestions = bot.process_current_unmatched_reagent_page(
+            object(),
+            engine,
+            rule_maintainer=object(),
+            seen_search_urls={},
+        )
+
+        self.assertEqual(len(suggestions), 1)
+        self.assertEqual(suggestions[0]["\u6700\u7ec8\u5efa\u8bae\u7c7b\u522b"], "\u666e\u901a\u7c7b")
+        self.assertFalse(suggestions[0]["\u9700\u4eba\u5de5\u590d\u6838"])
+        self.assertEqual(suggestions[0]["\u67e5\u8be2\u6765\u6e90"], "business_rule")
+
+    def test_unknown_trade_name_skips_web_search_before_non_reagent_rule(self) -> None:
+        class UnknownBot(Bot):
+            def __init__(self) -> None:
+                self.settings = {
+                    "paths": {"reagent_memory_sqlite": "data/test_unknown_memory.sqlite"},
+                    "approval": {"parallel_workers": 3},
+                }
+                self.root_dir = Path(tempfile.mkdtemp())
+
+            def current_detail_list_number(self) -> str:
+                return "SJ-TEST"
+
+            def read_current_page_reagents(self, page: object) -> list[dict[str, str]]:
+                return [
+                    {
+                        "\u5e8f\u53f7": "1",
+                        "\u8bd5\u5242\u540d\u79f0": "\u672a\u77e5\u836f\u54c1\uff08\u767d\u74f6\u7ea2\u76d6\uff09",
+                        "CAS\u53f7": "-",
+                        "\u7269\u5316\u7279\u6027": "-",
+                    },
+                    {
+                        "\u5e8f\u53f7": "2",
+                        "\u8bd5\u5242\u540d\u79f0": "Lot#L2107277",
+                        "CAS\u53f7": "-",
+                        "\u7269\u5316\u7279\u6027": "-",
+                    },
+                ]
+
+            def search_reagents_parallel(self, pending_reagents: list[dict[str, object]]) -> dict[int, dict[str, object]]:
+                raise AssertionError("unknown trade names should not reach website search")
+
+        bot = UnknownBot()
+        engine = RuleEngine.from_excel(ROOT_DIR / "config" / "rules.xlsx")
+
+        suggestions = bot.process_current_unmatched_reagent_page(
+            object(),
+            engine,
+            rule_maintainer=object(),
+            seen_search_urls={},
+        )
+
+        self.assertEqual(len(suggestions), 2)
+        self.assertEqual({item["\u6700\u7ec8\u5efa\u8bae\u7c7b\u522b"] for item in suggestions}, {"\u672a\u77e5\u7c7b"})
+        self.assertTrue(all(item["\u67e5\u8be2\u6765\u6e90"] == "business_rule_unknown_name" for item in suggestions))
 
     def test_direct_business_rule_suggestion_allows_low_priority_normal_keywords(self) -> None:
         bot = Bot()

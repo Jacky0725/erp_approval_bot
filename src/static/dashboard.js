@@ -88,7 +88,7 @@
         if (hasOption) {
           field.value = candidate;
         } else if (name.includes("approval_write_mode") && field.options.length) {
-          field.value = "multi_page";
+          field.value = "disabled";
         }
         return;
       }
@@ -1343,6 +1343,7 @@
       const response = await fetch("/api/status");
       const data = await response.json();
       const status = data.status || {};
+      const runSummary = status.summary || {};
       const runtime = data.runtime || {};
       const approval = data.approval || {};
       const reviewQueue = data.review_queue || {};
@@ -1356,16 +1357,22 @@
       setClass("#runBadge", status.running ? "badge running" : (status.success === false ? "badge failed" : (status.success === true ? "badge succeeded" : "badge")));
       setDisabled("#stopRunButton", !status.running);
       setDisabled("#restartRunButton", false);
-      setText("#statusLine", status.running ? "任务执行中，请保持 Playwright 浏览器可见。" : safe(status.error, "当前没有运行中的任务。"));
+      setText("#statusLine", status.running ? "任务执行中，请保持 Playwright 浏览器可见。" : safe(status.error || runSummary.outcome, "当前没有运行中的任务。"));
       setText("#erpUrl", runtime.erp_url_configured ? "已配置" : "未配置");
       setText("#erpUser", runtime.erp_username_configured ? "已配置" : "未配置");
       setText("#erpPassword", runtime.erp_password_configured ? "已配置" : "未配置");
       setText("#apiKey", runtime.llm_api_key_configured ? "已配置" : "未配置");
-      setText("#currentAction", safe(status.action));
+      setText("#currentAction", safe(status.action_label || status.action));
       setText("#lastRunResult", safe(status.result_label));
       setClass("#lastRunResult", status.success === true ? "result-ok" : (status.success === false ? "result-failed" : ""));
       setText("#startedAt", safe(status.started_at));
       setText("#finishedAt", safe(status.finished_at));
+      const summaryTargets = runSummary.target_list_numbers || [];
+      setText("#runTargetLists", summaryTargets.length ? summaryTargets.join("，") : "-");
+      setText("#runPages", safe(runSummary.processed_pages, "-"));
+      setText("#runWriteSuccess", safe(runSummary.write_success_count, "-"));
+      setText("#runWriteFailure", safe(runSummary.write_failure_count, "-"));
+      setText("#runLogPath", safe(status.run_log_path, "-"));
       setText("#autoPassText", safe(runtime.auto_pass));
       setText("#writeModeText", approvalWriteModeLabel(runtime.approval_write_mode));
       setText("#processScopeText", runtime.process_all_todos === "true" ? "全部待办" : "勾选清单/首条");

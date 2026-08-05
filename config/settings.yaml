@@ -11,6 +11,14 @@ llm:
   model: deepseek-ai/DeepSeek-V3.2
   timeout_seconds: 45
   max_retries: 1
+chemical_search:
+  per_source_concurrency: 2
+  failure_circuit_break_threshold: 5
+  cache:
+    enabled: true
+    path: data/chemical_search_cache.sqlite
+    success_ttl_days: 30
+    failure_ttl_days: 1
 paths:
   rules_excel: config/rules.xlsx
   structured_rules_excel: config/rules_structured.xlsx
@@ -20,7 +28,7 @@ paths:
   audit_log_dir: data/logs
 approval:
   default_action: manual_review
-  write_mode: multi_page
+  write_mode: disabled
   write_min_confidence: 0.7
   write_batch_size: 5
   write_max_attempts: 2
@@ -38,7 +46,7 @@ scheduler:
   daily_time: '16:00'
   use_default_run_policy: true
   process_all_todos_max: 50
-  approval_write_mode: multi_page
+  approval_write_mode: disabled
   approval_write_min_confidence: '0.7'
   auto_pass: false
   skip_manual_review_lists: true

@@ -137,6 +137,31 @@ class ApprovalWriterDropdownBindingTest(unittest.TestCase):
 
         self.assertTrue(ApprovalWriter._scroll_bound_dropdown_to_option(self.page, "强反应", options, row))
 
+    def test_focus_row_property_combobox_uses_property_column_not_first_select(self) -> None:
+        self.page.set_content(
+            """
+            <style>
+              table { border-collapse: collapse; }
+              th, td { width: 160px; height: 36px; }
+              .ant-select, input { display: block; width: 140px; height: 28px; }
+            </style>
+            <table>
+              <thead><tr><th>规格单位</th><th>物化特性</th><th>操作</th></tr></thead>
+              <tbody>
+                <tr class="ant-table-row" data-row-key="row-1">
+                  <td><div class="ant-select"><input id="unit-input" role="combobox"></div></td>
+                  <td><div class="ant-select"><input id="property-input" role="combobox"></div></td>
+                  <td>保存</td>
+                </tr>
+              </tbody>
+            </table>
+            """
+        )
+        row = self.page.locator("tr[data-row-key='row-1']")
+
+        self.assertTrue(ApprovalWriter._focus_row_property_combobox(self.page, row))
+        self.assertEqual(self.page.evaluate("document.activeElement.id"), "property-input")
+
     def test_committed_check_ignores_selected_option_from_other_dropdown(self) -> None:
         self.page.set_content(
             """

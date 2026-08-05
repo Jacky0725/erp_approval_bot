@@ -9,10 +9,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from web_runner import (
     AutomationJobManager,
     automation_failure_reason,
+    atomic_write_text,
     normalize_web_write_mode,
     parse_target_list_numbers,
     repair_display_text,
+    run_summary,
     run_health,
+    todo_tasks_summary,
     workflow_summary,
 )
 import web_app
@@ -51,8 +54,63 @@ class WorkflowSummaryTest(unittest.TestCase):
 
             status = manager.status()
 
-            self.assertEqual(status["result_label"], "成功")
+            self.assertEqual(status["result_label"], "审批流程完成")
             self.assertEqual(status["action"], "suggestions")
+
+    def test_todo_export_status_uses_business_label(self) -> None:
+        with TemporaryDirectory() as tmp:
+            manager = AutomationJobManager(root_dir=Path(tmp))
+            manager.action = "todo_export"
+            manager.started_at = "2026-08-05T08:38:49"
+            manager.finished_at = "2026-08-05T08:39:09"
+            manager.success = True
+            manager.error = ""
+
+            status = manager.status()
+
+            self.assertEqual(status["action_label"], "待办清单刷新")
+            self.assertEqual(status["result_label"], "待办清单刷新成功")
+            self.assertEqual(status["summary"]["outcome"], "待办清单刷新成功")
+
+    def test_run_summary_counts_write_outcome_and_targets(self) -> None:
+        with TemporaryDirectory() as tmp:
+            lines = [
+                "Read reagent page 1: 20 row(s).",
+                "Opening target task detail: SJ202608040001",
+                "Save verified for sequence 1",
+                "Could not select physicochemical property 强反应 for sequence 2",
+            ]
+
+            summary = run_summary(
+                lines,
+                action="suggestions",
+                options={"TARGET_LIST_NUMBERS": "SJ202608040001"},
+                running=False,
+                success=True,
+                error="",
+                root_dir=Path(tmp),
+            )
+
+            self.assertEqual(summary["target_list_numbers"], ["SJ202608040001"])
+            self.assertEqual(summary["write_success_count"], 1)
+            self.assertEqual(summary["write_failure_count"], 1)
+            self.assertTrue(summary["has_write_warning"])
+
+    def test_todo_tasks_summary_prefers_utf8_json(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            log_dir = root / "data" / "logs"
+            log_dir.mkdir(parents=True)
+            (log_dir / "todo_tasks.json").write_text(
+                '[{"试剂清单号":"SJ202608040001","客户名称":"上海交通大学","申请人":"戚明燕"}]',
+                encoding="utf-8",
+            )
+
+            summary = todo_tasks_summary(root)
+
+            self.assertEqual(summary["rows"], 1)
+            self.assertEqual(summary["tasks"][0]["list_number"], "SJ202608040001")
+            self.assertEqual(summary["tasks"][0]["customer_name"], "上海交通大学")
 
     def test_parse_target_list_numbers_deduplicates_values(self) -> None:
         result = parse_target_list_numbers("SJ1, SJ2;SJ1\nSJ3")
@@ -143,13 +201,16 @@ class WorkflowSummaryTest(unittest.TestCase):
         ).read_text(encoding="utf-8")
         combined = template_text + settings_text
 
-        self.assertIn('value="multi_page">全清单分页保存', combined)
-        self.assertIn('value="generate_library">保存并生成试剂库', combined)
-        for retired in ["disabled", "test_one", "save_one", "single_page"]:
+        self.assertIn('value="disabled"', combined)
+        self.assertIn('value="multi_page"', combined)
+        self.assertIn('value="generate_library"', combined)
+        for retired in ["test_one", "save_one", "single_page"]:
             self.assertNotIn(f'<option value="{retired}"', combined)
 
     def test_web_write_mode_normalizes_retired_values(self) -> None:
-        self.assertEqual(normalize_web_write_mode("save_one"), "multi_page")
+        self.assertEqual(normalize_web_write_mode("save_one"), "disabled")
+        self.assertEqual(normalize_web_write_mode("unknown"), "disabled")
+        self.assertEqual(normalize_web_write_mode("disabled"), "disabled")
         self.assertEqual(normalize_web_write_mode("generate_library"), "generate_library")
 
         options = run_options(
@@ -162,8 +223,18 @@ class WorkflowSummaryTest(unittest.TestCase):
             auto_pass="",
         )
 
-        self.assertEqual(options["APPROVAL_WRITE_MODE"], "multi_page")
+        self.assertEqual(options["APPROVAL_WRITE_MODE"], "disabled")
         self.assertEqual(options["APPROVAL_WRITE_BATCH_SIZE"], "3")
+
+    def test_atomic_write_text_replaces_existing_file(self) -> None:
+        with TemporaryDirectory() as tmp:
+            path = Path(tmp) / "settings.yaml"
+            path.write_text("old: true\n", encoding="utf-8")
+
+            atomic_write_text(path, "new: true\n")
+
+            self.assertEqual(path.read_text(encoding="utf-8"), "new: true\n")
+            self.assertEqual(list(Path(tmp).glob("*.tmp")), [])
 
 
 if __name__ == "__main__":

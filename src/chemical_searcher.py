@@ -4,13 +4,17 @@ import html
 import copy
 import re
 import socket
+import threading
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from difflib import SequenceMatcher
-from typing import Any
+from pathlib import Path
+from typing import Any, ClassVar
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote_plus, urljoin
 from urllib.request import Request, urlopen
 
+from chemical_search_cache import ChemicalSearchCache
 from llm_extractor import LlmExtractor
 from name_normalizer import NameNormalizer
 from web_researcher import ResearchPage, WebResearcher
@@ -64,6 +68,9 @@ class ChemicalSearcher:
         init=False,
         repr=False,
     )
+    _source_semaphores: ClassVar[dict[str, threading.BoundedSemaphore]] = {}
+    _source_failures: ClassVar[dict[str, int]] = {}
+    _source_lock: ClassVar[threading.RLock] = threading.RLock()
 
     def search(
         self,
@@ -92,6 +99,15 @@ class ChemicalSearcher:
         queries = self._query_candidates(cas_no, standard_name, cleaned_name, english_name)
 
         validation_names = self._validation_names(standard_name or name, standard_name, cleaned_name, english_name, aliases)
+        persistent_key = self._persistent_cache_key(
+            source="chemical_search",
+            normalized_name=standard_name or cleaned_name or english_name or name,
+            cas=cas_no,
+            search_mode="web",
+        )
+        persistent_result = self._persistent_cache().get(persistent_key)
+        if persistent_result is not None:
+            return self._remember_result(cache_key, persistent_result)
         if source_url:
             result = self._detail_result_from_url(
                 url=source_url,
@@ -103,13 +119,13 @@ class ChemicalSearcher:
             if result:
                 result["name_normalization"] = name_result
                 result["query"] = cas_no or standard_name or source_url
-                return self._remember_result(cache_key, result)
+                return self._remember_result(cache_key, result, persistent_key)
             return self._remember_result(cache_key, self._manual_result(
                 name=standard_name or english_name or name,
                 cas=cas_no,
                 reason=f"人工确认 URL 抓取失败或 CAS/名称校验未通过: {source_url}",
                 name_normalization=name_result,
-            ))
+            ), persistent_key)
 
         if not queries:
             return self._remember_result(cache_key, self._manual_result(
@@ -117,18 +133,18 @@ class ChemicalSearcher:
                 cas=cas_no,
                 reason="试剂名称和 CAS 号均为空，名称标准化后也无可查询名称。",
                 name_normalization=name_result,
-            ))
+            ), persistent_key)
 
         search_name = standard_name or cleaned_name or english_name or name
         failed_queries: list[str] = []
         for query in queries:
             validation_names = self._validation_names(query, standard_name, cleaned_name, english_name, aliases)
             for provider in (self._search_chemsrc, self._search_chemicalbook):
-                result = provider(name=query, cas=cas_no, query=query, validation_names=validation_names)
+                result = self._run_provider(provider, name=query, cas=cas_no, query=query, validation_names=validation_names)
                 if result:
                     result["name_normalization"] = name_result
                     result["query"] = query
-                    return self._remember_result(cache_key, result)
+                    return self._remember_result(cache_key, result, persistent_key)
             failed_queries.append(query)
 
         fallback_result = self._fallback_web_research(
@@ -140,7 +156,7 @@ class ChemicalSearcher:
             validation_names=self._validation_names(search_name, standard_name, cleaned_name, english_name, aliases),
         )
         if fallback_result:
-            return self._remember_result(cache_key, fallback_result)
+            return self._remember_result(cache_key, fallback_result, persistent_key)
 
         name_result = self._name_result_with_nonstandard_diagnostic(name_result, name=name, cas=cas_no)
         nonstandard_reason = str(name_result.get("suspected_invalid_reason") or "").strip()
@@ -157,14 +173,14 @@ class ChemicalSearcher:
             reason=reason,
         )
         if llm_fallback:
-            return self._remember_result(cache_key, llm_fallback)
+            return self._remember_result(cache_key, llm_fallback, persistent_key)
 
         return self._remember_result(cache_key, self._manual_result(
             name=search_name or name,
             cas=cas_no,
             reason=reason,
             name_normalization=name_result,
-        ))
+        ), persistent_key)
 
     @staticmethod
     def _cache_key(
@@ -184,9 +200,97 @@ class ChemicalSearcher:
         self,
         cache_key: tuple[str, str, str, str],
         result: dict[str, Any],
+        persistent_key: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         self._search_cache[cache_key] = copy.deepcopy(result)
+        if persistent_key is not None:
+            self._persistent_cache().put(persistent_key, result)
         return copy.deepcopy(result)
+
+    def _persistent_cache(self) -> ChemicalSearchCache:
+        root = self.root_dir if self.root_dir is not None else "."
+        return ChemicalSearchCache(root_dir=Path(root), settings=self.settings)
+
+    def _persistent_cache_key(
+        self,
+        *,
+        source: str,
+        normalized_name: str,
+        cas: str,
+        search_mode: str,
+    ) -> dict[str, str]:
+        return {
+            "source": source,
+            "normalized_name": str(normalized_name or "").strip().lower(),
+            "cas": str(cas or "").strip().lower(),
+            "search_mode": search_mode,
+            "settings_version": ChemicalSearchCache.settings_version(self.settings),
+        }
+
+    def _run_provider(
+        self,
+        provider: Any,
+        *,
+        name: str,
+        cas: str,
+        query: str,
+        validation_names: list[str] | None,
+    ) -> dict[str, Any] | None:
+        source = "Chemsrc" if provider == self._search_chemsrc else "ChemicalBook"
+        if self._source_circuit_open(source):
+            print(f"Skipping {source}; circuit is open after repeated failures in this run.")
+            return None
+        with self._source_slot(source):
+            result = provider(name=name, cas=cas, query=query, validation_names=validation_names)
+        if result:
+            self._record_source_success(source)
+        else:
+            self._record_source_failure(source)
+        return result
+
+    @contextmanager
+    def _source_slot(self, source: str) -> Any:
+        semaphore = self._source_semaphore(source)
+        semaphore.acquire()
+        try:
+            yield
+        finally:
+            semaphore.release()
+
+    def _source_semaphore(self, source: str) -> threading.BoundedSemaphore:
+        limit = self._per_source_concurrency()
+        with self._source_lock:
+            semaphore = self._source_semaphores.get(source)
+            if semaphore is None:
+                semaphore = threading.BoundedSemaphore(limit)
+                self._source_semaphores[source] = semaphore
+            return semaphore
+
+    def _per_source_concurrency(self) -> int:
+        settings = (self.settings or {}).get("chemical_search", {}) or {}
+        try:
+            return max(1, min(8, int(settings.get("per_source_concurrency", 2))))
+        except (TypeError, ValueError):
+            return 2
+
+    def _failure_threshold(self) -> int:
+        settings = (self.settings or {}).get("chemical_search", {}) or {}
+        try:
+            return max(1, int(settings.get("failure_circuit_break_threshold", 5)))
+        except (TypeError, ValueError):
+            return 5
+
+    def _source_circuit_open(self, source: str) -> bool:
+        with self._source_lock:
+            return self._source_failures.get(source, 0) >= self._failure_threshold()
+
+    def _record_source_success(self, source: str) -> None:
+        with self._source_lock:
+            self._source_failures[source] = 0
+
+    def _record_source_failure(self, source: str) -> None:
+        with self._source_lock:
+            self._source_failures[source] = self._source_failures.get(source, 0) + 1
 
     def _name_result_with_nonstandard_diagnostic(
         self,

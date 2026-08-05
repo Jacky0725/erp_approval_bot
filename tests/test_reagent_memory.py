@@ -46,6 +46,14 @@ class ReagentMemoryTest(unittest.TestCase):
             self.assertEqual(memory.lookup(cleaned_name="聚乙二醇")["final_category"], "普通类")
             self.assertEqual(memory.lookup(raw_name="PEG")["final_category"], "普通类")
 
+    def test_sqlite_connection_uses_busy_timeout_and_wal(self) -> None:
+        tmp, memory = self.make_memory()
+        with tmp:
+            memory._ensure_schema()  # noqa: SLF001 - focused database connection regression test.
+            with closing(memory._connect()) as conn:  # noqa: SLF001 - verifies connection-level safety settings.
+                self.assertEqual(conn.execute("PRAGMA busy_timeout").fetchone()[0], 15000)
+                self.assertEqual(conn.execute("PRAGMA journal_mode").fetchone()[0].lower(), "wal")
+
     def test_low_confidence_manual_review_and_conflict_are_not_reused(self) -> None:
         tmp, memory = self.make_memory()
         with tmp:

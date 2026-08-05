@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from typing import Any
@@ -50,6 +51,10 @@ class RecordingSearcher(ChemicalSearcher):
 
 
 class ChemicalSearcherTest(unittest.TestCase):
+    def setUp(self) -> None:
+        ChemicalSearcher._source_failures = {}
+        ChemicalSearcher._source_semaphores = {}
+
     def test_query_candidates_try_names_after_cas(self) -> None:
         self.assertEqual(
             ChemicalSearcher._query_candidates("123-45-6", "standard", "cleaned", "english"),
@@ -145,6 +150,60 @@ class ChemicalSearcherTest(unittest.TestCase):
         self.assertEqual(len(searcher.queries), query_count)
         self.assertTrue(second["need_manual_review"])
         self.assertEqual(second["name_normalization"]["standard_name"], "氢氧化钠")
+
+    def test_persistent_cache_is_reused_across_searcher_instances(self) -> None:
+        settings = {
+            "chemical_search": {
+                "cache": {"enabled": True, "success_ttl_days": 30, "failure_ttl_days": 1},
+                "failure_circuit_break_threshold": 5,
+            }
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            first_searcher = RecordingSearcher(root_dir=Path(tmp), settings=settings)
+            first = first_searcher.search("ethanol", cas="64-17-5")
+            query_count = len(first_searcher.queries)
+            first["need_manual_review"] = True
+
+            second_searcher = RecordingSearcher(root_dir=Path(tmp), settings=settings)
+            second = second_searcher.search("ethanol", cas="64-17-5")
+
+        self.assertGreater(query_count, 0)
+        self.assertEqual(second_searcher.queries, [])
+        self.assertFalse(second["need_manual_review"])
+
+    def test_source_circuit_breaker_skips_only_failed_source(self) -> None:
+        settings = {"chemical_search": {"failure_circuit_break_threshold": 1, "per_source_concurrency": 2}}
+        searcher = RecordingSearcher(root_dir=ROOT_DIR, settings=settings, succeed=False)
+        ChemicalSearcher._source_failures = {}
+        ChemicalSearcher._source_semaphores = {}
+
+        first = searcher._run_provider(
+            searcher._search_chemsrc,
+            name="ethanol",
+            cas="64-17-5",
+            query="64-17-5",
+            validation_names=["ethanol"],
+        )
+        query_count = len(searcher.queries)
+        second = searcher._run_provider(
+            searcher._search_chemsrc,
+            name="ethanol",
+            cas="64-17-5",
+            query="64-17-5",
+            validation_names=["ethanol"],
+        )
+        third = searcher._run_provider(
+            searcher._search_chemicalbook,
+            name="ethanol",
+            cas="64-17-5",
+            query="64-17-5",
+            validation_names=["ethanol"],
+        )
+
+        self.assertIsNone(first)
+        self.assertIsNone(second)
+        self.assertIsNone(third)
+        self.assertEqual(len(searcher.queries), query_count + 1)
 
     def test_relevance_passes_for_similar_name_without_cas(self) -> None:
         searcher = ChemicalSearcher(root_dir=ROOT_DIR)

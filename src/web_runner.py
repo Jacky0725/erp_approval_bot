@@ -3,6 +3,7 @@ from __future__ import annotations
 import contextlib
 import ctypes
 import io
+import json
 import os
 import shutil
 import subprocess
@@ -51,17 +52,26 @@ SOURCE_ROOT = source_root()
 CONFIG_PATH = ROOT_DIR / "config" / "settings.yaml"
 ENV_PATH = ROOT_DIR / ".env"
 LOG_DIR = ROOT_DIR / "data" / "logs"
+RUN_LOG_DIR = LOG_DIR / "runs"
 REVIEW_QUEUE_PATH = ROOT_DIR / "data" / "review_queue.xlsx"
 WEB_RUN_STATE_PATH = LOG_DIR / "web_run_state.yaml"
 TODO_TASKS_PATH = LOG_DIR / "todo_tasks.xlsx"
 TODO_TASKS_JSON_PATH = LOG_DIR / "todo_tasks.json"
-ALLOWED_WEB_WRITE_MODES = {"multi_page", "generate_library"}
+ALLOWED_WEB_WRITE_MODES = {"disabled", "multi_page", "generate_library"}
+
+ACTION_LABELS = {
+    "suggestions": "审批流程",
+    "todo_export": "待办清单刷新",
+    "debug_capture": "首页采集",
+    "judgement_capture": "试剂判定页采集",
+}
 
 WEB_WRITE_MODE_LABELS = {
+    "disabled": "禁用网页写入",
     "multi_page": "全清单分页保存",
     "generate_library": "保存并生成试剂库",
 }
-RETIRED_WEB_WRITE_MODES = {"disabled", "test_one", "save_one", "single_page", ""}
+RETIRED_WEB_WRITE_MODES = {"test_one", "save_one", "single_page", ""}
 
 
 WORKFLOW_STEPS = [
@@ -76,13 +86,13 @@ WORKFLOW_STEPS = [
 ]
 
 
-def normalize_web_write_mode(value: Any, *, default: str = "multi_page") -> str:
+def normalize_web_write_mode(value: Any, *, default: str = "disabled") -> str:
     normalized = str(value or "").strip().lower()
     if normalized in ALLOWED_WEB_WRITE_MODES:
         return normalized
     if normalized in RETIRED_WEB_WRITE_MODES:
-        return "multi_page"
-    return default if default in ALLOWED_WEB_WRITE_MODES else "multi_page"
+        return "disabled"
+    return default if default in ALLOWED_WEB_WRITE_MODES else "disabled"
 
 
 BLOCKING_REVIEW_STATUSES = {
@@ -104,8 +114,25 @@ def load_settings() -> dict[str, Any]:
 
 
 def save_settings(settings: dict[str, Any]) -> None:
-    with CONFIG_PATH.open("w", encoding="utf-8") as file:
-        yaml.safe_dump(settings, file, allow_unicode=True, sort_keys=False)
+    payload = yaml.safe_dump(settings, allow_unicode=True, sort_keys=False)
+    atomic_write_text(CONFIG_PATH, payload)
+
+
+def atomic_write_text(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    try:
+        with tmp_path.open("w", encoding="utf-8") as file:
+            file.write(text)
+            file.flush()
+            os.fsync(file.fileno())
+        os.replace(tmp_path, path)
+    finally:
+        if tmp_path.exists():
+            try:
+                tmp_path.unlink()
+            except OSError:
+                pass
 
 
 MOJIBAKE_MARKERS = (
@@ -140,13 +167,16 @@ def mojibake_score(text: str) -> int:
 
 
 class LineBufferWriter(io.TextIOBase):
-    def __init__(self, lines: list[str], path: Path, limit: int = 800) -> None:
+    def __init__(self, lines: list[str], paths: Path | list[Path], limit: int = 800) -> None:
         self.lines = lines
-        self.path = path
+        self.paths = [paths] if isinstance(paths, Path) else list(paths)
         self.limit = limit
         self.failure_reason = ""
         self._lock = threading.RLock()
-        self._file = path.open("a", encoding="utf-8")
+        self._files = []
+        for path in self.paths:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            self._files.append(path.open("a", encoding="utf-8"))
 
     def writable(self) -> bool:
         return True
@@ -156,8 +186,9 @@ class LineBufferWriter(io.TextIOBase):
             return 0
         cleaned_text = repair_display_text(text)
         with self._lock:
-            self._file.write(cleaned_text)
-            self._file.flush()
+            for file in self._files:
+                file.write(cleaned_text)
+                file.flush()
             for line in cleaned_text.splitlines():
                 if line.strip():
                     self.lines.append(line)
@@ -169,12 +200,14 @@ class LineBufferWriter(io.TextIOBase):
 
     def flush(self) -> None:
         with self._lock:
-            self._file.flush()
+            for file in self._files:
+                file.flush()
 
     def close(self) -> None:
         with self._lock:
-            if not self._file.closed:
-                self._file.close()
+            for file in self._files:
+                if not file.closed:
+                    file.close()
 
 
 @dataclass
@@ -192,6 +225,7 @@ class AutomationJobManager:
     _stop_requested: bool = False
     _last_action: str = ""
     _last_options: dict[str, str] = field(default_factory=dict)
+    _run_log_path: str = ""
     _lock: threading.RLock = field(default_factory=threading.RLock)
     _completion_callbacks: list[Callable[..., None]] = field(default_factory=list)
 
@@ -211,6 +245,7 @@ class AutomationJobManager:
             self._stop_requested = False
             self._last_action = action
             self._last_options = dict(options)
+            self._run_log_path = str(new_run_log_path(action))
             self._persist_state()
             self._thread = threading.Thread(
                 target=self._run,
@@ -248,23 +283,37 @@ class AutomationJobManager:
             success = self.success
             error = self.error
             health = run_health(log_tail, success, error)
+            summary = run_summary(
+                log_tail,
+                action=self.action,
+                options=self._last_options,
+                running=running,
+                success=success,
+                error=error,
+                root_dir=self.root_dir,
+            )
             return {
                 "running": running,
                 "action": self.action,
+                "action_label": action_label(self.action),
                 "started_at": self.started_at,
                 "finished_at": self.finished_at,
                 "success": success,
                 "error": error,
-                "result_label": result_label(running, success, error, health),
+                "result_label": result_label(running, success, error, health, action=self.action),
                 "result_health": health,
+                "run_log_path": self._run_log_path,
+                "summary": summary,
                 "log_tail": log_tail,
                 "workflow": workflow_summary(log_tail, running=running, success=success, error=error),
             }
 
     def _run(self, action: str, options: dict[str, str]) -> None:
         LOG_DIR.mkdir(parents=True, exist_ok=True)
-        log_path = LOG_DIR / "web_run_stdout.txt"
-        writer = LineBufferWriter(self.lines, log_path)
+        aggregate_log_path = LOG_DIR / "web_run_stdout.txt"
+        run_log_path = Path(self._run_log_path) if self._run_log_path else new_run_log_path(action)
+        self._run_log_path = str(run_log_path)
+        writer = LineBufferWriter(self.lines, [aggregate_log_path, run_log_path])
 
         try:
             if action == "todo_export":
@@ -333,25 +382,33 @@ class AutomationJobManager:
         payload = {
             "running": self.running,
             "action": self.action,
+            "action_label": action_label(self.action),
             "started_at": self.started_at,
             "finished_at": self.finished_at,
             "success": self.success,
             "error": repair_display_text(self.error),
+            "run_log_path": self._run_log_path,
+            "options": dict(self._last_options),
             "log_tail": log_tail,
         }
-        with WEB_RUN_STATE_PATH.open("w", encoding="utf-8") as file:
-            yaml.safe_dump(payload, file, allow_unicode=True, sort_keys=False)
+        atomic_write_text(
+            WEB_RUN_STATE_PATH,
+            yaml.safe_dump(payload, allow_unicode=True, sort_keys=False),
+        )
 
     def _status_from_persisted_state(self) -> dict[str, Any]:
         if not WEB_RUN_STATE_PATH.exists():
             return {
                 "running": False,
                 "action": "",
+                "action_label": "",
                 "started_at": "",
                 "finished_at": "",
                 "success": None,
                 "error": "",
                 "result_label": "未运行",
+                "run_log_path": "",
+                "summary": {},
                 "log_tail": [],
                 "workflow": workflow_summary([], running=False, success=None, error=""),
             }
@@ -364,15 +421,28 @@ class AutomationJobManager:
         success = payload.get("success")
         error = repair_display_text(payload.get("error") or "")
         health = run_health(log_tail, success, error)
+        action = str(payload.get("action") or "")
+        summary = run_summary(
+            log_tail,
+            action=action,
+            options=payload.get("options") or {},
+            running=False,
+            success=success,
+            error=error,
+            root_dir=self.root_dir,
+        )
         return {
             "running": False,
-            "action": str(payload.get("action") or ""),
+            "action": action,
+            "action_label": action_label(action),
             "started_at": str(payload.get("started_at") or ""),
             "finished_at": str(payload.get("finished_at") or ""),
             "success": success,
             "error": error,
-            "result_label": result_label(False, success, error, health),
+            "result_label": result_label(False, success, error, health, action=action),
             "result_health": health,
+            "run_log_path": str(payload.get("run_log_path") or ""),
+            "summary": summary,
             "log_tail": log_tail,
             "workflow": workflow_summary(log_tail, running=False, success=success, error=error),
         }
@@ -386,6 +456,7 @@ class AutomationJobManager:
             else:
                 env[key] = value
         env.setdefault("PYTHONIOENCODING", "utf-8")
+        env.setdefault("PYTHONUTF8", "1")
 
         with self._lock:
             if self._stop_requested:
@@ -552,12 +623,111 @@ class AutomationJobManager:
 
     def _record_notification_failure(self, message: str) -> None:
         self.lines.append(message)
-        try:
-            with (LOG_DIR / "web_run_stdout.txt").open("a", encoding="utf-8") as file:
-                file.write(message + "\n")
-        except OSError:
-            pass
+        for path in [LOG_DIR / "web_run_stdout.txt", Path(self._run_log_path) if self._run_log_path else None]:
+            if path is None:
+                continue
+            try:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                with path.open("a", encoding="utf-8") as file:
+                    file.write(message + "\n")
+            except OSError:
+                pass
         self._persist_state()
+
+
+def new_run_log_path(action: str) -> Path:
+    safe_action = "".join(char if char.isalnum() or char in {"-", "_"} else "_" for char in str(action or "run"))
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    return RUN_LOG_DIR / f"{stamp}_{safe_action}.log"
+
+
+def action_label(action: str) -> str:
+    return ACTION_LABELS.get(str(action or ""), str(action or ""))
+
+
+def run_summary(
+    lines: list[str],
+    *,
+    action: str,
+    options: dict[str, Any] | None,
+    running: bool,
+    success: bool | None,
+    error: str,
+    root_dir: Path = ROOT_DIR,
+) -> dict[str, Any]:
+    text = "\n".join(str(line) for line in lines)
+    lower_text = text.lower()
+    options = options or {}
+    todo = todo_tasks_summary(root_dir)
+    approval = approval_summary(root_dir)
+    review = review_queue_summary(root_dir)
+
+    write_success = sum(
+        1
+        for line in lines
+        if "save verified for sequence" in line.lower() or "save result for sequence" in line.lower()
+    )
+    write_failed = sum(
+        1
+        for line in lines
+        if "could not select" in line.lower()
+        or "failed save operation" in line.lower()
+        or "save verification failed" in line.lower()
+    )
+    page_count = len(
+        {
+            marker
+            for marker in (
+                extract_after(line, "Current page:")
+                or extract_after(line, "Read reagent page")
+                or extract_after(line, "Read todo page")
+                for line in lines
+            )
+            if marker
+        }
+    )
+    target_lists = parse_target_list_numbers(str(options.get("TARGET_LIST_NUMBERS") or options.get("target_list_numbers") or ""))
+    if not target_lists:
+        for line in lines:
+            for token in line.replace("'", " ").replace('"', " ").replace(",", " ").split():
+                if token.startswith("SJ") and token[2:].isdigit() and token not in target_lists:
+                    target_lists.append(token)
+
+    if running:
+        outcome = "运行中"
+    elif success is True and action == "todo_export":
+        outcome = "待办清单刷新成功"
+    elif success is True and action == "suggestions":
+        outcome = "审批流程完成"
+    elif success is True:
+        outcome = f"{action_label(action)}成功"
+    elif success is False:
+        outcome = repair_display_text(error) or "执行失败"
+    else:
+        outcome = "未运行"
+
+    return {
+        "action": action,
+        "action_label": action_label(action),
+        "outcome": outcome,
+        "target_list_numbers": target_lists,
+        "todo_count": int(todo.get("rows") or 0),
+        "suggestion_count": int(approval.get("rows") or 0),
+        "manual_review_count": int(review.get("pending") or 0),
+        "processed_pages": page_count,
+        "write_success_count": write_success,
+        "write_failure_count": write_failed,
+        "has_traceback": "traceback" in lower_text,
+        "has_write_warning": write_failed > 0,
+    }
+
+
+def extract_after(line: str, marker: str) -> str:
+    if marker not in line:
+        return ""
+    tail = line.split(marker, 1)[1].strip()
+    return tail.split()[0].strip(" .,:;")
+
 
 @contextlib.contextmanager
 def temporary_env(overrides: dict[str, str]) -> Iterator[None]:
@@ -618,12 +788,16 @@ def workflow_summary(
     }
 
 
-def result_label(running: bool, success: bool | None, error: str, health: str = "") -> str:
+def result_label(running: bool, success: bool | None, error: str, health: str = "", action: str = "") -> str:
     if running:
         return "运行中"
     if success is True:
         if health == "warning":
             return "需检查"
+        if action == "todo_export":
+            return "待办清单刷新成功"
+        if action == "suggestions":
+            return "审批流程完成"
         return "成功"
     if success is False or error:
         return "失败"
@@ -835,6 +1009,40 @@ def approval_summary(root_dir: Path = ROOT_DIR) -> dict[str, Any]:
 
 
 def todo_tasks_summary(root_dir: Path = ROOT_DIR) -> dict[str, Any]:
+    json_path = root_dir / "data" / "logs" / "todo_tasks.json"
+    if json_path.exists():
+        try:
+            rows = json.loads(json_path.read_text(encoding="utf-8"))
+            if isinstance(rows, dict):
+                rows = rows.get("tasks", [])
+            tasks = []
+            for row in rows if isinstance(rows, list) else []:
+                if not isinstance(row, dict):
+                    continue
+                list_number = first_dict_value(row, ["试剂清单号", "清单号", "list_number"])
+                if not list_number:
+                    continue
+                tasks.append(
+                    {
+                        "list_number": list_number,
+                        "customer_id": first_dict_value(row, ["客户编号", "customer_id"]),
+                        "customer_name": first_dict_value(row, ["客户名称", "customer_name"]),
+                        "progress": first_dict_value(row, ["技术审批进度", "progress"]),
+                        "status": first_dict_value(row, ["技术审批状态", "状态", "status"]),
+                        "salesman": first_dict_value(row, ["业务员", "salesman"]),
+                        "applicant": first_dict_value(row, ["申请人", "applicant"]),
+                        "contact": first_dict_value(row, ["联系人", "contact"]),
+                    }
+                )
+            return {
+                "exists": True,
+                "rows": int(len(tasks)),
+                "tasks": tasks,
+                "modified": datetime.fromtimestamp(json_path.stat().st_mtime).isoformat(timespec="seconds"),
+            }
+        except Exception:
+            pass
+
     path = root_dir / "data" / "logs" / "todo_tasks.xlsx"
     if not path.exists():
         return {"exists": False, "rows": 0, "tasks": [], "modified": ""}
@@ -876,6 +1084,14 @@ def todo_tasks_summary(root_dir: Path = ROOT_DIR) -> dict[str, Any]:
         "tasks": tasks,
         "modified": datetime.fromtimestamp(path.stat().st_mtime).isoformat(timespec="seconds"),
     }
+
+
+def first_dict_value(row: dict[str, Any], keys: list[str]) -> str:
+    for key in keys:
+        value = str(row.get(key, "")).strip()
+        if value:
+            return value
+    return ""
 
 
 def clear_todo_task_cache(root_dir: Path = ROOT_DIR) -> None:
@@ -1045,18 +1261,30 @@ def confirm_review_item(payload: dict[str, Any], root_dir: Path = ROOT_DIR) -> d
     if "_review_key" not in frame.columns:
         frame["_review_key"] = frame.apply(review_queue_row_key, axis=1)
 
+    status_column = next((column for column in ("status", "状态", "处理状态") if column in frame.columns), "")
+    if status_column:
+        normalized_status = frame[status_column].astype(str).str.strip().str.lower()
+        blocking_indices = set(frame.index[normalized_status.isin(BLOCKING_REVIEW_STATUSES)].tolist())
+    else:
+        blocking_indices = set(frame.index.tolist())
+
     review_key = str(payload.get("review_key") or "").strip()
-    matched_index: int | None = None
+    matched_indices: list[int] = []
     if review_key:
-        matches = frame.index[frame["_review_key"].astype(str) == review_key].tolist()
-        if matches:
-            matched_index = matches[-1]
+        matched_indices = frame.index[frame["_review_key"].astype(str) == review_key].tolist()
 
-    if matched_index is None:
+    if not matched_indices:
         matched_index = match_review_item_by_fields(frame, payload)
+        if matched_index is not None:
+            matched_indices = [matched_index]
 
-    if matched_index is None:
+    if not matched_indices:
         return {"confirmed": False, "message": "没有找到对应的人工复核记录，可能已被处理或文件已刷新。"}
+
+    pending_matched_indices = [index for index in matched_indices if index in blocking_indices]
+    if not pending_matched_indices:
+        pending_matched_indices = [matched_indices[-1]]
+    matched_index = pending_matched_indices[-1]
 
     row = frame.loc[matched_index]
     memory = ReagentMemory.from_settings(settings, root_dir)
@@ -1089,7 +1317,8 @@ def confirm_review_item(payload: dict[str, Any], root_dir: Path = ROOT_DIR) -> d
     }.items():
         if column not in frame.columns:
             frame[column] = ""
-        frame.at[matched_index, column] = value
+        for index in pending_matched_indices:
+            frame.at[index, column] = value
 
     frame = frame.drop(columns=["_review_key"], errors="ignore")
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -1462,7 +1691,7 @@ def runtime_config_snapshot() -> dict[str, Any]:
         "approval_write_mode": normalize_web_write_mode(
             os.getenv(
                 "APPROVAL_WRITE_MODE",
-                str(approval.get("write_mode", "multi_page")),
+                str(approval.get("write_mode", "disabled")),
             )
         ),
         "approval_write_min_confidence": os.getenv(
@@ -1483,7 +1712,7 @@ def runtime_config_snapshot() -> dict[str, Any]:
         "scheduler_daily_time": schedule.get("daily_time", "16:00"),
         "scheduler_use_default_run_policy": "true" if schedule.get("use_default_run_policy", True) else "false",
         "scheduler_process_all_todos_max": str(schedule.get("process_all_todos_max", 50)),
-        "scheduler_approval_write_mode": normalize_web_write_mode(str(schedule.get("approval_write_mode", "multi_page"))),
+        "scheduler_approval_write_mode": normalize_web_write_mode(str(schedule.get("approval_write_mode", "disabled"))),
         "scheduler_approval_write_min_confidence": str(schedule.get("approval_write_min_confidence", "0.8")),
         "scheduler_auto_pass": "true" if schedule.get("auto_pass") else "false",
         "scheduler_skip_manual_review_lists": "true" if schedule.get("skip_manual_review_lists", True) else "false",
@@ -1603,7 +1832,7 @@ def save_runtime_config(form: dict[str, str]) -> dict[str, Any]:
     )
     scheduler["approval_write_mode"] = normalize_web_write_mode(
         form.get("scheduler_approval_write_mode", ""),
-        default=normalize_web_write_mode(str(scheduler.get("approval_write_mode", "multi_page"))),
+        default=normalize_web_write_mode(str(scheduler.get("approval_write_mode", "disabled"))),
     )
     scheduler["approval_write_min_confidence"] = (
         form.get("scheduler_approval_write_min_confidence", "").strip()
@@ -1657,7 +1886,7 @@ def update_env_file(path: Path, updates: dict[str, str]) -> None:
         if key not in seen:
             output.append(f"{key}={escape_env_value(value)}")
 
-    path.write_text("\n".join(output).rstrip() + "\n", encoding="utf-8")
+    atomic_write_text(path, "\n".join(output).rstrip() + "\n")
     load_dotenv(path, override=True)
 
 
