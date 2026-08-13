@@ -99,6 +99,15 @@
       return approvalWriteModeLabels[value] || safe(value);
     }
 
+    function updateDryRunUi(value) {
+      const enabled = String(value || "").toLowerCase() === "true";
+      setText("#dryRunText", enabled ? "开启" : "关闭");
+      const pill = document.querySelector("#dryRunPill");
+      if (pill) pill.classList.toggle("dry-run-active", enabled);
+      const warning = document.querySelector("#dryRunWarning");
+      if (warning) warning.hidden = !enabled;
+    }
+
     function setCheckbox(form, name, value) {
       if (!form) return;
       const field = form.querySelector(`[name="${name}"]`);
@@ -110,6 +119,7 @@
     setCheckbox(runForm, "process_all_todos", initialRuntime.process_all_todos);
     setCheckbox(runForm, "auto_pass", initialRuntime.auto_pass);
     setCheckbox(settingsForm, "process_all_todos", initialRuntime.process_all_todos);
+    setCheckbox(settingsForm, "app_dry_run", initialRuntime.app_dry_run);
     setCheckbox(settingsForm, "auto_pass", initialRuntime.auto_pass);
     setCheckbox(settingsForm, "scheduler_enabled", initialRuntime.scheduler_enabled);
     setCheckbox(settingsForm, "scheduler_use_default_run_policy", initialRuntime.scheduler_use_default_run_policy || "true");
@@ -121,6 +131,7 @@
     setSelectValue(settingsForm, "scheduler_mode", initialRuntime.scheduler_mode);
     setSelectValue(settingsForm, "scheduler_approval_write_mode", initialRuntime.scheduler_approval_write_mode);
     setText("#writeModeText", approvalWriteModeLabel(initialRuntime.approval_write_mode));
+    updateDryRunUi(initialRuntime.app_dry_run);
     setText("#schedulerNextRun", safe(initialScheduler.next_run_at));
     setText("#schedulerLastRun", safe(initialScheduler.last_run_at));
     setText("#schedulerLastResult", safe(initialScheduler.last_result));
@@ -629,6 +640,55 @@
       }
     }
 
+    function reviewEvidenceLabel(row) {
+      const type = row.evidence_source_type || "";
+      if (type === "llm_fallback") return "LLM辅助";
+      if (type === "trusted_web") return "可信网站";
+      if (type === "web_fallback") return "网页兜底";
+      return "证据不足";
+    }
+
+    function reviewEvidenceHtml(row) {
+      const suggested = row.suggested_category || "";
+      const confidence = row.classification_confidence || "";
+      const sourceConfidence = row.source_confidence || "";
+      const llmConfidence = row.llm_confidence || "";
+      const quality = row.evidence_quality || "";
+      const summary = row.property_summary || "";
+      const properties = [
+        ["闪点", row.flash_point],
+        ["沸点", row.boiling_point],
+        ["毒性", row.toxicity],
+        ["腐蚀", row.corrosive],
+        ["氧化", row.oxidizing],
+        ["易燃", row.flammable],
+        ["遇水反应", row.water_reactive],
+        ["爆炸风险", row.explosive_risk],
+      ].filter((item) => item[1] !== undefined && item[1] !== null && String(item[1]).trim() !== "");
+      const sourceLink = row.source_url
+        ? `<a href="${escapeHtml(row.source_url)}" target="_blank" rel="noreferrer">来源链接</a>`
+        : "";
+      const meta = [
+        suggested ? `建议：${escapeHtml(suggested)}` : "",
+        confidence ? `分类置信度：${escapeHtml(confidence)}` : "",
+        sourceConfidence ? `资料可信度：${escapeHtml(sourceConfidence)}` : "",
+        llmConfidence ? `LLM置信度：${escapeHtml(llmConfidence)}` : "",
+        quality ? `证据质量：${escapeHtml(quality)}` : "",
+      ].filter(Boolean).join(" · ");
+      return `
+        <div class="review-evidence ${row.evidence_source_type === "llm_fallback" ? "llm-evidence" : ""}">
+          <div class="review-evidence-head">
+            <span>${escapeHtml(reviewEvidenceLabel(row))}</span>
+            ${sourceLink}
+          </div>
+          ${meta ? `<p>${meta}</p>` : ""}
+          ${properties.length ? `<p>${properties.map((item) => `${escapeHtml(item[0])}=${escapeHtml(item[1])}`).join(" · ")}</p>` : ""}
+          ${summary ? `<p title="${escapeHtml(summary)}">${escapeHtml(summary)}</p>` : ""}
+          ${row.review_advice ? `<p class="review-advice">${escapeHtml(row.review_advice)}</p>` : ""}
+        </div>
+      `;
+    }
+
     function renderReviewRows() {
       const body = document.querySelector("#reviewTable");
       const visibleCount = document.querySelector("#reviewVisibleCount");
@@ -656,7 +716,7 @@
       pageRows.forEach((row) => {
         const tr = document.createElement("tr");
         tr.className = "review-row";
-        const options = categoryOptionsHtml("");
+        const options = categoryOptionsHtml(row.suggested_category || "");
         tr.innerHTML = `
           <td class="review-time-cell">
             <strong>${escapeHtml(row.timestamp || "-")}</strong>
@@ -670,7 +730,10 @@
             <span>${escapeHtml(row.cas || "-")}</span>
             <span class="status-badge status-warning">${escapeHtml(row.status || "待复核")}</span>
           </td>
-          <td class="reason-cell" title="${escapeHtml(row.reason_full || row.reason)}">${escapeHtml(row.reason)}</td>
+          <td class="reason-cell" title="${escapeHtml(row.reason_full || row.reason)}">
+            <div>${escapeHtml(row.reason)}</div>
+            ${reviewEvidenceHtml(row)}
+          </td>
           <td class="review-category-cell">
             <select class="review-category">${options}</select>
             <span class="review-selected">未选择</span>
@@ -1373,6 +1436,7 @@
       setText("#runWriteSuccess", safe(runSummary.write_success_count, "-"));
       setText("#runWriteFailure", safe(runSummary.write_failure_count, "-"));
       setText("#runLogPath", safe(status.run_log_path, "-"));
+      updateDryRunUi(runtime.app_dry_run);
       setText("#autoPassText", safe(runtime.auto_pass));
       setText("#writeModeText", approvalWriteModeLabel(runtime.approval_write_mode));
       setText("#processScopeText", runtime.process_all_todos === "true" ? "全部待办" : "勾选清单/首条");

@@ -496,6 +496,26 @@ body[data-page="logs"] .command-strip {
   font-weight: 760;
 }
 
+.dry-run-pill.dry-run-active,
+.dry-run-warning {
+  border-color: #f4c430;
+  background: var(--amber-soft);
+  color: var(--amber);
+}
+
+.dry-run-pill.dry-run-active strong {
+  color: var(--amber);
+}
+
+.dry-run-warning {
+  margin-bottom: 14px;
+  padding: 10px 12px;
+  border: 1px solid #f4c430;
+  border-radius: var(--radius);
+  font-size: 13px;
+  font-weight: 700;
+}
+
 .ghost-link:hover {
   border-color: var(--accent);
   color: var(--accent);
@@ -1451,6 +1471,44 @@ tr:last-child td {
   max-width: 460px;
   color: #374151;
   line-height: 1.45;
+}
+
+.review-evidence {
+  margin-top: 8px;
+  padding: 8px;
+  border: 1px solid #e5e7eb;
+  border-radius: 6px;
+  background: #f9fafb;
+  color: #4b5563;
+  font-size: 12px;
+}
+
+.review-evidence.llm-evidence {
+  border-color: #fed7aa;
+  background: #fff7ed;
+}
+
+.review-evidence-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 4px;
+  font-weight: 700;
+  color: #111827;
+}
+
+.review-evidence-head a {
+  color: var(--review-primary);
+  text-decoration: none;
+}
+
+.review-evidence p {
+  margin: 4px 0 0;
+}
+
+.review-advice {
+  font-weight: 600;
 }
 
 .review-category-cell {

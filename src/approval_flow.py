@@ -997,6 +997,9 @@ class ApprovalFlowMixin:
             reagent,
             name_result,
             reason=reason,
+            search_result=search_result,
+            extracted=extracted,
+            classification=classification,
         )
 
     def search_reagents_parallel(self, items: list[dict[str, Any]]) -> dict[int, dict[str, Any]]:
@@ -1066,17 +1069,68 @@ class ApprovalFlowMixin:
         search_result = item["search_result"]
         print(f"[parallel llm] START {item['progress']} {reagent_name}")
         extractor = LlmExtractor(settings=self.settings)
+        if self._search_result_needs_llm_knowledge_fallback(search_result):
+            fallback = extractor.generate_knowledge_fallback(
+                {
+                    "raw_name": reagent_name,
+                    "name": reagent_name,
+                    "cas": search_result.get("cas") or str(item.get("search_cas") or reagent.get("CAS\u53f7", "")),
+                    "standard_name": (search_result.get("name_normalization") or {}).get("standard_name", ""),
+                    "cleaned_name": (search_result.get("name_normalization") or {}).get("cleaned_name", ""),
+                    "failed_queries": [search_result.get("query", "")],
+                    "no_web_evidence_reason": search_result.get("failure_reason") or search_result.get("raw_text") or "",
+                    "web_evidence_quality": search_result.get("evidence_quality", ""),
+                }
+            )
+            raw_text = str(fallback.get("raw_text") or "").strip()
+            if raw_text:
+                search_result = dict(search_result)
+                search_result["raw_text"] = raw_text
+                search_result["source"] = "LLM knowledge fallback"
+                search_result["fallback_source"] = "LLM knowledge fallback"
+                search_result["fallback_url"] = ""
+                search_result["source_confidence"] = 0.0
+                search_result["llm_confidence"] = min(self._float_confidence(fallback.get("confidence")), 0.65)
+                search_result["evidence_quality"] = "llm_low"
+                search_result["used_llm_knowledge_fallback"] = True
+                search_result["need_manual_review"] = True
+                search_result["failure_reason"] = (
+                    f"{search_result.get('failure_reason') or 'Website evidence is missing or insufficient.'} "
+                    f"LLM fallback was used for manual-review advice only. {fallback.get('reason') or ''}"
+                ).strip()
+                item["search_result"] = search_result
         extracted = extractor.extract_properties(
             raw_text=search_result.get("raw_text", ""),
             name=f"{reagent_name} / {search_result.get('name') or str(item.get('search_name') or reagent_name)}",
             cas=search_result.get("cas") or str(item.get("search_cas") or reagent.get("CAS\u53f7", "")),
         )
+        if search_result.get("used_llm_knowledge_fallback"):
+            extracted["used_llm_knowledge_fallback"] = True
+            extracted["llm_confidence"] = search_result.get("llm_confidence", "")
         classification = rule_engine.classify(self._classification_input(reagent, search_result, extracted))
+        if search_result.get("used_llm_knowledge_fallback"):
+            classification = dict(classification)
+            classification["need_manual_review"] = True
+            classification["reason"] = (
+                f"{classification.get('reason') or ''} "
+                "LLM fallback evidence is advisory only and requires manual review."
+            ).strip()
         print(
             f"[parallel llm] END {item['progress']} {reagent_name} "
             f"-> {classification.get('final_category') or '<manual_review>'}"
         )
         return extracted, classification
+
+    @staticmethod
+    def _search_result_needs_llm_knowledge_fallback(search_result: dict[str, Any]) -> bool:
+        if search_result.get("used_llm_knowledge_fallback"):
+            return False
+        evidence_quality = str(search_result.get("evidence_quality") or "").strip().lower()
+        source_confidence = ApprovalFlowMixin._float_confidence(search_result.get("source_confidence"))
+        return bool(
+            search_result.get("need_manual_review", False)
+            and (not search_result.get("raw_text") or evidence_quality in {"", "none", "low"} or source_confidence < 0.7)
+        )
 
     def parallel_worker_count(self) -> int:
         approval_settings = self.settings.get("approval", {}) or {}
@@ -2254,12 +2308,42 @@ class ApprovalFlowMixin:
     ) -> bool:
         evidence = extracted.get("evidence", []) or []
         llm_failed = any("LLM extraction failed" in str(item) for item in evidence)
+        if search_result.get("need_manual_review", True):
+            return True
+        if llm_failed:
+            return True
+        if classification.get("need_manual_review", True):
+            return True
+        if name_result.get("need_manual_review", True):
+            return not self._search_resolved_name_review(search_result, name_result)
+        return False
+
+    @staticmethod
+    def _search_resolved_name_review(search_result: dict[str, Any], name_result: dict[str, Any]) -> bool:
+        source = str(search_result.get("source") or "").strip()
+        trusted_source = source in {"Chemsrc", "ChemicalBook"}
+        confidence = ApprovalFlowMixin._float_confidence(name_result.get("confidence"))
+        source_confidence = ApprovalFlowMixin._float_confidence(search_result.get("source_confidence"))
+        has_identifier = bool(str(name_result.get("cas") or search_result.get("cas") or "").strip())
         return bool(
-            search_result.get("need_manual_review", True)
-            or name_result.get("need_manual_review", True)
-            or llm_failed
-            or classification.get("need_manual_review", True)
+            trusted_source
+            and search_result.get("relevance_passed", False)
+            and source_confidence >= 0.86
+            and confidence >= 0.8
+            and (
+                name_result.get("web_verified_alias")
+                or not name_result.get("suspected_invalid_name", False)
+                or has_identifier
+            )
         )
+
+    @staticmethod
+    def _float_confidence(value: Any) -> float:
+        try:
+            confidence = float(value)
+        except (TypeError, ValueError):
+            return 0.0
+        return max(0.0, min(1.0, confidence))
 
     def try_auto_pass_current_task(self, page: Page) -> None:
         if self.dry_run_enabled():

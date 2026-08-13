@@ -25,6 +25,53 @@ from web_runner import (  # noqa: E402
 
 
 class WebReviewConfirmationTest(unittest.TestCase):
+    def test_review_queue_summary_includes_manual_review_evidence_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            data_dir = root / "data"
+            data_dir.mkdir(parents=True)
+            queue_path = data_dir / "review_queue.xlsx"
+            pd.DataFrame(
+                [
+                    {
+                        "timestamp": "2026-06-25T10:00:00",
+                        "list_number": "SJ1",
+                        "chemical_name": "llm-only",
+                        "cas": "",
+                        "standard_name": "llm-only",
+                        "reason": "needs manual review",
+                        "status": "pending",
+                        "suggested_category": "腐蚀性",
+                        "classification_confidence": "0.65",
+                        "property_summary": "corrosive=True",
+                        "evidence_source_type": "llm_fallback",
+                        "source_confidence": "",
+                        "llm_confidence": "0.65",
+                        "evidence_quality": "llm_low",
+                        "source_url": "",
+                        "flash_point": "",
+                        "boiling_point": "",
+                        "toxicity": "",
+                        "corrosive": "True",
+                        "oxidizing": "",
+                        "flammable": "",
+                        "water_reactive": "",
+                        "explosive_risk": "",
+                        "used_llm_knowledge_fallback": "True",
+                        "review_advice": "LLM fallback is advisory only.",
+                    }
+                ]
+            ).to_excel(queue_path, index=False)
+
+            summary = review_queue_summary(root)
+
+        row = summary["preview"][0]
+        self.assertEqual(row["suggested_category"], "腐蚀性")
+        self.assertEqual(row["evidence_source_type"], "llm_fallback")
+        self.assertEqual(row["llm_confidence"], "0.65")
+        self.assertEqual(row["corrosive"], "True")
+        self.assertEqual(row["review_advice"], "LLM fallback is advisory only.")
+
     def test_confirm_review_item_marks_resolved_and_adds_memory(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

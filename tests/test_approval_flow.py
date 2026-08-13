@@ -478,6 +478,54 @@ class ApprovalFlowTodoLoopTest(unittest.TestCase):
 
         self.assertFalse(result)
 
+    def test_trusted_search_resolution_can_clear_name_manual_review(self) -> None:
+        bot = Bot()
+
+        result = bot._suggestion_needs_manual_review(
+            search_result={
+                "source": "Chemsrc",
+                "need_manual_review": False,
+                "relevance_passed": True,
+                "source_confidence": 0.92,
+                "cas": "1310-73-2",
+            },
+            name_result={
+                "standard_name": "氢氧化钠",
+                "cas": "1310-73-2",
+                "confidence": 0.92,
+                "need_manual_review": True,
+                "web_verified_alias": True,
+            },
+            extracted={"confidence": 0.8, "evidence": []},
+            classification={"need_manual_review": False, "final_category": "\u666e\u901a\u7c7b"},
+        )
+
+        self.assertFalse(result)
+
+    def test_classification_manual_review_still_blocks_verified_name(self) -> None:
+        bot = Bot()
+
+        result = bot._suggestion_needs_manual_review(
+            search_result={
+                "source": "Chemsrc",
+                "need_manual_review": False,
+                "relevance_passed": True,
+                "source_confidence": 0.92,
+                "cas": "1310-73-2",
+            },
+            name_result={
+                "standard_name": "氢氧化钠",
+                "cas": "1310-73-2",
+                "confidence": 0.92,
+                "need_manual_review": True,
+                "web_verified_alias": True,
+            },
+            extracted={"confidence": 0.8, "evidence": []},
+            classification={"need_manual_review": True, "final_category": "\u666e\u901a\u7c7b"},
+        )
+
+        self.assertTrue(result)
+
     def test_high_confidence_candidate_allows_empty_evidence_when_not_manual_review(self) -> None:
         bot = Bot()
         bot.settings = {"approval": {"write_min_confidence": 0.8}}
@@ -995,6 +1043,8 @@ class ApprovalFlowTodoLoopTest(unittest.TestCase):
                         "raw_text": "source text",
                         "hazard_keywords": [],
                         "need_manual_review": False,
+                        "source_confidence": 0.9,
+                        "evidence_quality": "high",
                         "name_normalization": {
                             "raw_name": reagent["\u8bd5\u5242\u540d\u79f0"],
                             "cleaned_name": "needs-manual",
@@ -1011,10 +1061,21 @@ class ApprovalFlowTodoLoopTest(unittest.TestCase):
                 item = items[0]
                 return {
                     int(item["index"]): (
-                        {"evidence": ["uncertain evidence"], "confidence": 0.2},
                         {
-                            "final_category": "",
-                            "matched_categories": [],
+                            "flash_point": "25 C",
+                            "boiling_point": "",
+                            "toxicity": "",
+                            "corrosive": True,
+                            "oxidizing": None,
+                            "flammable": True,
+                            "water_reactive": None,
+                            "explosive_risk": None,
+                            "evidence": ["uncertain evidence"],
+                            "confidence": 0.2,
+                        },
+                        {
+                            "final_category": "\u6613\u71c3\u7c7b",
+                            "matched_categories": ["\u6613\u71c3\u7c7b"],
                             "reason": "cannot classify from rule evidence",
                             "confidence": 0.2,
                             "need_manual_review": True,
@@ -1033,6 +1094,88 @@ class ApprovalFlowTodoLoopTest(unittest.TestCase):
         self.assertTrue(suggestions[0]["\u9700\u4eba\u5de5\u590d\u6838"])
         self.assertEqual(len(queue), 1)
         self.assertEqual(queue["\u8bd5\u5242\u6e05\u5355\u53f7"].tolist(), ["SJ1"])
+        self.assertEqual(queue["suggested_category"].tolist(), ["\u6613\u71c3\u7c7b"])
+        self.assertEqual(queue["evidence_source_type"].tolist(), ["web_fallback"])
+        self.assertEqual(queue["flash_point"].tolist(), ["25 C"])
+        self.assertEqual(queue["corrosive"].tolist(), ["True"])
+        self.assertIn("uncertain evidence", queue["property_summary"].iloc[0])
+
+    def test_low_quality_search_uses_llm_fallback_but_keeps_manual_review(self) -> None:
+        class FakeExtractor:
+            def __init__(self, *args: object, **kwargs: object) -> None:
+                pass
+
+            def generate_knowledge_fallback(self, reagent_info: dict[str, object]) -> dict[str, object]:
+                return {
+                    "raw_text": "LLM knowledge fallback; no web evidence: likely corrosive material.",
+                    "reason": "fallback for insufficient website evidence",
+                    "confidence": 0.9,
+                    "used_llm": True,
+                }
+
+            def extract_properties(self, raw_text: str, name: str = "", cas: str = "") -> dict[str, object]:
+                return {
+                    "name": name,
+                    "cas": cas,
+                    "flash_point": "",
+                    "boiling_point": "",
+                    "toxicity": "",
+                    "corrosive": True,
+                    "oxidizing": None,
+                    "flammable": None,
+                    "water_reactive": None,
+                    "explosive_risk": None,
+                    "heavy_metal": None,
+                    "suggested_categories": ["\u8150\u8680\u6027"],
+                    "evidence": ["LLM fallback says likely corrosive"],
+                    "confidence": 0.65,
+                }
+
+        class FakeRuleEngine:
+            def classify(self, reagent_info: dict[str, object]) -> dict[str, object]:
+                return {
+                    "final_category": "\u8150\u8680\u6027",
+                    "matched_categories": ["\u8150\u8680\u6027"],
+                    "reason": "corrosive signal",
+                    "confidence": 0.8,
+                    "need_manual_review": False,
+                }
+
+        item = {
+            "index": 1,
+            "progress": "1/1",
+            "reagent": {
+                "\u8bd5\u5242\u540d\u79f0": "unknown",
+                "CAS\u53f7": "",
+                "\u89c4\u683c": "",
+                "\u89c4\u683c\u5355\u4f4d": "",
+            },
+            "search_result": {
+                "name": "unknown",
+                "cas": "",
+                "source": "GuideChem",
+                "raw_text": "thin low quality text",
+                "need_manual_review": True,
+                "source_confidence": 0.6,
+                "evidence_quality": "low",
+                "failure_reason": "insufficient website evidence",
+                "name_normalization": {},
+            },
+            "search_name": "unknown",
+            "search_cas": "",
+        }
+
+        bot = Bot()
+        bot.settings = {}
+        with patch("approval_flow.LlmExtractor", FakeExtractor):
+            extracted, classification = bot.extract_and_classify_worker(item, FakeRuleEngine())  # type: ignore[arg-type]
+
+        self.assertTrue(item["search_result"]["used_llm_knowledge_fallback"])
+        self.assertEqual(item["search_result"]["llm_confidence"], 0.65)
+        self.assertEqual(item["search_result"]["source_confidence"], 0.0)
+        self.assertTrue(extracted["used_llm_knowledge_fallback"])
+        self.assertTrue(classification["need_manual_review"])
+        self.assertIn("advisory only", classification["reason"])
 
     def test_reagent_memory_match_skips_chemical_search(self) -> None:
         class MemoryBot(Bot):

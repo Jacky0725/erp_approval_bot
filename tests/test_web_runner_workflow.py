@@ -207,6 +207,19 @@ class WorkflowSummaryTest(unittest.TestCase):
         for retired in ["test_one", "save_one", "single_page"]:
             self.assertNotIn(f'<option value="{retired}"', combined)
 
+    def test_dry_run_safety_gate_is_visible_in_web_ui(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        layout_text = (root / "src" / "templates" / "layout.html").read_text(encoding="utf-8")
+        run_text = (root / "src" / "templates" / "partials" / "run.html").read_text(encoding="utf-8")
+        settings_text = (root / "src" / "templates" / "partials" / "settings.html").read_text(encoding="utf-8")
+        dashboard_js = (root / "src" / "static" / "dashboard.js").read_text(encoding="utf-8")
+
+        self.assertIn("dryRunText", layout_text)
+        self.assertIn("dryRunWarning", run_text)
+        self.assertIn('name="app_dry_run"', settings_text)
+        self.assertIn("updateDryRunUi", dashboard_js)
+        self.assertIn('setCheckbox(settingsForm, "app_dry_run"', dashboard_js)
+
     def test_web_write_mode_normalizes_retired_values(self) -> None:
         self.assertEqual(normalize_web_write_mode("save_one"), "disabled")
         self.assertEqual(normalize_web_write_mode("unknown"), "disabled")

@@ -20,6 +20,8 @@ from name_normalizer import NameNormalizer
 from web_researcher import ResearchPage, WebResearcher
 
 
+TRUSTED_NAME_VERIFICATION_SOURCES = {"Chemsrc", "ChemicalBook"}
+
 HAZARD_KEYWORDS = [
     "易燃",
     "可燃",
@@ -117,8 +119,17 @@ class ChemicalSearcher:
                 validation_names=validation_names,
             )
             if result:
+                name_result = self._verified_name_normalization(
+                    original_name=name,
+                    specification=specification,
+                    unit=unit,
+                    name_result=name_result,
+                    search_result=result,
+                    normalizer=normalizer,
+                )
                 result["name_normalization"] = name_result
                 result["query"] = cas_no or standard_name or source_url
+                self._record_verified_alias_candidate(name_result, result, normalizer)
                 return self._remember_result(cache_key, result, persistent_key)
             return self._remember_result(cache_key, self._manual_result(
                 name=standard_name or english_name or name,
@@ -142,8 +153,17 @@ class ChemicalSearcher:
             for provider in (self._search_chemsrc, self._search_chemicalbook):
                 result = self._run_provider(provider, name=query, cas=cas_no, query=query, validation_names=validation_names)
                 if result:
+                    name_result = self._verified_name_normalization(
+                        original_name=name,
+                        specification=specification,
+                        unit=unit,
+                        name_result=name_result,
+                        search_result=result,
+                        normalizer=normalizer,
+                    )
                     result["name_normalization"] = name_result
                     result["query"] = query
+                    self._record_verified_alias_candidate(name_result, result, normalizer)
                     return self._remember_result(cache_key, result, persistent_key)
             failed_queries.append(query)
 
@@ -226,6 +246,172 @@ class ChemicalSearcher:
             "search_mode": search_mode,
             "settings_version": ChemicalSearchCache.settings_version(self.settings),
         }
+
+    def _verified_name_normalization(
+        self,
+        *,
+        original_name: str,
+        specification: str,
+        unit: str,
+        name_result: dict[str, Any],
+        search_result: dict[str, Any],
+        normalizer: NameNormalizer,
+    ) -> dict[str, Any]:
+        current = dict(name_result or {})
+        if not self._trusted_name_verification(search_result):
+            return current
+
+        current_confidence = self._normalize_confidence(current.get("confidence"))
+        if current_confidence >= 0.8 and not current.get("need_manual_review", True):
+            return current
+
+        source = str(search_result.get("source") or "").strip()
+        source_confidence = self._normalize_confidence(search_result.get("source_confidence"))
+        verified_cas = self._extract_cas(str(search_result.get("cas") or ""))
+        if not verified_cas:
+            verified_cas = self._extract_cas(str(search_result.get("raw_text") or ""))
+        if verified_cas:
+            cas_result = normalizer.normalize(
+                raw_name=original_name,
+                cas=verified_cas,
+                specification=specification,
+                unit=unit,
+            )
+            if not cas_result.get("need_manual_review", True):
+                upgraded = dict(cas_result)
+                upgraded["confidence"] = max(
+                    self._normalize_confidence(upgraded.get("confidence")),
+                    source_confidence,
+                    current_confidence,
+                )
+                upgraded["need_manual_review"] = False
+                upgraded["reason"] = self._append_reason(
+                    str(upgraded.get("reason") or current.get("reason") or ""),
+                    f"Verified by {source} result; upgraded name normalization from web evidence.",
+                )
+                upgraded["web_verified_alias"] = True
+                upgraded["web_verification_source"] = source
+                upgraded["web_verification_url"] = str(search_result.get("url") or "")
+                return upgraded
+
+        name_similarity = self._normalize_confidence(search_result.get("name_similarity"))
+        if name_similarity >= 0.9:
+            upgraded = dict(current)
+            upgraded["confidence"] = max(current_confidence, min(source_confidence, name_similarity))
+            upgraded["need_manual_review"] = self._normalize_confidence(upgraded.get("confidence")) < 0.8
+            upgraded["reason"] = self._append_reason(
+                str(upgraded.get("reason") or ""),
+                f"Verified by {source} name match; confidence upgraded from web evidence.",
+            )
+            upgraded["web_verified_alias"] = True
+            upgraded["web_verification_source"] = source
+            upgraded["web_verification_url"] = str(search_result.get("url") or "")
+            return upgraded
+
+        return current
+
+    def _trusted_name_verification(self, search_result: dict[str, Any]) -> bool:
+        source = str(search_result.get("source") or "").strip()
+        return bool(
+            source in TRUSTED_NAME_VERIFICATION_SOURCES
+            and not search_result.get("need_manual_review", True)
+            and search_result.get("relevance_passed", False)
+            and self._normalize_confidence(search_result.get("source_confidence")) >= 0.86
+        )
+
+    def _record_verified_alias_candidate(
+        self,
+        name_result: dict[str, Any],
+        search_result: dict[str, Any],
+        normalizer: NameNormalizer,
+    ) -> None:
+        if not name_result.get("web_verified_alias"):
+            return
+        alias = str(name_result.get("cleaned_name") or name_result.get("raw_name") or "").strip()
+        standard_name = str(name_result.get("standard_name") or "").strip()
+        cas = self._extract_cas(str(name_result.get("cas") or search_result.get("cas") or ""))
+        if not alias or not standard_name or alias == standard_name:
+            return
+        if self._alias_already_configured(alias, str(name_result.get("raw_name") or ""), normalizer):
+            return
+
+        try:
+            import pandas as pd
+        except ImportError:
+            return
+
+        columns = [
+            "timestamp",
+            "alias",
+            "standard_name",
+            "cas",
+            "source",
+            "source_url",
+            "confidence",
+            "evidence",
+            "status",
+            "reviewer",
+            "reviewed_at",
+        ]
+        path = self._name_alias_candidates_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if path.exists():
+            candidates = pd.read_excel(path, dtype=str).fillna("")
+        else:
+            candidates = pd.DataFrame(columns=columns)
+        candidates = candidates.reindex(columns=columns).fillna("")
+        duplicate = (
+            (candidates["alias"].astype(str).str.strip() == alias)
+            & (candidates["standard_name"].astype(str).str.strip() == standard_name)
+            & (candidates["cas"].astype(str).str.strip() == cas)
+            & (candidates["status"].astype(str).str.strip().str.lower().isin({"pending", ""}))
+        )
+        if not candidates.empty and bool(duplicate.any()):
+            return
+
+        row = {
+            "timestamp": pd.Timestamp.now().isoformat(timespec="seconds"),
+            "alias": alias,
+            "standard_name": standard_name,
+            "cas": cas,
+            "source": str(search_result.get("source") or ""),
+            "source_url": str(search_result.get("url") or search_result.get("fallback_url") or ""),
+            "confidence": str(name_result.get("confidence") or ""),
+            "evidence": str(search_result.get("matched_site_name") or search_result.get("query") or ""),
+            "status": "pending",
+            "reviewer": "",
+            "reviewed_at": "",
+        }
+        candidates = pd.concat([candidates, pd.DataFrame([row])], ignore_index=True)
+        candidates.reindex(columns=columns).to_excel(path, index=False)
+
+    def _name_alias_candidates_path(self) -> Path:
+        root = Path(self.root_dir) if self.root_dir is not None else Path(".")
+        paths = (self.settings or {}).get("paths", {}) or {}
+        return root / paths.get("name_alias_candidates_excel", "config/name_alias_candidates.xlsx")
+
+    @staticmethod
+    def _alias_already_configured(alias: str, raw_name: str, normalizer: NameNormalizer) -> bool:
+        if normalizer._lookup_alias(alias, raw_name):
+            return True
+        alias_key = normalizer._alias_key(alias)
+        for cas_info in (normalizer.alias_data.get("cas") or {}).values():
+            if not isinstance(cas_info, dict):
+                continue
+            for configured_alias in normalizer._string_list(cas_info.get("aliases")):
+                if normalizer._alias_key(configured_alias) == alias_key:
+                    return True
+        return False
+
+    @staticmethod
+    def _append_reason(reason: str, addition: str) -> str:
+        reason = str(reason or "").strip()
+        addition = str(addition or "").strip()
+        if not reason:
+            return addition
+        if addition in reason:
+            return reason
+        return f"{reason} {addition}"
 
     def _run_provider(
         self,

@@ -37,6 +37,7 @@
       </div>
       <div class="command-strip">
         <span id="runBadge" class="badge">读取中</span>
+        <span id="dryRunPill" class="pill dry-run-pill">测试模式 <strong id="dryRunText">{{ "开启" if runtime.app_dry_run == "true" else "关闭" }}</strong></span>
         <span class="pill">AUTO_PASS <strong id="autoPassText">{{ runtime.auto_pass }}</strong></span>
         <span class="pill">写入模式 <strong id="writeModeText">{{ runtime.approval_write_mode }}</strong></span>
         <span class="pill">处理范围 <strong id="processScopeText">{{ "全部待办" if runtime.process_all_todos == "true" else "勾选清单/首条" }}</strong></span>

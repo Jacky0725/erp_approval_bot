@@ -7,6 +7,8 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
+import pandas as pd
+
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT_DIR / "src"))
@@ -121,6 +123,229 @@ class ChemicalSearcherTest(unittest.TestCase):
         self.assertEqual(result["name_normalization"]["standard_name"], "氢氧化钠")
         self.assertEqual(result["name_normalization"]["english_name"], "sodium hydroxide")
         self.assertEqual(result["name_normalization"]["concentration"], "0.1mol/L")
+
+    def test_trusted_web_result_upgrades_unknown_alias_by_cas(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config_dir = root / "config"
+            config_dir.mkdir()
+            (config_dir / "name_aliases.yaml").write_text(
+                """
+cas:
+  1310-73-2:
+    standard_name: 氢氧化钠
+    english_name: sodium hydroxide
+    aliases:
+      - 氢氧化钠
+      - 烧碱
+      - sodium hydroxide
+aliases: {}
+abbreviations: {}
+""".strip(),
+                encoding="utf-8",
+            )
+
+            class TrustedAliasSearcher(ChemicalSearcher):
+                def _search_chemsrc(
+                    self,
+                    name: str,
+                    cas: str,
+                    query: str,
+                    validation_names: list[str] | None = None,
+                ) -> dict[str, Any] | None:
+                    result = self._result(
+                        name=name,
+                        cas="1310-73-2",
+                        source="Chemsrc",
+                        url="https://example.test/sodium-hydroxide",
+                        raw_text="火碱 氢氧化钠 sodium hydroxide CAS No. 1310-73-2 corrosive",
+                    )
+                    result.update(
+                        {
+                            "relevance_passed": True,
+                            "passed": True,
+                            "matched_site_name": "火碱",
+                            "name_similarity": 0.95,
+                        }
+                    )
+                    return result
+
+                def _search_chemicalbook(
+                    self,
+                    name: str,
+                    cas: str,
+                    query: str,
+                    validation_names: list[str] | None = None,
+                ) -> dict[str, Any] | None:
+                    return None
+
+            settings = {"paths": {"name_aliases_yaml": "config/name_aliases.yaml"}}
+            result = TrustedAliasSearcher(root_dir=root, settings=settings).search("火碱")
+            name_result = result["name_normalization"]
+
+            self.assertEqual(name_result["standard_name"], "氢氧化钠")
+            self.assertEqual(name_result["cas"], "1310-73-2")
+            self.assertGreaterEqual(name_result["confidence"], 0.9)
+            self.assertFalse(name_result["need_manual_review"])
+            self.assertTrue(name_result["web_verified_alias"])
+
+            candidates_path = config_dir / "name_alias_candidates.xlsx"
+            self.assertTrue(candidates_path.exists())
+            candidates = pd.read_excel(candidates_path, dtype=str).fillna("")
+            self.assertEqual(len(candidates), 1)
+            self.assertEqual(candidates.iloc[0]["alias"], "火碱")
+            self.assertEqual(candidates.iloc[0]["standard_name"], "氢氧化钠")
+            self.assertEqual(candidates.iloc[0]["cas"], "1310-73-2")
+            self.assertEqual(candidates.iloc[0]["status"], "pending")
+
+            TrustedAliasSearcher(root_dir=root, settings=settings).search("火碱")
+            candidates = pd.read_excel(candidates_path, dtype=str).fillna("")
+            self.assertEqual(len(candidates), 1)
+
+    def test_low_confidence_web_result_does_not_upgrade_unknown_alias(self) -> None:
+        class LowConfidenceAliasSearcher(ChemicalSearcher):
+            def _search_chemsrc(
+                self,
+                name: str,
+                cas: str,
+                query: str,
+                validation_names: list[str] | None = None,
+            ) -> dict[str, Any] | None:
+                result = self._result(
+                    name=name,
+                    cas="1310-73-2",
+                    source="Chemsrc",
+                    url="https://example.test/low",
+                    raw_text="火碱 CAS No. 1310-73-2",
+                )
+                result.update(
+                    {
+                        "source_confidence": 0.7,
+                        "relevance_passed": True,
+                        "passed": True,
+                        "matched_site_name": "火碱",
+                        "name_similarity": 0.95,
+                    }
+                )
+                return result
+
+            def _search_chemicalbook(
+                self,
+                name: str,
+                cas: str,
+                query: str,
+                validation_names: list[str] | None = None,
+            ) -> dict[str, Any] | None:
+                return None
+
+        result = LowConfidenceAliasSearcher(root_dir=ROOT_DIR).search("火碱")
+        name_result = result["name_normalization"]
+
+        self.assertEqual(name_result["standard_name"], "火碱")
+        self.assertEqual(name_result["confidence"], 0.65)
+        self.assertTrue(name_result["need_manual_review"])
+
+    def test_existing_cas_alias_does_not_create_alias_candidate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config_dir = root / "config"
+            config_dir.mkdir()
+            (config_dir / "name_aliases.yaml").write_text(
+                """
+cas:
+  1310-73-2:
+    standard_name: 氢氧化钠
+    english_name: sodium hydroxide
+    aliases:
+      - 氢氧化钠
+      - 火碱
+aliases: {}
+abbreviations: {}
+""".strip(),
+                encoding="utf-8",
+            )
+
+            class ExistingAliasSearcher(ChemicalSearcher):
+                def _search_chemsrc(
+                    self,
+                    name: str,
+                    cas: str,
+                    query: str,
+                    validation_names: list[str] | None = None,
+                ) -> dict[str, Any] | None:
+                    result = self._result(
+                        name=name,
+                        cas="1310-73-2",
+                        source="Chemsrc",
+                        url="https://example.test/sodium-hydroxide",
+                        raw_text="火碱 氢氧化钠 CAS No. 1310-73-2",
+                    )
+                    result.update(
+                        {
+                            "relevance_passed": True,
+                            "passed": True,
+                            "matched_site_name": "火碱",
+                            "name_similarity": 0.95,
+                        }
+                    )
+                    return result
+
+                def _search_chemicalbook(
+                    self,
+                    name: str,
+                    cas: str,
+                    query: str,
+                    validation_names: list[str] | None = None,
+                ) -> dict[str, Any] | None:
+                    return None
+
+            settings = {"paths": {"name_aliases_yaml": "config/name_aliases.yaml"}}
+            result = ExistingAliasSearcher(root_dir=root, settings=settings).search("火碱")
+
+            self.assertEqual(result["name_normalization"]["standard_name"], "氢氧化钠")
+            self.assertFalse((config_dir / "name_alias_candidates.xlsx").exists())
+
+    def test_trusted_name_match_without_cas_does_not_change_standard_name(self) -> None:
+        class NameOnlyAliasSearcher(ChemicalSearcher):
+            def _search_chemsrc(
+                self,
+                name: str,
+                cas: str,
+                query: str,
+                validation_names: list[str] | None = None,
+            ) -> dict[str, Any] | None:
+                result = self._result(
+                    name=name,
+                    cas="",
+                    source="Chemsrc",
+                    url="https://example.test/name-only",
+                    raw_text="火碱 physical and chemical properties",
+                )
+                result.update(
+                    {
+                        "relevance_passed": True,
+                        "passed": True,
+                        "matched_site_name": "火碱",
+                        "name_similarity": 0.95,
+                    }
+                )
+                return result
+
+            def _search_chemicalbook(
+                self,
+                name: str,
+                cas: str,
+                query: str,
+                validation_names: list[str] | None = None,
+            ) -> dict[str, Any] | None:
+                return None
+
+        result = NameOnlyAliasSearcher(root_dir=ROOT_DIR).search("火碱")
+        name_result = result["name_normalization"]
+
+        self.assertEqual(name_result["standard_name"], "火碱")
+        self.assertGreaterEqual(name_result["confidence"], 0.9)
+        self.assertFalse(name_result["need_manual_review"])
 
     def test_search_failure_returns_manual_review_with_normalization(self) -> None:
         class NoKnowledgeFallbackExtractor:

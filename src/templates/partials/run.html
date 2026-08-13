@@ -39,6 +39,9 @@
             </div>
           </div>
           <div class="run-options">
+            <div id="dryRunWarning" class="dry-run-warning" {% if runtime.app_dry_run != "true" %}hidden{% endif %}>
+              测试模式已开启：本次运行只会生成建议，不会写入网页、保存、生成试剂库或点击通过。请到“基础设置”关闭测试模式后再执行实际审批。
+            </div>
             <div class="form-row">
               <label>
                 写入模式

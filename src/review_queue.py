@@ -5,6 +5,28 @@ from typing import Any
 import pandas as pd
 
 
+REVIEW_EVIDENCE_COLUMNS = [
+    "suggested_category",
+    "classification_confidence",
+    "property_summary",
+    "evidence_source_type",
+    "source_confidence",
+    "llm_confidence",
+    "evidence_quality",
+    "source_url",
+    "flash_point",
+    "boiling_point",
+    "toxicity",
+    "corrosive",
+    "oxidizing",
+    "flammable",
+    "water_reactive",
+    "explosive_risk",
+    "used_llm_knowledge_fallback",
+    "review_advice",
+]
+
+
 BLOCKING_REVIEW_STATUSES = {
     "",
     "pending",
@@ -142,6 +164,7 @@ class ReviewQueueMixin:
             reagent,
             name_result,
             reason=str(search_result.get("raw_text") or search_result.get("failure_reason") or "Chemical website lookup failed after name normalization."),
+            search_result=search_result,
         )
 
     def add_manual_review_item(
@@ -149,6 +172,9 @@ class ReviewQueueMixin:
         reagent: dict[str, str],
         name_result: dict[str, Any],
         reason: str = "",
+        search_result: dict[str, Any] | None = None,
+        extracted: dict[str, Any] | None = None,
+        classification: dict[str, Any] | None = None,
     ) -> None:
         detail_info = getattr(self, "_current_detail_info", None)
         if not detail_info:
@@ -170,6 +196,11 @@ class ReviewQueueMixin:
         specification = reagent.get("\u89c4\u683c", "")
         unit = reagent.get("\u89c4\u683c\u5355\u4f4d", "")
         reason = str(reason or "Manual review is required before writing this reagent to ERP.")
+        evidence_fields = self._manual_review_evidence_fields(
+            search_result=search_result or {},
+            extracted=extracted or {},
+            classification=classification or {},
+        )
 
         existing_match = pd.Series(dtype=bool)
         if not queue.empty:
@@ -208,6 +239,7 @@ class ReviewQueueMixin:
                 queue,
                 existing_match,
                 reason,
+                evidence_fields,
             )
             if updated:
                 review_queue_path = self.write_excel_with_fallback(queue, review_queue_path)
@@ -232,6 +264,7 @@ class ReviewQueueMixin:
             "decision": "manual_review",
             "reason": reason,
             "status": "pending",
+            **evidence_fields,
         }
         queue = pd.concat([queue, pd.DataFrame([row])], ignore_index=True)
         review_queue_path = self.write_excel_with_fallback(queue, review_queue_path)
@@ -242,6 +275,7 @@ class ReviewQueueMixin:
         queue: pd.DataFrame,
         existing_match: pd.Series,
         new_reason: str,
+        evidence_fields: dict[str, Any] | None = None,
     ) -> bool:
         new_reason = str(new_reason or "").strip()
         if not new_reason:
@@ -268,4 +302,88 @@ class ReviewQueueMixin:
                 if "timestamp" in queue.columns:
                     queue.at[index, "timestamp"] = timestamp
                 updated = True
+            for column, value in (evidence_fields or {}).items():
+                if column not in queue.columns:
+                    queue[column] = ""
+                value_text = str(value or "").strip()
+                if value_text and str(queue.at[index, column] or "").strip() != value_text:
+                    queue.at[index, column] = value_text
+                    if "timestamp" in queue.columns:
+                        queue.at[index, "timestamp"] = timestamp
+                    updated = True
         return updated
+
+    @staticmethod
+    def _manual_review_evidence_fields(
+        search_result: dict[str, Any],
+        extracted: dict[str, Any],
+        classification: dict[str, Any],
+    ) -> dict[str, Any]:
+        suggested_category = str(classification.get("final_category") or "").strip()
+        if not suggested_category:
+            suggested_category = ", ".join(str(item) for item in classification.get("matched_categories", []) or [])
+        used_llm = bool(search_result.get("used_llm_knowledge_fallback") or extracted.get("used_llm_knowledge_fallback"))
+        source = str(search_result.get("source") or search_result.get("fallback_source") or "").strip()
+        if used_llm:
+            evidence_source_type = "llm_fallback"
+        elif source in {"Chemsrc", "ChemicalBook"}:
+            evidence_source_type = "trusted_web"
+        elif source:
+            evidence_source_type = "web_fallback"
+        else:
+            evidence_source_type = "none"
+
+        evidence = extracted.get("evidence", []) or []
+        if isinstance(evidence, list):
+            evidence_text = " | ".join(str(item) for item in evidence if str(item).strip())
+        else:
+            evidence_text = str(evidence)
+        property_parts = []
+        for label, key in (
+            ("flash_point", "flash_point"),
+            ("boiling_point", "boiling_point"),
+            ("toxicity", "toxicity"),
+            ("corrosive", "corrosive"),
+            ("oxidizing", "oxidizing"),
+            ("flammable", "flammable"),
+            ("water_reactive", "water_reactive"),
+            ("explosive_risk", "explosive_risk"),
+        ):
+            value = extracted.get(key)
+            if value not in ("", None, []):
+                property_parts.append(f"{label}={value}")
+        if evidence_text:
+            property_parts.append(f"evidence={evidence_text[:300]}")
+
+        advice = "Manual review required; confirm the physicochemical category before writing to ERP."
+        if used_llm:
+            advice = "Website evidence is missing or insufficient; LLM fallback is advisory only and must be manually verified."
+        elif evidence_source_type == "trusted_web":
+            advice = "Trusted website evidence is available; verify the suggested category and source evidence."
+        elif evidence_source_type == "web_fallback":
+            advice = "Fallback web evidence is available but may be incomplete; manually verify before confirming."
+
+        llm_confidence = search_result.get("llm_confidence", "")
+        if used_llm and llm_confidence == "":
+            llm_confidence = search_result.get("source_confidence", extracted.get("confidence", ""))
+
+        return {
+            "suggested_category": suggested_category,
+            "classification_confidence": classification.get("confidence", ""),
+            "property_summary": " | ".join(property_parts),
+            "evidence_source_type": evidence_source_type,
+            "source_confidence": "" if used_llm else search_result.get("source_confidence", ""),
+            "llm_confidence": llm_confidence,
+            "evidence_quality": search_result.get("evidence_quality", ""),
+            "source_url": search_result.get("url") or search_result.get("fallback_url") or "",
+            "flash_point": extracted.get("flash_point", ""),
+            "boiling_point": extracted.get("boiling_point", ""),
+            "toxicity": extracted.get("toxicity", ""),
+            "corrosive": extracted.get("corrosive", ""),
+            "oxidizing": extracted.get("oxidizing", ""),
+            "flammable": extracted.get("flammable", ""),
+            "water_reactive": extracted.get("water_reactive", ""),
+            "explosive_risk": extracted.get("explosive_risk", ""),
+            "used_llm_knowledge_fallback": used_llm,
+            "review_advice": advice,
+        }

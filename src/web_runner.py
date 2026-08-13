@@ -1218,6 +1218,24 @@ def review_queue_summary(root_dir: Path = ROOT_DIR) -> dict[str, Any]:
                 "reason": natural_reason(reason),
                 "reason_full": reason,
                 "status": first_existing(row, ["status", "状态", "处理状态"]) or "pending",
+                "suggested_category": first_existing(row, ["suggested_category"]),
+                "classification_confidence": first_existing(row, ["classification_confidence"]),
+                "property_summary": first_existing(row, ["property_summary"]),
+                "evidence_source_type": first_existing(row, ["evidence_source_type"]),
+                "source_confidence": first_existing(row, ["source_confidence"]),
+                "llm_confidence": first_existing(row, ["llm_confidence"]),
+                "evidence_quality": first_existing(row, ["evidence_quality"]),
+                "source_url": first_existing(row, ["source_url"]),
+                "flash_point": first_existing(row, ["flash_point"]),
+                "boiling_point": first_existing(row, ["boiling_point"]),
+                "toxicity": first_existing(row, ["toxicity"]),
+                "corrosive": first_existing(row, ["corrosive"]),
+                "oxidizing": first_existing(row, ["oxidizing"]),
+                "flammable": first_existing(row, ["flammable"]),
+                "water_reactive": first_existing(row, ["water_reactive"]),
+                "explosive_risk": first_existing(row, ["explosive_risk"]),
+                "used_llm_knowledge_fallback": first_existing(row, ["used_llm_knowledge_fallback"]),
+                "review_advice": first_existing(row, ["review_advice"]),
             }
         )
 
@@ -1658,6 +1676,7 @@ def runtime_config_snapshot() -> dict[str, Any]:
     dingtalk = dingtalk_notification_config(settings)
     dingtalk_stream = dingtalk_stream_config(settings)
     llm = settings.get("llm", {}) or {}
+    app_settings = settings.get("app", {}) or {}
     mapping = category_mapping_summary(settings, ROOT_DIR)
     provider = get_llm_provider(os.getenv("LLM_PROVIDER") or llm.get("provider") or "siliconflow")
     configured_base_url = os.getenv("LLM_BASE_URL") or (
@@ -1672,6 +1691,7 @@ def runtime_config_snapshot() -> dict[str, Any]:
     return {
         "app_version": app_version(),
         "app_frozen": bool(getattr(sys, "frozen", False)),
+        "app_dry_run": "true" if app_settings.get("dry_run") else "false",
         "update_token_configured": bool(
             os.getenv("REAGENT_APPROVAL_UPDATE_TOKEN", "").strip()
             or os.getenv("GITHUB_TOKEN", "").strip()
@@ -1793,6 +1813,9 @@ def save_runtime_config(form: dict[str, str]) -> dict[str, Any]:
     update_env_file(ENV_PATH, env_updates)
 
     settings = load_settings()
+    app = settings.setdefault("app", {})
+    app["dry_run"] = form.get("app_dry_run", "false").strip().lower() == "true"
+
     llm = settings.setdefault("llm", {})
     llm["provider"] = provider.id
     llm["base_url"] = llm_base_url
