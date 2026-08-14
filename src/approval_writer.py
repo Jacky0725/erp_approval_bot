@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from playwright.sync_api import Error, Locator, Page, TimeoutError
@@ -12,6 +12,7 @@ from ui_waits import wait_until_dropdown_options, wait_until_spinner_hidden
 @dataclass
 class ApprovalWriter:
     settings: dict[str, Any] | None = None
+    _property_candidate_cache: dict[str, list[str]] = field(default_factory=dict, init=False, repr=False)
 
     def row_is_editing(self, page: Page, row: Locator) -> bool:
         try:
@@ -88,11 +89,16 @@ class ApprovalWriter:
         property_name = str(property_name or "").strip()
         if not property_name:
             return []
+        cache_key = property_name
+        if cache_key in self._property_candidate_cache:
+            return list(self._property_candidate_cache[cache_key])
         candidates = erp_candidates_for_rule_category(property_name, self.settings or {})
         erp_options = set(erp_property_options(self.settings or {}))
         erp_first = [candidate for candidate in candidates if candidate in erp_options]
         aliases = [candidate for candidate in candidates if candidate not in erp_options]
-        return list(dict.fromkeys([*erp_first, *aliases]))
+        resolved = list(dict.fromkeys([*erp_first, *aliases]))
+        self._property_candidate_cache[cache_key] = resolved
+        return list(resolved)
 
     def save(self, page: Page, row: Locator) -> bool:
         return self._click_row_action(page, row, "\u4fdd\u5b58")

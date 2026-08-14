@@ -71,6 +71,106 @@ class WebReviewConfirmationTest(unittest.TestCase):
         self.assertEqual(row["llm_confidence"], "0.65")
         self.assertEqual(row["corrosive"], "True")
         self.assertEqual(row["review_advice"], "LLM fallback is advisory only.")
+        self.assertEqual(row["display_suggestion"], "LLM辅助建议：腐蚀性")
+        self.assertEqual(row["evidence_status"], "LLM辅助，置信度 0.65")
+        self.assertEqual(row["allow_suggestion_preselect"], "True")
+
+    def test_review_queue_summary_sanitizes_llm_failure_without_preselect(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            data_dir = root / "data"
+            data_dir.mkdir(parents=True)
+            queue_path = data_dir / "review_queue.xlsx"
+            raw_error = (
+                "LLM extraction failed: Error code: 402 - {'code': 30001, "
+                "'message': 'Sorry, your account balance is insufficient'}"
+            )
+            pd.DataFrame(
+                [
+                    {
+                        "timestamp": "2026-06-25T10:00:00",
+                        "list_number": "SJ1",
+                        "chemical_name": "unknown",
+                        "standard_name": "unknown",
+                        "reason": raw_error,
+                        "status": "pending",
+                        "suggested_category": "常规酸",
+                        "classification_confidence": "0.84",
+                        "property_summary": f"corrosive=True | evidence={raw_error}",
+                        "evidence_source_type": "none",
+                    }
+                ]
+            ).to_excel(queue_path, index=False)
+
+            summary = review_queue_summary(root)
+
+        row = summary["preview"][0]
+        self.assertEqual(row["display_suggestion"], "暂无可靠建议")
+        self.assertEqual(row["evidence_status"], "证据不足")
+        self.assertEqual(row["allow_suggestion_preselect"], "False")
+        self.assertIn("账户余额不足", row["display_reason"])
+        self.assertNotIn("Error code: 402", row["display_reason"])
+        self.assertNotIn("30001", row["detail_summary"])
+
+    def test_review_queue_summary_downgrades_acid_salt_without_trusted_web(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            data_dir = root / "data"
+            data_dir.mkdir(parents=True)
+            queue_path = data_dir / "review_queue.xlsx"
+            pd.DataFrame(
+                [
+                    {
+                        "timestamp": "2026-06-25T10:00:00",
+                        "list_number": "SJ1",
+                        "chemical_name": "苯肼盐酸盐",
+                        "standard_name": "苯肼盐酸盐",
+                        "reason": "Known ordinary mineral acid (盐酸); classify as regular acid by business rule.",
+                        "status": "pending",
+                        "suggested_category": "常规酸",
+                        "classification_confidence": "0.84",
+                        "evidence_source_type": "none",
+                    }
+                ]
+            ).to_excel(queue_path, index=False)
+
+            summary = review_queue_summary(root)
+
+        row = summary["preview"][0]
+        self.assertEqual(row["display_suggestion"], "暂无可靠建议")
+        self.assertEqual(row["evidence_status"], "证据不足")
+        self.assertEqual(row["allow_suggestion_preselect"], "False")
+        self.assertIn("不能直接按对应无机酸判定", row["display_reason"])
+
+    def test_review_queue_summary_keeps_trusted_web_suggestion(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            data_dir = root / "data"
+            data_dir.mkdir(parents=True)
+            queue_path = data_dir / "review_queue.xlsx"
+            pd.DataFrame(
+                [
+                    {
+                        "timestamp": "2026-06-25T10:00:00",
+                        "list_number": "SJ1",
+                        "chemical_name": "盐酸",
+                        "standard_name": "盐酸",
+                        "reason": "trusted evidence",
+                        "status": "pending",
+                        "suggested_category": "常规酸",
+                        "classification_confidence": "0.9",
+                        "evidence_source_type": "trusted_web",
+                        "source_confidence": "0.92",
+                    }
+                ]
+            ).to_excel(queue_path, index=False)
+
+            summary = review_queue_summary(root)
+
+        row = summary["preview"][0]
+        self.assertEqual(row["display_suggestion"], "常规酸")
+        self.assertEqual(row["evidence_status"], "可信网站，资料可信度 0.92")
+        self.assertEqual(row["allow_suggestion_preselect"], "True")
 
     def test_confirm_review_item_marks_resolved_and_adds_memory(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

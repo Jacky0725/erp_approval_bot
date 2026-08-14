@@ -648,13 +648,15 @@
       return "证据不足";
     }
 
+    function reviewAllowsSuggestionPreselect(row) {
+      return String(row.allow_suggestion_preselect || "").toLowerCase() === "true";
+    }
+
     function reviewEvidenceHtml(row) {
-      const suggested = row.suggested_category || "";
-      const confidence = row.classification_confidence || "";
-      const sourceConfidence = row.source_confidence || "";
-      const llmConfidence = row.llm_confidence || "";
-      const quality = row.evidence_quality || "";
-      const summary = row.property_summary || "";
+      const suggestion = row.display_suggestion || row.suggested_category || "暂无可靠建议";
+      const reason = row.display_reason || row.review_advice || "需人工核对物化特性。";
+      const evidenceStatus = row.evidence_status || reviewEvidenceLabel(row);
+      const detail = row.detail_summary || row.property_summary || "";
       const properties = [
         ["闪点", row.flash_point],
         ["沸点", row.boiling_point],
@@ -668,23 +670,21 @@
       const sourceLink = row.source_url
         ? `<a href="${escapeHtml(row.source_url)}" target="_blank" rel="noreferrer">来源链接</a>`
         : "";
-      const meta = [
-        suggested ? `建议：${escapeHtml(suggested)}` : "",
-        confidence ? `分类置信度：${escapeHtml(confidence)}` : "",
-        sourceConfidence ? `资料可信度：${escapeHtml(sourceConfidence)}` : "",
-        llmConfidence ? `LLM置信度：${escapeHtml(llmConfidence)}` : "",
-        quality ? `证据质量：${escapeHtml(quality)}` : "",
-      ].filter(Boolean).join(" · ");
       return `
         <div class="review-evidence ${row.evidence_source_type === "llm_fallback" ? "llm-evidence" : ""}">
           <div class="review-evidence-head">
-            <span>${escapeHtml(reviewEvidenceLabel(row))}</span>
+            <span>${escapeHtml(evidenceStatus)}</span>
             ${sourceLink}
           </div>
-          ${meta ? `<p>${meta}</p>` : ""}
-          ${properties.length ? `<p>${properties.map((item) => `${escapeHtml(item[0])}=${escapeHtml(item[1])}`).join(" · ")}</p>` : ""}
-          ${summary ? `<p title="${escapeHtml(summary)}">${escapeHtml(summary)}</p>` : ""}
-          ${row.review_advice ? `<p class="review-advice">${escapeHtml(row.review_advice)}</p>` : ""}
+          <p><strong>建议：</strong>${escapeHtml(suggestion)}</p>
+          <p><strong>原因：</strong>${escapeHtml(reason)}</p>
+          ${(detail || properties.length) ? `
+            <details class="review-evidence-detail">
+              <summary>查看详情</summary>
+              ${detail ? `<p>${escapeHtml(detail)}</p>` : ""}
+              ${properties.length ? `<p>${properties.map((item) => `${escapeHtml(item[0])}=${escapeHtml(item[1])}`).join(" · ")}</p>` : ""}
+            </details>
+          ` : ""}
         </div>
       `;
     }
@@ -716,7 +716,8 @@
       pageRows.forEach((row) => {
         const tr = document.createElement("tr");
         tr.className = "review-row";
-        const options = categoryOptionsHtml(row.suggested_category || "");
+        const preselectedCategory = reviewAllowsSuggestionPreselect(row) ? (row.suggested_category || "") : "";
+        const options = categoryOptionsHtml(preselectedCategory);
         tr.innerHTML = `
           <td class="review-time-cell">
             <strong>${escapeHtml(row.timestamp || "-")}</strong>
@@ -1433,6 +1434,10 @@
       const summaryTargets = runSummary.target_list_numbers || [];
       setText("#runTargetLists", summaryTargets.length ? summaryTargets.join("，") : "-");
       setText("#runPages", safe(runSummary.processed_pages, "-"));
+      setText("#runPageSuggestions", safe(runSummary.page_suggestion_count, "-"));
+      setText("#runWritableCandidates", safe(runSummary.writable_candidate_count, "-"));
+      setText("#runManualReviewCandidates", safe(runSummary.manual_review_candidate_count, "-"));
+      setText("#runSearchFailures", safe(runSummary.search_failure_count, "-"));
       setText("#runWriteSuccess", safe(runSummary.write_success_count, "-"));
       setText("#runWriteFailure", safe(runSummary.write_failure_count, "-"));
       setText("#runLogPath", safe(status.run_log_path, "-"));

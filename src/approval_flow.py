@@ -10,6 +10,7 @@ from playwright.sync_api import Error, Locator, Page
 
 import pandas as pd
 
+from approval_suggestion_metrics import format_suggestion_summary, summarize_approval_suggestions
 from approval_writer import ApprovalWriter
 from category_mapper import to_erp_property
 from chemical_searcher import ChemicalSearcher
@@ -1424,6 +1425,13 @@ class ApprovalFlowMixin:
 
     def apply_approval_write_mode(self, page: Page, suggestions: list[dict[str, Any]]) -> dict[str, set[str]]:
         result: dict[str, set[str]] = {"attempted": set(), "handled": set(), "failed": set()}
+        min_confidence = self.approval_write_min_confidence()
+        page_summary = summarize_approval_suggestions(
+            suggestions,
+            min_confidence=min_confidence,
+            category_resolver=lambda category: to_erp_property(category, self.settings),
+        )
+        print(f"Page suggestion summary: {format_suggestion_summary(page_summary)}")
         if self.dry_run_enabled():
             print("Dry-run mode is enabled; no webpage fields, saves, approvals, or library generation will be changed.")
             result["handled"].update(self.suggestion_work_key(suggestion) for suggestion in suggestions)
@@ -1659,6 +1667,14 @@ class ApprovalFlowMixin:
             return max(1, min(10, int(value)))
         except (TypeError, ValueError):
             return 3
+
+    def approval_write_min_confidence(self) -> float:
+        approval_settings = getattr(self, "settings", {}).get("approval", {}) or {}
+        value = os.getenv("APPROVAL_WRITE_MIN_CONFIDENCE") or approval_settings.get("write_min_confidence", 0.8)
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return 0.8
 
     def record_web_write_failure(self, suggestion: dict[str, Any], category: str, reason: str) -> None:
         if getattr(self, "web_write_failures", None) is None:
@@ -2149,7 +2165,7 @@ class ApprovalFlowMixin:
         return str(value or "").strip().lower() in {"1", "true", "yes", "y", "on"}
 
     def high_confidence_write_candidates(self, suggestions: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        threshold = float(os.getenv("APPROVAL_WRITE_MIN_CONFIDENCE") or getattr(self, "settings", {}).get("approval", {}).get("write_min_confidence", 0.8))
+        threshold = self.approval_write_min_confidence()
         output: list[dict[str, Any]] = []
         for suggestion in suggestions:
             rule_category = str(suggestion.get("\u6700\u7ec8\u5efa\u8bae\u7c7b\u522b") or "").strip()

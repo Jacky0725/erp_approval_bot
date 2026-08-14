@@ -1507,6 +1507,20 @@ tr:last-child td {
   margin: 4px 0 0;
 }
 
+.review-evidence-detail {
+  margin-top: 6px;
+}
+
+.review-evidence-detail summary {
+  cursor: pointer;
+  color: var(--review-primary);
+  font-weight: 650;
+}
+
+.review-evidence-detail p {
+  color: #6b7280;
+}
+
 .review-advice {
   font-weight: 600;
 }

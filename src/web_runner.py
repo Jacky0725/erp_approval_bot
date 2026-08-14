@@ -20,6 +20,7 @@ import pandas as pd
 import yaml
 from dotenv import load_dotenv
 
+from approval_suggestion_metrics import aggregate_suggestion_summaries
 from llm_providers import (
     configured_llm_api_key,
     get_llm_provider,
@@ -42,6 +43,7 @@ from category_mapper import (
 )
 from app_info import app_version
 from reagent_memory import ReagentMemory
+from review_queue import review_display_summary_from_row
 from runtime_paths import ensure_runtime_layout, runtime_root, source_root
 from scheduler import scheduler_config
 
@@ -661,6 +663,7 @@ def run_summary(
     todo = todo_tasks_summary(root_dir)
     approval = approval_summary(root_dir)
     review = review_queue_summary(root_dir)
+    suggestion_metrics = aggregate_suggestion_summaries(lines)
 
     write_success = sum(
         1
@@ -717,6 +720,15 @@ def run_summary(
         "processed_pages": page_count,
         "write_success_count": write_success,
         "write_failure_count": write_failed,
+        "page_suggestion_count": int(suggestion_metrics.get("suggestion_total") or 0),
+        "writable_candidate_count": int(suggestion_metrics.get("writable_candidate_count") or 0),
+        "manual_review_candidate_count": int(suggestion_metrics.get("manual_review_candidate_count") or 0),
+        "low_confidence_count": int(suggestion_metrics.get("low_confidence_count") or 0),
+        "search_failure_count": int(suggestion_metrics.get("search_failure_count") or 0),
+        "memory_hit_count": int(suggestion_metrics.get("memory_hit_count") or 0),
+        "llm_knowledge_fallback_count": int(suggestion_metrics.get("llm_knowledge_fallback_count") or 0),
+        "skipped_candidate_count": int(suggestion_metrics.get("skipped_candidate_count") or 0),
+        "skip_reasons": suggestion_metrics.get("skip_reasons") or {},
         "has_traceback": "traceback" in lower_text,
         "has_write_warning": write_failed > 0,
     }
@@ -1203,6 +1215,7 @@ def review_queue_summary(root_dir: Path = ROOT_DIR) -> dict[str, Any]:
     preview: list[dict[str, str]] = []
     for _, row in pending_frame.head(120).iterrows():
         reason = first_existing(row, ["reason", "原因", "复核原因", "manual_review_reason"])
+        display_summary = review_display_summary_from_row(row, reason=reason)
         preview.append(
             {
                 "review_key": first_existing(row, ["_review_key"]),
@@ -1236,6 +1249,12 @@ def review_queue_summary(root_dir: Path = ROOT_DIR) -> dict[str, Any]:
                 "explosive_risk": first_existing(row, ["explosive_risk"]),
                 "used_llm_knowledge_fallback": first_existing(row, ["used_llm_knowledge_fallback"]),
                 "review_advice": first_existing(row, ["review_advice"]),
+                "display_suggestion": first_existing(row, ["display_suggestion"]) or display_summary["display_suggestion"],
+                "display_reason": first_existing(row, ["display_reason"]) or display_summary["display_reason"],
+                "evidence_status": first_existing(row, ["evidence_status"]) or display_summary["evidence_status"],
+                "detail_summary": first_existing(row, ["detail_summary"]) or display_summary["detail_summary"],
+                "allow_suggestion_preselect": first_existing(row, ["allow_suggestion_preselect"])
+                or str(display_summary["allow_suggestion_preselect"]),
             }
         )
 

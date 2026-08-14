@@ -24,6 +24,11 @@ REVIEW_EVIDENCE_COLUMNS = [
     "explosive_risk",
     "used_llm_knowledge_fallback",
     "review_advice",
+    "display_suggestion",
+    "display_reason",
+    "evidence_status",
+    "detail_summary",
+    "allow_suggestion_preselect",
 ]
 
 
@@ -197,9 +202,12 @@ class ReviewQueueMixin:
         unit = reagent.get("\u89c4\u683c\u5355\u4f4d", "")
         reason = str(reason or "Manual review is required before writing this reagent to ERP.")
         evidence_fields = self._manual_review_evidence_fields(
+            reagent=reagent,
+            name_result=name_result,
             search_result=search_result or {},
             extracted=extracted or {},
             classification=classification or {},
+            reason=reason,
         )
 
         existing_match = pd.Series(dtype=bool)
@@ -291,7 +299,7 @@ class ReviewQueueMixin:
             if not old_reason:
                 merged_reason = new_reason
             elif new_reason in old_reason:
-                continue
+                merged_reason = old_reason
             elif old_reason in new_reason:
                 merged_reason = new_reason
             else:
@@ -315,9 +323,12 @@ class ReviewQueueMixin:
 
     @staticmethod
     def _manual_review_evidence_fields(
+        reagent: dict[str, Any],
+        name_result: dict[str, Any],
         search_result: dict[str, Any],
         extracted: dict[str, Any],
         classification: dict[str, Any],
+        reason: str = "",
     ) -> dict[str, Any]:
         suggested_category = str(classification.get("final_category") or "").strip()
         if not suggested_category:
@@ -367,7 +378,7 @@ class ReviewQueueMixin:
         if used_llm and llm_confidence == "":
             llm_confidence = search_result.get("source_confidence", extracted.get("confidence", ""))
 
-        return {
+        fields = {
             "suggested_category": suggested_category,
             "classification_confidence": classification.get("confidence", ""),
             "property_summary": " | ".join(property_parts),
@@ -387,3 +398,220 @@ class ReviewQueueMixin:
             "used_llm_knowledge_fallback": used_llm,
             "review_advice": advice,
         }
+        fields.update(
+            review_display_summary(
+                reagent=reagent,
+                name_result=name_result,
+                search_result=search_result,
+                extracted=extracted,
+                classification=classification,
+                evidence_fields=fields,
+                reason=reason,
+            )
+        )
+        return fields
+
+
+def review_display_summary(
+    *,
+    reagent: dict[str, Any] | None = None,
+    name_result: dict[str, Any] | None = None,
+    search_result: dict[str, Any] | None = None,
+    extracted: dict[str, Any] | None = None,
+    classification: dict[str, Any] | None = None,
+    evidence_fields: dict[str, Any] | None = None,
+    reason: str = "",
+) -> dict[str, Any]:
+    reagent = reagent or {}
+    name_result = name_result or {}
+    search_result = search_result or {}
+    extracted = extracted or {}
+    classification = classification or {}
+    evidence_fields = evidence_fields or {}
+
+    suggested = str(
+        evidence_fields.get("suggested_category")
+        or classification.get("final_category")
+        or ", ".join(str(item) for item in classification.get("matched_categories", []) or [])
+    ).strip()
+    source_type = str(evidence_fields.get("evidence_source_type") or "").strip()
+    source = str(search_result.get("source") or search_result.get("fallback_source") or "").strip()
+    source_confidence = str(evidence_fields.get("source_confidence") or search_result.get("source_confidence") or "").strip()
+    llm_confidence = str(evidence_fields.get("llm_confidence") or search_result.get("llm_confidence") or "").strip()
+    raw_reason = " ".join(str(value or "") for value in (reason, search_result.get("failure_reason"), evidence_fields.get("property_summary")))
+    text_for_salt_check = " ".join(
+        str(value or "")
+        for value in (
+            reagent.get("试剂名称"),
+            reagent.get("chemical_name"),
+            reagent.get("reagent_name"),
+            name_result.get("raw_name"),
+            name_result.get("cleaned_name"),
+            name_result.get("standard_name"),
+            extracted.get("name"),
+            search_result.get("name"),
+        )
+    )
+
+    llm_failed = _llm_failed(raw_reason)
+    salt_like = _looks_like_acid_salt(text_for_salt_check)
+    trusted_web = source_type == "trusted_web" or source in {"Chemsrc", "ChemicalBook"}
+    used_llm = source_type == "llm_fallback" or _truthy(evidence_fields.get("used_llm_knowledge_fallback"))
+
+    detail_parts = []
+    if evidence_fields.get("property_summary"):
+        property_summary = str(evidence_fields.get("property_summary"))
+        detail_parts.append(_compact_error(property_summary, limit=320) if _llm_failed(property_summary) else property_summary)
+    if raw_reason.strip():
+        detail_parts.append(_compact_error(raw_reason, limit=320))
+    detail_summary = " | ".join(part for part in detail_parts if part)
+
+    if salt_like and not trusted_web:
+        return {
+            "display_suggestion": "暂无可靠建议",
+            "display_reason": "名称包含盐酸盐/无机酸盐结构，不能直接按对应无机酸判定；需人工核对物化特性。",
+            "evidence_status": "证据不足",
+            "detail_summary": detail_summary,
+            "allow_suggestion_preselect": False,
+        }
+
+    if llm_failed and not trusted_web:
+        return {
+            "display_suggestion": "暂无可靠建议",
+            "display_reason": f"网站未查到可信资料，{_llm_failure_label(raw_reason)}，需人工核对。",
+            "evidence_status": "证据不足",
+            "detail_summary": detail_summary,
+            "allow_suggestion_preselect": False,
+        }
+
+    if trusted_web:
+        evidence_status = f"{source or '可信网站'}"
+        if source_confidence:
+            evidence_status = f"{evidence_status}，资料可信度 {source_confidence}"
+        return {
+            "display_suggestion": suggested or "需人工判定",
+            "display_reason": f"根据 {source or '可信网站'} 资料和规则判断，需人工确认后入库。",
+            "evidence_status": evidence_status,
+            "detail_summary": detail_summary,
+            "allow_suggestion_preselect": bool(suggested),
+        }
+
+    if used_llm and suggested:
+        evidence_status = "LLM辅助"
+        if llm_confidence:
+            evidence_status = f"{evidence_status}，置信度 {llm_confidence}"
+        return {
+            "display_suggestion": f"LLM辅助建议：{suggested}",
+            "display_reason": "未查到可信网站资料，LLM仅给出辅助判断，需人工核验。",
+            "evidence_status": evidence_status,
+            "detail_summary": detail_summary,
+            "allow_suggestion_preselect": True,
+        }
+
+    if suggested:
+        return {
+            "display_suggestion": suggested,
+            "display_reason": "仅命中本地规则或证据不足，需人工确认后再入库。",
+            "evidence_status": "规则辅助，需人工确认",
+            "detail_summary": detail_summary,
+            "allow_suggestion_preselect": True,
+        }
+
+    return {
+        "display_suggestion": "暂无可靠建议",
+        "display_reason": "缺少可信网站资料或可用的辅助判断，需人工核对。",
+        "evidence_status": "证据不足",
+        "detail_summary": detail_summary,
+        "allow_suggestion_preselect": False,
+    }
+
+
+def review_display_summary_from_row(row: Any, reason: str = "") -> dict[str, Any]:
+    def value(key: str) -> str:
+        try:
+            return str(row.get(key) or "").strip()
+        except AttributeError:
+            return ""
+
+    evidence_fields = {column: value(column) for column in REVIEW_EVIDENCE_COLUMNS}
+    classification = {
+        "final_category": value("suggested_category"),
+        "confidence": value("classification_confidence"),
+    }
+    search_result = {
+        "source": value("source"),
+        "source_confidence": value("source_confidence"),
+        "llm_confidence": value("llm_confidence"),
+        "failure_reason": reason,
+        "used_llm_knowledge_fallback": value("used_llm_knowledge_fallback"),
+    }
+    extracted = {
+        "name": value("chemical_name") or value("reagent_name"),
+        "flash_point": value("flash_point"),
+        "boiling_point": value("boiling_point"),
+        "toxicity": value("toxicity"),
+    }
+    return review_display_summary(
+        reagent={"chemical_name": value("chemical_name") or value("试剂名称") or value("reagent_name")},
+        name_result={"standard_name": value("standard_name"), "cleaned_name": value("cleaned_name")},
+        search_result=search_result,
+        extracted=extracted,
+        classification=classification,
+        evidence_fields=evidence_fields,
+        reason=reason,
+    )
+
+
+def _looks_like_acid_salt(text: str) -> bool:
+    normalized = str(text or "").lower().replace(" ", "")
+    return any(
+        token in normalized
+        for token in (
+            "盐酸盐",
+            "盐酸苯肼",
+            "hydrochloride",
+            "nitratesalt",
+            "sulfatesalt",
+            "sulphatesalt",
+        )
+    )
+
+
+def _llm_failed(text: str) -> bool:
+    lowered = str(text or "").lower()
+    return any(
+        token in lowered
+        for token in (
+            "llm extraction failed",
+            "llm knowledge fallback failed",
+            "error code: 402",
+            "balance is insufficient",
+            "insufficient",
+            "api key",
+            "timeout",
+        )
+    )
+
+
+def _llm_failure_label(text: str) -> str:
+    lowered = str(text or "").lower()
+    if "402" in lowered or "balance is insufficient" in lowered or "insufficient" in lowered:
+        return "LLM辅助失败：账户余额不足"
+    if "api key" in lowered:
+        return "LLM辅助失败：API Key未配置"
+    if "timeout" in lowered:
+        return "LLM辅助失败：调用超时"
+    return "LLM辅助失败"
+
+
+def _compact_error(text: str, limit: int = 220) -> str:
+    compact = " ".join(str(text or "").split())
+    if _llm_failed(compact):
+        compact = _llm_failure_label(compact)
+    if len(compact) <= limit:
+        return compact
+    return compact[:limit].rstrip() + "..."
+
+
+def _truthy(value: Any) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes", "y"}

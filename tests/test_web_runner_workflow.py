@@ -77,6 +77,7 @@ class WorkflowSummaryTest(unittest.TestCase):
             lines = [
                 "Read reagent page 1: 20 row(s).",
                 "Opening target task detail: SJ202608040001",
+                'Page suggestion summary: {"total": 3, "writable": 2, "manual_review": 1, "low_confidence": 0, "search_failure": 1, "memory_hit": 1, "llm_knowledge_fallback": 0, "skipped": 1, "skip_reasons": {"manual_review": 1}}',
                 "Save verified for sequence 1",
                 "Could not select physicochemical property 强反应 for sequence 2",
             ]
@@ -94,6 +95,11 @@ class WorkflowSummaryTest(unittest.TestCase):
             self.assertEqual(summary["target_list_numbers"], ["SJ202608040001"])
             self.assertEqual(summary["write_success_count"], 1)
             self.assertEqual(summary["write_failure_count"], 1)
+            self.assertEqual(summary["page_suggestion_count"], 3)
+            self.assertEqual(summary["writable_candidate_count"], 2)
+            self.assertEqual(summary["manual_review_candidate_count"], 1)
+            self.assertEqual(summary["search_failure_count"], 1)
+            self.assertEqual(summary["memory_hit_count"], 1)
             self.assertTrue(summary["has_write_warning"])
 
     def test_todo_tasks_summary_prefers_utf8_json(self) -> None:

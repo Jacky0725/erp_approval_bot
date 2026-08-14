@@ -33,6 +33,14 @@ class ApprovalWriterTest(unittest.TestCase):
 
         self.assertEqual(writer.property_name_candidates("易燃液体"), ["易燃类", "易燃液体"])
 
+    def test_property_candidate_cache_returns_copy(self) -> None:
+        writer = ApprovalWriter()
+
+        first = writer.property_name_candidates("普通类")
+        first.append("污染项")
+
+        self.assertNotIn("污染项", writer.property_name_candidates("普通类"))
+
 
 class ApprovalWriterDropdownBindingTest(unittest.TestCase):
     @classmethod
