@@ -204,7 +204,14 @@ class RuleEngine:
             }
 
         matches: dict[str, RuleMatch] = {}
+        suppress_special_acid_rule = (
+            self._is_mineral_acid_salt_like(reagent_info)
+            or self._is_ordinary_mineral_acid(reagent_info)
+        )
         for rule in self.rules:
+            if rule.category == "\u7279\u6b8a\u9178" and suppress_special_acid_rule:
+                continue
+
             if rule.category == "\u6eb4\u7898\u7c7b":
                 explanation_hits = []
             else:
@@ -398,8 +405,10 @@ class RuleEngine:
 
     @staticmethod
     def _category_suggestion_hits(category: str, reagent_info: dict[str, Any]) -> list[str]:
+        if category == "\u5e38\u89c4\u9178" and RuleEngine._is_mineral_acid_salt_like(reagent_info):
+            return []
         if category == "\u7279\u6b8a\u9178" and (
-            RuleEngine._is_hydrochloride_salt(reagent_info)
+            RuleEngine._is_mineral_acid_salt_like(reagent_info)
             or RuleEngine._is_ordinary_mineral_acid(reagent_info)
         ):
             return []
@@ -509,9 +518,12 @@ class RuleEngine:
             hits.extend(RuleEngine._indole_name_hits(reagent_info))
 
         if category == "\u7279\u6b8a\u9178" and (
-            RuleEngine._is_hydrochloride_salt(reagent_info)
+            RuleEngine._is_mineral_acid_salt_like(reagent_info)
             or RuleEngine._is_ordinary_mineral_acid(reagent_info)
         ):
+            return []
+
+        if category == "\u5e38\u89c4\u9178" and RuleEngine._is_mineral_acid_salt_like(reagent_info):
             return []
 
         if category == "\u5e38\u89c4\u9178" and RuleEngine._is_ordinary_mineral_acid(reagent_info):
@@ -800,26 +812,61 @@ class RuleEngine:
         return any(RuleEngine._normalize_text(token) in name_text for token in tokens)
 
     @staticmethod
-    def _is_hydrochloride_salt(reagent_info: dict[str, Any]) -> bool:
-        name_text = RuleEngine._normalize_text(
-            " ".join(
-                str(reagent_info.get(key) or "")
-                for key in ("name", "reagent_name", "chemical_name", "standard_name", "cleaned_name", "english_name")
-            )
+    def _normalized_name_values(reagent_info: dict[str, Any]) -> list[str]:
+        values = []
+        for key in ("name", "reagent_name", "chemical_name", "standard_name", "cleaned_name", "english_name"):
+            value = RuleEngine._normalize_text(str(reagent_info.get(key) or ""))
+            if value:
+                values.append(value)
+        return values
+
+    @staticmethod
+    def _is_mineral_acid_salt_like(reagent_info: dict[str, Any]) -> bool:
+        name_values = RuleEngine._normalized_name_values(reagent_info)
+        if not name_values:
+            return False
+
+        english_salt_tokens = ("hydrochloride", "nitrate", "sulfate", "sulphate")
+
+        acid_solution_forms = (
+            "\u76d0\u9178\u6eb6\u6db2",
+            "\u785d\u9178\u6eb6\u6db2",
+            "\u786b\u9178\u6eb6\u6db2",
+            "\u6d53\u76d0\u9178",
+            "\u6d53\u785d\u9178",
+            "\u6d53\u786b\u9178",
+            "\u7a00\u76d0\u9178",
+            "\u7a00\u785d\u9178",
+            "\u7a00\u786b\u9178",
+            "\u53d1\u70df\u76d0\u9178",
+            "\u53d1\u70df\u785d\u9178",
+            "\u53d1\u70df\u786b\u9178",
         )
-        return "\u76d0\u9178\u76d0" in name_text or "hydrochloride" in name_text
+
+        for name_text in name_values:
+            if any(token in name_text for token in english_salt_tokens):
+                return True
+            if "\u76d0\u9178\u76d0" in name_text or "\u785d\u9178\u76d0" in name_text or "\u786b\u9178\u76d0" in name_text:
+                return True
+            if any(form in name_text for form in acid_solution_forms):
+                continue
+
+            for acid in ("\u76d0\u9178", "\u785d\u9178", "\u786b\u9178"):
+                index = name_text.find(acid)
+                while index != -1:
+                    after = name_text[index + len(acid) :]
+                    if after and not after.startswith(("\u6eb6\u6db2", "\u6c34\u6eb6\u6db2")):
+                        return True
+                    index = name_text.find(acid, index + 1)
+        return False
 
     @staticmethod
     def _is_ordinary_mineral_acid(reagent_info: dict[str, Any]) -> bool:
-        name_text = RuleEngine._normalize_text(
-            " ".join(
-                str(reagent_info.get(key) or "")
-                for key in ("name", "reagent_name", "chemical_name", "standard_name", "cleaned_name", "english_name")
-            )
-        )
-        if not name_text:
+        name_values = RuleEngine._normalized_name_values(reagent_info)
+        if not name_values or RuleEngine._is_mineral_acid_salt_like(reagent_info):
             return False
-        acid_tokens = (
+
+        exact_acids = (
             "hcl",
             "hydrochloricacid",
             "\u76d0\u9178",
@@ -831,7 +878,34 @@ class RuleEngine:
             "sulphuricacid",
             "\u786b\u9178",
         )
-        return any(token in name_text for token in acid_tokens)
+        if any(name_text in exact_acids for name_text in name_values):
+            return True
+
+        explicit_acid_forms = (
+            "hydrochloricacid",
+            "nitricacid",
+            "sulfuricacid",
+            "sulphuricacid",
+            "\u76d0\u9178\u6eb6\u6db2",
+            "\u785d\u9178\u6eb6\u6db2",
+            "\u786b\u9178\u6eb6\u6db2",
+            "\u6d53\u76d0\u9178",
+            "\u6d53\u785d\u9178",
+            "\u6d53\u786b\u9178",
+            "\u7a00\u76d0\u9178",
+            "\u7a00\u785d\u9178",
+            "\u7a00\u786b\u9178",
+            "\u53d1\u70df\u76d0\u9178",
+            "\u53d1\u70df\u785d\u9178",
+            "\u53d1\u70df\u786b\u9178",
+        )
+        if any(form in name_text for name_text in name_values for form in explicit_acid_forms):
+            return True
+
+        formula_context = re.compile(
+            r"(?:^|[^a-z0-9])(?:\d+(?:\.\d+)?(?:%|mol/l|mol|m)?)?(?:hcl|hno3|h2so4)(?:solution)?(?:$|[^a-z0-9])"
+        )
+        return any(formula_context.search(name_text) for name_text in name_values)
 
     @staticmethod
     def _first_percent_concentration(text: str) -> float | None:

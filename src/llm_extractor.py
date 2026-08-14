@@ -64,6 +64,9 @@ Rules:
 - A hydrochloride salt is not hydrochloric acid. Do not infer strong acid,
   special acid, or corrosive acid behavior only from "hydrochloride",
   "\u76d0\u9178\u76d0", or an organic compound name ending with hydrochloride salt.
+- Nitrate and sulfate/sulphate salts are not nitric acid or sulfuric acid.
+  Do not infer regular acid behavior only from "nitrate", "sulfate",
+  "sulphate", "\u785d\u9178\u76d0", "\u786b\u9178\u76d0", "\u785d\u9178X", or "\u786b\u9178X" salt names.
 - Ordinary hydrochloric acid / HCl / 盐酸, nitric acid / HNO3 / 硝酸,
   and sulfuric acid / H2SO4 / 硫酸 should be treated as regular acids
   unless the source material clearly gives another higher-priority risk.
@@ -408,6 +411,19 @@ raw_text:
     @staticmethod
     def _ordinary_mineral_acid_label(text: str) -> str:
         normalized = text.lower()
+        compact = re.sub(r"\s+", "", normalized)
+        salt_terms = (
+            "hydrochloride",
+            "nitrate",
+            "sulfate",
+            "sulphate",
+            "\u76d0\u9178\u76d0",
+            "\u785d\u9178\u76d0",
+            "\u786b\u9178\u76d0",
+        )
+        if any(term in compact for term in salt_terms):
+            return ""
+
         acid_terms = (
             ("盐酸", ("hcl", "hydrochloric acid", "7647-01-0", "盐酸")),
             ("硝酸", ("hno3", "nitric acid", "7697-37-2", "硝酸")),

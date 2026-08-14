@@ -332,6 +332,57 @@ class StructuredRulesTest(unittest.TestCase):
 
         self.assertNotEqual(result["final_category"], "\u7279\u6b8a\u9178")
 
+    def test_mineral_acid_salts_do_not_match_regular_or_special_acid(self) -> None:
+        for name in (
+            "\u785d\u9178\u9541",
+            "\u786b\u9178\u94dc",
+            "\u82ef\u80bc\u76d0\u9178\u76d0",
+            "\u76d0\u9178\u82ef\u80bc",
+            "magnesium nitrate",
+            "copper sulfate",
+            "phenylhydrazine hydrochloride",
+        ):
+            with self.subTest(name=name):
+                result = self.engine.classify(
+                    {
+                        "reagent_name": name,
+                        "standard_name": name,
+                        "english_name": name,
+                        "suggested_categories": ["\u7279\u6b8a\u9178", "\u5e38\u89c4\u9178"],
+                        "allow_default_normal": True,
+                    }
+                )
+
+                self.assertNotIn(result["final_category"], ("\u5e38\u89c4\u9178", "\u7279\u6b8a\u9178"))
+                self.assertNotIn("\u5e38\u89c4\u9178", result["matched_categories"])
+                self.assertNotIn("\u7279\u6b8a\u9178", result["matched_categories"])
+
+    def test_plain_mineral_acids_still_match_regular_acid(self) -> None:
+        for name in (
+            "\u76d0\u9178",
+            "\u785d\u9178",
+            "\u786b\u9178",
+            "\u53d1\u70df\u76d0\u9178",
+            "\u6d53\u786b\u9178",
+            "10% HCl",
+            "2mol HCl",
+            "hydrochloric acid solution",
+        ):
+            with self.subTest(name=name):
+                result = self.engine.classify(
+                    {
+                        "reagent_name": name,
+                        "standard_name": name,
+                        "english_name": name,
+                        "suggested_categories": ["\u7279\u6b8a\u9178"],
+                        "allow_default_normal": True,
+                    }
+                )
+
+                self.assertEqual(result["final_category"], "\u5e38\u89c4\u9178")
+                self.assertIn("\u5e38\u89c4\u9178", result["matched_categories"])
+                self.assertNotIn("\u7279\u6b8a\u9178", result["matched_categories"])
+
     def test_default_manual_review_category_blocks_auto_pass(self) -> None:
         result = self.engine.classify({"reagent_name": "\u6c30\u5316\u94a0", "text": "\u6c30\u5316\u94a0"})
 

@@ -47,6 +47,44 @@ class LlmExtractorFallbackTest(unittest.TestCase):
                 self.assertIn("常规酸", result["suggested_categories"])
                 self.assertNotIn("特殊酸", result["suggested_categories"])
 
+    def test_mineral_acid_salts_do_not_fallback_to_regular_acid(self) -> None:
+        extractor = LlmExtractor()
+        for name, raw_text in (
+            ("magnesium nitrate", "magnesium nitrate salt SDS; nitrate compound"),
+            ("copper sulfate", "copper sulfate salt SDS; source mentions sulfuric acid in unrelated context"),
+            (
+                "phenylhydrazine hydrochloride",
+                "hydrochloride salt. source mentions hydrochloric acid in unrelated context.",
+            ),
+        ):
+            with self.subTest(name=name):
+                result = extractor._merge_local_hazard_fallback(
+                    {
+                        "name": name,
+                        "cas": "",
+                        "flash_point": "",
+                        "boiling_point": "",
+                        "toxicity": "",
+                        "corrosive": None,
+                        "oxidizing": None,
+                        "flammable": None,
+                        "water_reactive": None,
+                        "explosive_risk": None,
+                        "heavy_metal": None,
+                        "suggested_categories": [],
+                        "evidence": [],
+                        "confidence": 0.0,
+                    },
+                    raw_text=raw_text,
+                    name=name,
+                    cas="",
+                )
+
+                self.assertNotIn("常规酸", result["suggested_categories"])
+                self.assertFalse(
+                    any("ordinary mineral acid" in item.lower() for item in result["evidence"])
+                )
+
     def test_fuming_hydrochloric_acid_fallback(self) -> None:
         extractor = LlmExtractor()
         result = extractor._merge_local_hazard_fallback(

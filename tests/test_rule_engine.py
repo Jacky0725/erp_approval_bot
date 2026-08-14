@@ -59,6 +59,51 @@ class RuleEngineTest(unittest.TestCase):
                 self.assertNotIn("特殊酸", result["matched_categories"])
                 self.assertFalse(result["need_manual_review"])
 
+    def test_mineral_acid_salts_do_not_match_regular_or_special_acid(self) -> None:
+        engine = RuleEngine(
+            rules=[
+                Rule(
+                    category="特殊酸",
+                    explanation="",
+                    examples="",
+                    explanation_keywords=(),
+                    example_keywords=(),
+                ),
+                Rule(
+                    category="常规酸",
+                    explanation="",
+                    examples="",
+                    explanation_keywords=(),
+                    example_keywords=(),
+                ),
+            ],
+            priority=["特殊酸", "常规酸"],
+        )
+
+        for name in (
+            "硝酸镁",
+            "硫酸铜",
+            "苯肼盐酸盐",
+            "盐酸苯肼",
+            "magnesium nitrate",
+            "copper sulfate",
+            "phenylhydrazine hydrochloride",
+        ):
+            with self.subTest(name=name):
+                result = engine.classify(
+                    {
+                        "reagent_name": name,
+                        "standard_name": name,
+                        "suggested_categories": ["特殊酸", "常规酸"],
+                        "allow_default_normal": True,
+                    }
+                )
+
+                self.assertEqual(result["final_category"], "普通类")
+                self.assertNotIn("常规酸", result["matched_categories"])
+                self.assertNotIn("特殊酸", result["matched_categories"])
+                self.assertFalse(result["need_manual_review"])
+
     def test_uses_priority_when_multiple_categories_match(self) -> None:
         result = self.engine.classify({"reagent_name": "三溴化硼"})
 
