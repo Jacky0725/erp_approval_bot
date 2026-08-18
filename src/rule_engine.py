@@ -515,7 +515,7 @@ class RuleEngine:
             hits.extend(RuleEngine._heavy_metal_name_hits(reagent_info))
 
         if category == "\u5f02\u5473":
-            hits.extend(RuleEngine._indole_name_hits(reagent_info))
+            hits.extend(RuleEngine._odor_name_hits(reagent_info))
 
         if category == "\u7279\u6b8a\u9178" and (
             RuleEngine._is_mineral_acid_salt_like(reagent_info)
@@ -583,7 +583,7 @@ class RuleEngine:
         return list(dict.fromkeys(hits))
 
     @staticmethod
-    def _indole_name_hits(reagent_info: dict[str, Any]) -> list[str]:
+    def _odor_name_hits(reagent_info: dict[str, Any]) -> list[str]:
         parts = []
         for key in ("name", "reagent_name", "chemical_name", "standard_name", "cleaned_name", "english_name"):
             value = reagent_info.get(key)
@@ -593,8 +593,14 @@ class RuleEngine:
         hits = []
         for token, label in (
             ("\u5432\u54da", "\u542b\u5432\u54da"),
+            ("\u5421\u5576", "\u542b\u5421\u5576"),
+            ("\u786b\u9187", "\u542b\u786b\u9187"),
+            ("\u5def\u57fa", "\u542b\u5def\u57fa"),
             ("indole", "indole"),
             ("isoindole", "isoindole"),
+            ("pyridine", "pyridine"),
+            ("thiol", "thiol"),
+            ("mercapto", "mercapto"),
         ):
             if token in name_text:
                 hits.append(label)

@@ -270,12 +270,20 @@ class StructuredRulesTest(unittest.TestCase):
         self.assertEqual(result["final_category"], "\u5f02\u5473")
         self.assertFalse(result["need_manual_review"])
 
-    def test_indole_names_prefer_odor_class(self) -> None:
+    def test_odor_keyword_names_prefer_odor_class(self) -> None:
         for name in [
             "\u5432\u54da",
             "\u5f02\u5432\u54da",
+            "\u5421\u5576",
+            "2-\u7532\u57fa\u5421\u5576",
+            "\u4e59\u786b\u9187",
+            "4-\u5def\u57fa\u5421\u5576",
             "indole",
             "isoindole",
+            "pyridine",
+            "2-methylpyridine",
+            "ethanethiol",
+            "mercaptopyridine",
             "3-Bromo-6-nitroindole",
             "7-\u6eb4-5-\u6c1f-1H-\u5432\u54da-2,3-\u4e8c\u916e",
         ]:
