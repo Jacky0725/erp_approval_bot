@@ -317,6 +317,8 @@ class ApprovalFlowMixin:
         all_suggestions: list[dict[str, Any]] = []
         all_suggestion_keys: set[str] = set()
         handled_reagent_keys: set[str] = set()
+        pending_write_suggestions: dict[str, dict[str, Any]] = {}
+        not_found_after_reread_keys: set[str] = set()
         write_attempts_by_key: dict[str, int] = {}
         visited_steps = 0
         self.sort_property_column_until_unmatched_visible(page)
@@ -340,7 +342,17 @@ class ApprovalFlowMixin:
                 moved_next, terminal_or_error = self.click_next_reagent_page(page)
                 if not moved_next:
                     if terminal_or_error:
-                        print("Multi-page mode reached the last reagent page.")
+                        if pending_write_suggestions:
+                            self.record_not_found_pending_write_failures(
+                                pending_write_suggestions,
+                                not_found_after_reread_keys,
+                            )
+                            print(
+                                f"Multi-page mode reached the last reagent page with "
+                                f"{len(pending_write_suggestions)} pending write candidate(s) not found after re-read."
+                            )
+                        else:
+                            print("Multi-page mode reached the last reagent page.")
                     else:
                         print("Multi-page mode stopped because next-page navigation could not be verified.")
                     break
@@ -348,11 +360,33 @@ class ApprovalFlowMixin:
                 continue
 
             if not current_unmatched:
-                print(
-                    "Current sorted reagent page has no '-' rows; "
-                    "multi-page mode considers this reagent list complete."
-                )
-                break
+                if pending_write_suggestions:
+                    print(
+                        f"Current sorted reagent page has no '-' rows, but "
+                        f"{len(pending_write_suggestions)} pending write candidate(s) still lack a terminal status; "
+                        "scanning the next reagent page."
+                    )
+                else:
+                    print("Current sorted reagent page has no '-' rows; scanning the next reagent page before completion.")
+                moved_next, terminal_or_error = self.click_next_reagent_page(page)
+                if not moved_next:
+                    if terminal_or_error:
+                        if pending_write_suggestions:
+                            self.record_not_found_pending_write_failures(
+                                pending_write_suggestions,
+                                not_found_after_reread_keys,
+                            )
+                            print(
+                                f"Multi-page mode reached the last reagent page with "
+                                f"{len(pending_write_suggestions)} pending write candidate(s) not found after re-read."
+                            )
+                        else:
+                            print("Multi-page mode reached the last reagent page; no '-' rows remain.")
+                    else:
+                        print("Multi-page mode stopped because next-page navigation could not be verified.")
+                    break
+                self.sort_property_column_until_unmatched_visible(page)
+                continue
 
             page_suggestions = self.process_current_unmatched_reagent_page(
                 page,
@@ -369,6 +403,10 @@ class ApprovalFlowMixin:
                     all_suggestion_keys.add(key)
             if page_suggestions:
                 self.write_partial_approval_suggestions(all_suggestions)
+                for suggestion in self.high_confidence_write_candidates(page_suggestions):
+                    key = self.suggestion_work_key(suggestion)
+                    if key not in handled_reagent_keys and write_attempts_by_key.get(key, 0) < self.max_reagent_write_attempts():
+                        pending_write_suggestions[key] = suggestion
 
             if page_suggestions:
                 with self.stage_logger.stage("apply_approval_write_mode", f"page {current_page}"):
@@ -381,11 +419,18 @@ class ApprovalFlowMixin:
                 for key in write_result.get("attempted", set()):
                     write_attempts_by_key[key] = write_attempts_by_key.get(key, 0) + 1
                 failed_keys = set(write_result.get("failed", set()))
-                handled_reagent_keys.update(set(write_result.get("handled", set())) - failed_keys)
+                saved_or_terminal_keys = set(write_result.get("handled", set())) - failed_keys
+                handled_reagent_keys.update(saved_or_terminal_keys)
+                for key in saved_or_terminal_keys:
+                    pending_write_suggestions.pop(key, None)
                 for key in failed_keys:
                     if write_attempts_by_key.get(key, 0) >= self.max_reagent_write_attempts():
                         handled_reagent_keys.add(key)
+                        pending_write_suggestions.pop(key, None)
                         print(f"Write retry limit reached for reagent key: {key}")
+                for key in set(write_result.get("deferred", set())):
+                    if key in pending_write_suggestions:
+                        print(f"Deferred pending write candidate until a later page/read: {key}")
 
                 if failed_keys:
                     print(
@@ -426,6 +471,8 @@ class ApprovalFlowMixin:
 
             if self.approval_write_mode() in {"disabled", "test_one"}:
                 handled_reagent_keys.update(self.reagent_work_key(reagent) for reagent in current_unmatched)
+                for reagent in current_unmatched:
+                    pending_write_suggestions.pop(self.reagent_work_key(reagent), None)
 
             moved_next, terminal_or_error = self.click_next_reagent_page(page)
             if not moved_next:
@@ -444,6 +491,21 @@ class ApprovalFlowMixin:
                 raise RuntimeError("Stopped multi-page approval after 200 pages; page navigation may be stuck.")
 
         return all_suggestions
+
+    def record_not_found_pending_write_failures(
+        self,
+        pending_write_suggestions: dict[str, dict[str, Any]],
+        recorded_keys: set[str],
+    ) -> None:
+        for key, suggestion in list(pending_write_suggestions.items()):
+            if key in recorded_keys:
+                continue
+            self.record_web_write_failure(
+                suggestion,
+                str(suggestion.get("\u6700\u7ec8\u5efa\u8bae\u7c7b\u522b") or ""),
+                "not_found_after_reread",
+            )
+            recorded_keys.add(key)
 
     def write_partial_approval_suggestions(self, suggestions: list[dict[str, Any]]) -> None:
         if not suggestions:
@@ -1424,7 +1486,13 @@ class ApprovalFlowMixin:
         return re.sub(r"\s+", "", str(cas or "").strip())
 
     def apply_approval_write_mode(self, page: Page, suggestions: list[dict[str, Any]]) -> dict[str, set[str]]:
-        result: dict[str, set[str]] = {"attempted": set(), "handled": set(), "failed": set()}
+        result: dict[str, set[str]] = {
+            "attempted": set(),
+            "handled": set(),
+            "failed": set(),
+            "eligible": set(),
+            "deferred": set(),
+        }
         min_confidence = self.approval_write_min_confidence()
         page_summary = summarize_approval_suggestions(
             suggestions,
@@ -1445,6 +1513,7 @@ class ApprovalFlowMixin:
 
         candidates = self.high_confidence_write_candidates(suggestions)
         candidate_keys = {self.suggestion_work_key(suggestion) for suggestion in candidates}
+        result["eligible"].update(candidate_keys)
         result["handled"].update(
             self.suggestion_work_key(suggestion)
             for suggestion in suggestions
@@ -1465,6 +1534,8 @@ class ApprovalFlowMixin:
                 f"{min(batch_size, len(candidates))} of {len(candidates)} writable candidate(s) "
                 "will be saved before re-reading the page."
             )
+            deferred_candidates = candidates[batch_size:]
+            result["deferred"].update(self.suggestion_work_key(suggestion) for suggestion in deferred_candidates)
             candidates = candidates[:batch_size]
         else:
             print(f"Unknown APPROVAL_WRITE_MODE={mode}; no webpage fields will be changed.")
@@ -1744,6 +1815,11 @@ class ApprovalFlowMixin:
         if "could not select" in text:
             category = text.replace("could not select", "").strip()
             return f"程序打开了技术判定，但没有在物化特性下拉框中成功选中 {category}。"
+        if "not_found_after_reread" in text:
+            return (
+                "程序生成了可写入建议，但多页重读后没有再次定位到该试剂行；"
+                "需要核对是否已经由 ERP 自动更新或分页排序移动。"
+            )
         if "row not found" in text:
             return "当前页没有重新定位到这条试剂，可能是保存后页面刷新、分页或排序变化导致。"
         if "technical judgement" in text:
@@ -1755,18 +1831,6 @@ class ApprovalFlowMixin:
         return text
 
     def add_manual_review_item_from_write_failure(self, suggestion: dict[str, Any], reason: str) -> None:
-        if self.write_failure_can_skip_manual_review(suggestion):
-            memory = ReagentMemory.from_settings(self.settings, self.root_dir)
-            saved = self.remember_erp_suggestion(memory, suggestion)
-            category = suggestion.get("\u6700\u7ec8\u5efa\u8bae\u7c7b\u522b", "")
-            sequence = suggestion.get("\u5e8f\u53f7", "")
-            reagent_name = suggestion.get("\u8bd5\u5242\u540d\u79f0", "")
-            print(
-                "Web write failed, but classification is reusable; skipped manual review queue "
-                f"and recorded memory={saved}: {sequence} {reagent_name} -> {category}; reason={reason}"
-            )
-            return
-
         reagent = {
             "\u5e8f\u53f7": suggestion.get("\u5e8f\u53f7", ""),
             "\u8bd5\u5242\u540d\u79f0": suggestion.get("\u8bd5\u5242\u540d\u79f0", ""),
@@ -1786,20 +1850,10 @@ class ApprovalFlowMixin:
         self.add_manual_review_item(reagent, name_result, reason=manual_reason)
 
     def write_failure_can_skip_manual_review(self, suggestion: dict[str, Any]) -> bool:
-        rule_category = str(suggestion.get("\u6700\u7ec8\u5efa\u8bae\u7c7b\u522b") or "").strip()
-        if not rule_category or not to_erp_property(rule_category, self.settings):
-            return False
-        if str(suggestion.get("\u9700\u4eba\u5de5\u590d\u6838")).strip().lower() in {"true", "1", "yes"}:
-            return False
-        try:
-            confidence = float(suggestion.get("\u7f6e\u4fe1\u5ea6") or 0.0)
-        except (TypeError, ValueError):
-            confidence = 0.0
-        threshold = float(
-            os.getenv("APPROVAL_WRITE_MIN_CONFIDENCE")
-            or getattr(self, "settings", {}).get("approval", {}).get("write_min_confidence", 0.8)
-        )
-        return confidence >= threshold
+        # A reusable classification is only safe after ERP confirms the webpage
+        # field was written and saved. Failed writes stay out of reusable memory
+        # to avoid contaminating future automated approvals.
+        return False
 
     def stabilize_reagent_detail_after_write_failure(self, page: Page) -> bool:
         try:

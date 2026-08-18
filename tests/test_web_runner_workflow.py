@@ -10,6 +10,8 @@ from web_runner import (
     AutomationJobManager,
     automation_failure_reason,
     atomic_write_text,
+    artifact_summary,
+    current_run_lines,
     normalize_web_write_mode,
     parse_target_list_numbers,
     repair_display_text,
@@ -101,6 +103,80 @@ class WorkflowSummaryTest(unittest.TestCase):
             self.assertEqual(summary["search_failure_count"], 1)
             self.assertEqual(summary["memory_hit_count"], 1)
             self.assertTrue(summary["has_write_warning"])
+
+    def test_run_summary_can_count_full_log_beyond_tail(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            lines = ["Save verified for sequence 1: True (clicked_save=True)"]
+            lines.extend(f"noise line {index}" for index in range(200))
+            lines.append("Could not select physicochemical property 易燃类 for sequence: 14")
+
+            summary = run_summary(
+                lines,
+                action="suggestions",
+                options={"TARGET_LIST_NUMBERS": "SJ202608170010"},
+                running=False,
+                success=True,
+                error="",
+                root_dir=root,
+            )
+
+            self.assertEqual(summary["write_success_count"], 1)
+            self.assertEqual(summary["write_failure_count"], 1)
+            self.assertEqual(summary["dropdown_failure_count"], 1)
+            self.assertEqual(summary["dropdown_failures"][0]["sequence"], "14")
+            self.assertIn("易燃类", summary["dropdown_failures"][0]["category"])
+
+    def test_run_summary_counts_deferred_and_not_found_pending_writes(self) -> None:
+        with TemporaryDirectory() as tmp:
+            lines = [
+                "Page suggestion summary: {\"total\": 20, \"writable\": 20, \"manual_review\": 0}",
+                "Deferred pending write candidate until a later page/read: 6|-|reagent-6|",
+                "Deferred pending write candidate until a later page/read: 7|-|reagent-7|",
+                "Multi-page mode reached the last reagent page with 9 pending write candidate(s) not found after re-read.",
+            ]
+
+            summary = run_summary(
+                lines,
+                action="suggestions",
+                options={"TARGET_LIST_NUMBERS": "SJ202608170010"},
+                running=False,
+                success=True,
+                error="",
+                root_dir=Path(tmp),
+            )
+
+            self.assertEqual(summary["page_suggestion_count"], 20)
+            self.assertEqual(summary["deferred_write_count"], 2)
+            self.assertEqual(summary["not_found_after_reread_count"], 1)
+
+    def test_current_run_lines_reads_complete_log_file(self) -> None:
+        with TemporaryDirectory() as tmp:
+            log_path = Path(tmp) / "run.log"
+            log_path.write_text("\n".join(f"line {index}" for index in range(220)), encoding="utf-8")
+
+            lines = current_run_lines(log_path, fallback=["tail"])
+
+            self.assertEqual(len(lines), 220)
+            self.assertEqual(lines[0], "line 0")
+            self.assertEqual(lines[-1], "line 219")
+
+    def test_api_log_tail_reads_persisted_run_log_when_idle(self) -> None:
+        with TemporaryDirectory() as tmp:
+            log_path = Path(tmp) / "run.log"
+            log_path.write_text("\n".join(f"run line {index}" for index in range(170)), encoding="utf-8")
+
+            with patch(
+                "web_app.manager.status",
+                return_value={"run_log_path": str(log_path), "log_tail": ["stale memory line"]},
+            ):
+                response = web_app.api_log_tail()
+
+            payload = response.body.decode("utf-8")
+
+        self.assertIn("run line 10", payload)
+        self.assertIn("run line 169", payload)
+        self.assertNotIn("stale memory line", payload)
 
     def test_todo_tasks_summary_prefers_utf8_json(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -198,6 +274,21 @@ class WorkflowSummaryTest(unittest.TestCase):
             finally:
                 web_app.LOG_DIR = original
 
+    def test_artifact_summary_excludes_noisy_large_runtime_files(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            log_dir = root / "data" / "logs"
+            log_dir.mkdir(parents=True)
+            (log_dir / "approval_suggestions.xlsx").write_text("ok", encoding="utf-8")
+            (log_dir / "web_run_stdout.txt").write_text("large aggregate log", encoding="utf-8")
+            (log_dir / "reagent_memory_backup_20260817.sqlite").write_text("backup", encoding="utf-8")
+
+            names = {item["name"] for item in artifact_summary(root)}
+
+        self.assertIn("approval_suggestions.xlsx", names)
+        self.assertNotIn("web_run_stdout.txt", names)
+        self.assertNotIn("reagent_memory_backup_20260817.sqlite", names)
+
     def test_write_mode_options_expose_only_production_modes(self) -> None:
         template_text = (Path(__file__).resolve().parents[1] / "src" / "templates" / "partials" / "run.html").read_text(
             encoding="utf-8"
@@ -212,6 +303,14 @@ class WorkflowSummaryTest(unittest.TestCase):
         self.assertIn('value="generate_library"', combined)
         for retired in ["test_one", "save_one", "single_page"]:
             self.assertNotIn(f'<option value="{retired}"', combined)
+
+    def test_logs_page_forces_log_refresh_while_running(self) -> None:
+        script_text = (Path(__file__).resolve().parents[1] / "src" / "static" / "dashboard.js").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("refreshLogTail({force: true})", script_text)
+        self.assertIn("refreshLogTail({force: status.running || runJustFinished})", script_text)
 
     def test_dry_run_safety_gate_is_visible_in_web_ui(self) -> None:
         root = Path(__file__).resolve().parents[1]
@@ -254,6 +353,16 @@ class WorkflowSummaryTest(unittest.TestCase):
 
             self.assertEqual(path.read_text(encoding="utf-8"), "new: true\n")
             self.assertEqual(list(Path(tmp).glob("*.tmp")), [])
+
+    def test_api_status_does_not_call_heavy_dashboard_summaries(self) -> None:
+        with (
+            patch("web_app.approval_summary", side_effect=AssertionError("approval should be lazy")),
+            patch("web_app.review_queue_summary", side_effect=AssertionError("review should be lazy")),
+            patch("web_app.artifact_summary", side_effect=AssertionError("artifacts should be lazy")),
+        ):
+            response = web_app.api_status()
+
+        self.assertEqual(response.status_code, 200)
 
 
 if __name__ == "__main__":

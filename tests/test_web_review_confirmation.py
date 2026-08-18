@@ -75,6 +75,38 @@ class WebReviewConfirmationTest(unittest.TestCase):
         self.assertEqual(row["evidence_status"], "LLM辅助，置信度 0.65")
         self.assertEqual(row["allow_suggestion_preselect"], "True")
 
+    def test_review_queue_summary_paginates_pending_rows_server_side(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            data_dir = root / "data"
+            data_dir.mkdir(parents=True)
+            queue_path = data_dir / "review_queue.xlsx"
+            rows = []
+            for index in range(45):
+                rows.append(
+                    {
+                        "timestamp": f"2026-08-17T10:{index:02d}:00",
+                        "list_number": "SJ1" if index < 30 else "SJ2",
+                        "chemical_name": f"试剂{index:02d}",
+                        "standard_name": f"标准{index:02d}",
+                        "reason": "needs manual review",
+                        "status": "pending",
+                    }
+                )
+            pd.DataFrame(rows).to_excel(queue_path, index=False)
+
+            page_two = review_queue_summary(root, page=2, per_page=20, sort_direction="desc")
+            filtered = review_queue_summary(root, page=1, per_page=20, list_number="SJ2", sort_direction="desc")
+
+        self.assertEqual(page_two["pending"], 45)
+        self.assertEqual(page_two["filtered"], 45)
+        self.assertEqual(page_two["page"], 2)
+        self.assertEqual(page_two["pages"], 3)
+        self.assertEqual(len(page_two["preview"]), 20)
+        self.assertEqual(filtered["filtered"], 15)
+        self.assertEqual(filtered["pages"], 1)
+        self.assertTrue(all(row["list_number"] == "SJ2" for row in filtered["preview"]))
+
     def test_review_queue_summary_sanitizes_llm_failure_without_preselect(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

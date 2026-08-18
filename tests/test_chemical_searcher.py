@@ -17,6 +17,18 @@ from chemical_searcher import ChemicalSearcher  # noqa: E402
 from web_researcher import ResearchPage  # noqa: E402
 
 
+NO_LLM_ENV = {
+    "LLM_API_KEY": "",
+    "SILICONFLOW_API_KEY": "",
+    "OPENAI_API_KEY": "",
+    "DEEPSEEK_API_KEY": "",
+    "DASHSCOPE_API_KEY": "",
+    "QIANFAN_API_KEY": "",
+    "ARK_API_KEY": "",
+    "MOONSHOT_API_KEY": "",
+}
+
+
 class RecordingSearcher(ChemicalSearcher):
     def __init__(self, *args: Any, succeed: bool = True, allow_fallback: bool = False, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
@@ -180,7 +192,8 @@ abbreviations: {}
                     return None
 
             settings = {"paths": {"name_aliases_yaml": "config/name_aliases.yaml"}}
-            result = TrustedAliasSearcher(root_dir=root, settings=settings).search("火碱")
+            with patch.dict("os.environ", NO_LLM_ENV, clear=False):
+                result = TrustedAliasSearcher(root_dir=root, settings=settings).search("火碱")
             name_result = result["name_normalization"]
 
             self.assertEqual(name_result["standard_name"], "氢氧化钠")
@@ -198,7 +211,8 @@ abbreviations: {}
             self.assertEqual(candidates.iloc[0]["cas"], "1310-73-2")
             self.assertEqual(candidates.iloc[0]["status"], "pending")
 
-            TrustedAliasSearcher(root_dir=root, settings=settings).search("火碱")
+            with patch.dict("os.environ", NO_LLM_ENV, clear=False):
+                TrustedAliasSearcher(root_dir=root, settings=settings).search("火碱")
             candidates = pd.read_excel(candidates_path, dtype=str).fillna("")
             self.assertEqual(len(candidates), 1)
 
@@ -238,7 +252,14 @@ abbreviations: {}
             ) -> dict[str, Any] | None:
                 return None
 
-        result = LowConfidenceAliasSearcher(root_dir=ROOT_DIR).search("火碱")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config_dir = root / "config"
+            config_dir.mkdir()
+            (config_dir / "name_aliases.yaml").write_text("cas: {}\naliases: {}\nabbreviations: {}\n", encoding="utf-8")
+            settings = {"paths": {"name_aliases_yaml": "config/name_aliases.yaml"}}
+            with patch.dict("os.environ", NO_LLM_ENV, clear=False):
+                result = LowConfidenceAliasSearcher(root_dir=root, settings=settings).search("火碱")
         name_result = result["name_normalization"]
 
         self.assertEqual(name_result["standard_name"], "火碱")
@@ -340,7 +361,14 @@ abbreviations: {}
             ) -> dict[str, Any] | None:
                 return None
 
-        result = NameOnlyAliasSearcher(root_dir=ROOT_DIR).search("火碱")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config_dir = root / "config"
+            config_dir.mkdir()
+            (config_dir / "name_aliases.yaml").write_text("cas: {}\naliases: {}\nabbreviations: {}\n", encoding="utf-8")
+            settings = {"paths": {"name_aliases_yaml": "config/name_aliases.yaml"}}
+            with patch.dict("os.environ", NO_LLM_ENV, clear=False):
+                result = NameOnlyAliasSearcher(root_dir=root, settings=settings).search("火碱")
         name_result = result["name_normalization"]
 
         self.assertEqual(name_result["standard_name"], "火碱")

@@ -87,6 +87,9 @@ WORKFLOW_STEPS = [
     {"id": "write", "label": "网页写入"},
 ]
 
+_FILE_CACHE_LOCK = threading.Lock()
+_FILE_CACHE: dict[tuple[str, str], tuple[tuple[bool, int, int], Any]] = {}
+
 
 def normalize_web_write_mode(value: Any, *, default: str = "disabled") -> str:
     normalized = str(value or "").strip().lower()
@@ -281,12 +284,13 @@ class AutomationJobManager:
             if not self.running and not self.action:
                 return self._status_from_persisted_state()
             log_tail = self.lines[-160:]
+            summary_lines = current_run_lines(self._run_log_path, fallback=self.lines)
             running = self.running
             success = self.success
             error = self.error
-            health = run_health(log_tail, success, error)
+            health = run_health(summary_lines, success, error)
             summary = run_summary(
-                log_tail,
+                summary_lines,
                 action=self.action,
                 options=self._last_options,
                 running=running,
@@ -420,12 +424,14 @@ class AutomationJobManager:
         except Exception:
             payload = {}
         log_tail = [repair_display_text(line) for line in (payload.get("log_tail") or [])]
+        run_log_path = str(payload.get("run_log_path") or "")
+        summary_lines = current_run_lines(run_log_path, fallback=log_tail)
         success = payload.get("success")
         error = repair_display_text(payload.get("error") or "")
-        health = run_health(log_tail, success, error)
+        health = run_health(summary_lines, success, error)
         action = str(payload.get("action") or "")
         summary = run_summary(
-            log_tail,
+            summary_lines,
             action=action,
             options=payload.get("options") or {},
             running=False,
@@ -443,7 +449,7 @@ class AutomationJobManager:
             "error": error,
             "result_label": result_label(False, success, error, health, action=action),
             "result_health": health,
-            "run_log_path": str(payload.get("run_log_path") or ""),
+            "run_log_path": run_log_path,
             "summary": summary,
             "log_tail": log_tail,
             "workflow": workflow_summary(log_tail, running=False, success=success, error=error),
@@ -643,6 +649,17 @@ def new_run_log_path(action: str) -> Path:
     return RUN_LOG_DIR / f"{stamp}_{safe_action}.log"
 
 
+def current_run_lines(run_log_path: str | Path | None, *, fallback: list[str] | None = None) -> list[str]:
+    if run_log_path:
+        try:
+            path = Path(run_log_path)
+            if path.exists():
+                return [repair_display_text(line.rstrip("\n")) for line in path.read_text(encoding="utf-8", errors="replace").splitlines()]
+        except OSError:
+            pass
+    return [repair_display_text(line) for line in (fallback or [])]
+
+
 def action_label(action: str) -> str:
     return ACTION_LABELS.get(str(action or ""), str(action or ""))
 
@@ -661,8 +678,6 @@ def run_summary(
     lower_text = text.lower()
     options = options or {}
     todo = todo_tasks_summary(root_dir)
-    approval = approval_summary(root_dir)
-    review = review_queue_summary(root_dir)
     suggestion_metrics = aggregate_suggestion_summaries(lines)
 
     write_success = sum(
@@ -677,6 +692,35 @@ def run_summary(
         or "failed save operation" in line.lower()
         or "save verification failed" in line.lower()
     )
+    deferred_write_count = sum(1 for line in lines if "deferred pending write candidate" in line.lower())
+    not_found_after_reread_count = sum(
+        1
+        for line in lines
+        if "not_found_after_reread" in line.lower()
+        or "not found after re-read" in line.lower()
+        or "pending write candidate(s) not found" in line.lower()
+    )
+    dropdown_failures = []
+    for line in lines:
+        lower = line.lower()
+        if "could not select physicochemical property" not in lower:
+            continue
+        dropdown_failures.append(
+            {
+                "line": repair_display_text(line),
+                "sequence": extract_after(line, "sequence:"),
+                "category": extract_between(line, "property", "for sequence:"),
+            }
+        )
+    llm_seconds = 0.0
+    llm_batches = 0
+    for line in lines:
+        lower = line.lower()
+        if "llm extraction completed" in lower and "s" in lower:
+            llm_batches += 1
+            seconds = extract_number_before(line, "s")
+            if seconds is not None:
+                llm_seconds += seconds
     page_count = len(
         {
             marker
@@ -715,11 +759,15 @@ def run_summary(
         "outcome": outcome,
         "target_list_numbers": target_lists,
         "todo_count": int(todo.get("rows") or 0),
-        "suggestion_count": int(approval.get("rows") or 0),
-        "manual_review_count": int(review.get("pending") or 0),
+        "suggestion_count": int(suggestion_metrics.get("suggestion_total") or 0),
+        "manual_review_count": int(suggestion_metrics.get("manual_review_candidate_count") or 0),
         "processed_pages": page_count,
         "write_success_count": write_success,
         "write_failure_count": write_failed,
+        "deferred_write_count": deferred_write_count,
+        "not_found_after_reread_count": not_found_after_reread_count,
+        "dropdown_failure_count": len(dropdown_failures),
+        "dropdown_failures": dropdown_failures[:12],
         "page_suggestion_count": int(suggestion_metrics.get("suggestion_total") or 0),
         "writable_candidate_count": int(suggestion_metrics.get("writable_candidate_count") or 0),
         "manual_review_candidate_count": int(suggestion_metrics.get("manual_review_candidate_count") or 0),
@@ -727,6 +775,8 @@ def run_summary(
         "search_failure_count": int(suggestion_metrics.get("search_failure_count") or 0),
         "memory_hit_count": int(suggestion_metrics.get("memory_hit_count") or 0),
         "llm_knowledge_fallback_count": int(suggestion_metrics.get("llm_knowledge_fallback_count") or 0),
+        "llm_batch_count": llm_batches,
+        "llm_seconds": round(llm_seconds, 1),
         "skipped_candidate_count": int(suggestion_metrics.get("skipped_candidate_count") or 0),
         "skip_reasons": suggestion_metrics.get("skip_reasons") or {},
         "has_traceback": "traceback" in lower_text,
@@ -739,6 +789,24 @@ def extract_after(line: str, marker: str) -> str:
         return ""
     tail = line.split(marker, 1)[1].strip()
     return tail.split()[0].strip(" .,:;")
+
+
+def extract_between(line: str, start_marker: str, end_marker: str) -> str:
+    if start_marker not in line or end_marker not in line:
+        return ""
+    value = line.split(start_marker, 1)[1].split(end_marker, 1)[0].strip()
+    return repair_display_text(value)
+
+
+def extract_number_before(line: str, marker: str) -> float | None:
+    if marker not in line:
+        return None
+    before = line.split(marker, 1)[0].strip()
+    token = before.split()[-1] if before.split() else ""
+    try:
+        return float(token)
+    except ValueError:
+        return None
 
 
 @contextlib.contextmanager
@@ -964,11 +1032,20 @@ def artifact_summary(root_dir: Path = ROOT_DIR) -> list[dict[str, Any]]:
     if not log_dir.exists():
         return []
     wanted_suffixes = {".xlsx", ".png", ".html", ".txt"}
+    excluded_names = {"web_run_stdout.txt"}
+    excluded_suffixes = {".sqlite", ".db"}
     artifacts = []
     for path in sorted(log_dir.iterdir(), key=lambda item: item.stat().st_mtime, reverse=True):
+        lowered_name = path.name.lower()
+        if path.is_dir() or lowered_name in excluded_names or "backup" in lowered_name:
+            continue
+        if path.suffix.lower() in excluded_suffixes:
+            continue
         if path.suffix.lower() not in wanted_suffixes:
             continue
         stat = path.stat()
+        if stat.st_size > 20 * 1024 * 1024:
+            continue
         artifacts.append(
             {
                 "name": path.name,
@@ -978,6 +1055,27 @@ def artifact_summary(root_dir: Path = ROOT_DIR) -> list[dict[str, Any]]:
             }
         )
     return artifacts[:24]
+
+
+def file_signature(path: Path) -> tuple[bool, int, int]:
+    try:
+        stat = path.stat()
+    except OSError:
+        return (False, 0, 0)
+    return (True, int(stat.st_size), int(stat.st_mtime_ns))
+
+
+def cached_file_payload(cache_name: str, path: Path, loader: Callable[[], Any]) -> Any:
+    signature = file_signature(path)
+    key = (cache_name, str(path))
+    with _FILE_CACHE_LOCK:
+        cached = _FILE_CACHE.get(key)
+        if cached and cached[0] == signature:
+            return cached[1]
+    payload = loader()
+    with _FILE_CACHE_LOCK:
+        _FILE_CACHE[key] = (signature, payload)
+    return payload
 
 
 def approval_summary(root_dir: Path = ROOT_DIR) -> dict[str, Any]:
@@ -1117,15 +1215,67 @@ def clear_todo_task_cache(root_dir: Path = ROOT_DIR) -> None:
             print(f"Could not clear old todo cache {path}: {error}")
 
 
-def review_queue_summary(root_dir: Path = ROOT_DIR) -> dict[str, Any]:
+def review_queue_summary(
+    root_dir: Path = ROOT_DIR,
+    *,
+    page: int = 1,
+    per_page: int = 20,
+    list_number: str = "",
+    sort_direction: str = "desc",
+) -> dict[str, Any]:
     path = root_dir / "data" / "review_queue.xlsx"
     if not path.exists():
         return {"exists": False, "rows": 0, "pending": 0, "preview": [], "list_numbers": []}
 
     try:
-        frame = pd.read_excel(path, dtype=str).fillna("")
+        payload = cached_file_payload("review_queue", path, lambda: build_review_queue_payload(path))
     except Exception as exc:  # noqa: BLE001
         return {"exists": True, "error": str(exc), "rows": 0, "pending": 0, "preview": [], "list_numbers": []}
+
+    rows = list(payload.get("pending_rows") or [])
+    if list_number:
+        rows = [row for row in rows if str(row.get("list_number") or "") == list_number]
+    reverse = sort_direction != "asc"
+    rows.sort(key=lambda row: DateSortKey.from_text(str(row.get("timestamp") or "")), reverse=reverse)
+    page = max(1, int(page or 1))
+    per_page = max(1, min(100, int(per_page or 20)))
+    total = len(rows)
+    pages = max(1, (total + per_page - 1) // per_page)
+    page = min(page, pages)
+    start = (page - 1) * per_page
+    preview = rows[start : start + per_page]
+
+    return {
+        "exists": True,
+        "rows": int(payload.get("rows") or 0),
+        "pending": int(payload.get("pending") or 0),
+        "filtered": total,
+        "page": page,
+        "per_page": per_page,
+        "pages": pages,
+        "preview": preview,
+        "list_numbers": payload.get("list_numbers") or [],
+        "modified": payload.get("modified") or "",
+    }
+
+
+@dataclass(frozen=True)
+class DateSortKey:
+    value: float
+
+    @classmethod
+    def from_text(cls, value: str) -> "DateSortKey":
+        parsed = pd.to_datetime(value, errors="coerce")
+        if pd.isna(parsed):
+            return cls(0.0)
+        return cls(float(parsed.timestamp()))
+
+    def __lt__(self, other: "DateSortKey") -> bool:
+        return self.value < other.value
+
+
+def build_review_queue_payload(path: Path) -> dict[str, Any]:
+    frame = pd.read_excel(path, dtype=str).fillna("")
 
     def first_existing(row: pd.Series, columns: list[str]) -> str:
         for column in columns:
@@ -1213,7 +1363,7 @@ def review_queue_summary(root_dir: Path = ROOT_DIR) -> dict[str, Any]:
         list_numbers = sorted(value for value in pending_frame["_list_number"].dropna().astype(str).unique() if value)
 
     preview: list[dict[str, str]] = []
-    for _, row in pending_frame.head(120).iterrows():
+    for _, row in pending_frame.iterrows():
         reason = first_existing(row, ["reason", "原因", "复核原因", "manual_review_reason"])
         display_summary = review_display_summary_from_row(row, reason=reason)
         preview.append(
@@ -1259,10 +1409,9 @@ def review_queue_summary(root_dir: Path = ROOT_DIR) -> dict[str, Any]:
         )
 
     return {
-        "exists": True,
         "rows": int(len(frame)),
         "pending": int(len(pending_frame)),
-        "preview": preview,
+        "pending_rows": preview,
         "list_numbers": list_numbers,
         "modified": datetime.fromtimestamp(path.stat().st_mtime).isoformat(timespec="seconds"),
     }

@@ -262,14 +262,17 @@ class ChemicalSearcher:
             return current
 
         current_confidence = self._normalize_confidence(current.get("confidence"))
-        if current_confidence >= 0.8 and not current.get("need_manual_review", True):
-            return current
-
         source = str(search_result.get("source") or "").strip()
         source_confidence = self._normalize_confidence(search_result.get("source_confidence"))
         verified_cas = self._extract_cas(str(search_result.get("cas") or ""))
         if not verified_cas:
             verified_cas = self._extract_cas(str(search_result.get("raw_text") or ""))
+        if (
+            current_confidence >= 0.8
+            and not current.get("need_manual_review", True)
+            and (not verified_cas or bool(self._extract_cas(str(current.get("cas") or ""))))
+        ):
+            return current
         if verified_cas:
             cas_result = normalizer.normalize(
                 raw_name=original_name,

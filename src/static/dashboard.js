@@ -25,6 +25,7 @@
       loading: false,
     };
     const dashboardData = JSON.parse(document.querySelector("#dashboard-data")?.textContent || "{}");
+    const activePage = dashboardData.activePage || document.body?.dataset?.page || "overview";
     let reviewCategories = dashboardData.reviewDecisionOptions || [];
     const llmProviders = dashboardData.llmProviderOptions || [];
     const currentLlm = dashboardData.currentLlm || { provider: "", baseUrl: "", model: "" };
@@ -38,6 +39,11 @@
       lines: [],
       filter: "all",
     };
+    let approvalStateLoaded = activePage === "suggestions" || activePage === "overview";
+    let reviewStateLoaded = activePage === "review" || activePage === "overview";
+    let artifactStateLoaded = activePage === "artifacts";
+    let logStateLoaded = activePage === "logs";
+    let lastFinishedAt = "";
     const $ = (selector) => document.querySelector(selector);
 
     function on(selector, eventName, handler) {
@@ -143,7 +149,7 @@
 
     on("#refreshLogButton", "click", async () => {
       setText("#logCopyState", "刷新中...");
-      await refreshStatus();
+      await refreshLogTail({force: true});
       setText("#logCopyState", "已刷新");
     });
 
@@ -174,7 +180,7 @@
 
     on("#refreshArtifactButton", "click", async () => {
       setText("#artifactRefreshState", "刷新中...");
-      await refreshStatus();
+      await refreshArtifacts({force: true});
       setText("#artifactRefreshState", "已刷新");
     });
 
@@ -185,7 +191,8 @@
         data.set("target_list_numbers", selectedTodoNumbers().join(","));
         const response = await fetch("/api/run", { method: "POST", body: data });
         const payload = await response.json();
-        await refreshStatus({forceReview: true});
+        await refreshStatus();
+        await refreshReviewQueue({force: true});
         if (!payload.started) {
           alert(payload.message || payload.detail || "任务未启动");
         }
@@ -195,7 +202,8 @@
     on("#stopRunButton", "click", async () => {
       const response = await fetch("/api/stop", { method: "POST" });
       const payload = await response.json();
-      await refreshStatus({forceReview: true});
+      await refreshStatus();
+      await refreshReviewQueue({force: true});
       if (!payload.stopped) {
         alert(payload.message || payload.detail || "当前没有运行中的任务");
       }
@@ -462,7 +470,7 @@
       settingsForm.querySelector('[name="dingtalk_stream_client_secret"]').value = "";
       settingsForm.querySelector('[name="dingtalk_stream_api_token"]').value = "";
       settingsForm.querySelector('[name="update_token"]').value = "";
-      await refreshStatus({forceReview: true});
+      await refreshStatus();
     });
 
     function safe(value, fallback = "-") {
@@ -574,7 +582,10 @@
         ? `共 ${safe(queue.rows, 0)} 条历史记录，当前待处理 ${safe(queue.pending, 0)} 条；最近更新：${safe(queue.modified)}`
         : "尚未生成 data/review_queue.xlsx";
       reviewState.rows = rows;
-      reviewState.page = Math.min(reviewState.page || 1, Math.max(1, Math.ceil(rows.length / reviewState.perPage)));
+      reviewState.page = Number(queue.page || reviewState.page || 1);
+      reviewState.pages = Number(queue.pages || 1);
+      reviewState.total = Number(queue.filtered ?? rows.length);
+      reviewState.perPage = Number(queue.per_page || reviewState.perPage || 20);
       updateReviewListFilter(queue.list_numbers || rows.map((row) => row.list_number).filter(Boolean));
       renderReviewRows();
     }
@@ -693,20 +704,11 @@
       const body = document.querySelector("#reviewTable");
       const visibleCount = document.querySelector("#reviewVisibleCount");
       if (!body || !visibleCount) return;
-      const rows = reviewState.rows
-        .filter((row) => !reviewState.listNumber || row.list_number === reviewState.listNumber)
-        .sort((left, right) => {
-          const leftTime = Date.parse(left.timestamp || "") || 0;
-          const rightTime = Date.parse(right.timestamp || "") || 0;
-          return reviewState.sortDirection === "desc" ? rightTime - leftTime : leftTime - rightTime;
-        });
+      const rows = reviewState.rows || [];
       document.querySelector("#reviewSortIcon").textContent = reviewState.sortDirection === "desc" ? "↓" : "↑";
-      reviewState.total = rows.length;
-      reviewState.pages = Math.max(1, Math.ceil(rows.length / reviewState.perPage));
       reviewState.page = Math.min(Math.max(1, reviewState.page || 1), reviewState.pages);
-      const start = (reviewState.page - 1) * reviewState.perPage;
-      const pageRows = rows.slice(start, start + reviewState.perPage);
-      visibleCount.textContent = `显示 ${pageRows.length} / ${rows.length} 条`;
+      const pageRows = rows;
+      visibleCount.textContent = `显示 ${pageRows.length} / ${reviewState.total} 条`;
       body.innerHTML = "";
       if (!rows.length) {
         body.innerHTML = tableEmptyHtml(6, "暂无人工复核项", "需要人工确认的审批记录会显示在这里。");
@@ -795,7 +797,7 @@
           }
           rowMessage.textContent = payload.message || "已确认入库。";
           rowMessage.className = "review-row-message ok";
-          await refreshStatus({forceReview: true});
+          await Promise.all([refreshStatus(), refreshReviewQueue({force: true})]);
         });
         deleteButton.addEventListener("click", async () => {
           if (!confirm(`确认删除人工复核项：${row.reagent_name || row.cas || row.review_key}？`)) return;
@@ -823,7 +825,7 @@
           }
           rowMessage.textContent = payload.message || "已删除";
           rowMessage.className = "review-row-message ok";
-          await refreshStatus({forceReview: true});
+          await Promise.all([refreshStatus(), refreshReviewQueue({force: true})]);
         });
         body.appendChild(tr);
       });
@@ -861,25 +863,25 @@
     on("#reviewListFilter", "change", (event) => {
       reviewState.listNumber = event.target.value;
       reviewState.page = 1;
-      renderReviewRows();
+      refreshReviewQueue({force: true});
     });
 
     on("#reviewTimeSort", "click", () => {
       reviewState.sortDirection = reviewState.sortDirection === "desc" ? "asc" : "desc";
       reviewState.page = 1;
-      renderReviewRows();
+      refreshReviewQueue({force: true});
     });
 
     on("#reviewPrevPage", "click", () => {
       if (reviewState.page <= 1) return;
       reviewState.page -= 1;
-      renderReviewRows();
+      refreshReviewQueue({force: true});
     });
 
     on("#reviewNextPage", "click", () => {
       if (reviewState.page >= reviewState.pages) return;
       reviewState.page += 1;
-      renderReviewRows();
+      refreshReviewQueue({force: true});
     });
 
     let memorySearchTimer = null;
@@ -1330,7 +1332,7 @@
 
     function renderLogBox() {
       const lines = logState.lines.filter(logLineMatchesFilter);
-      const emptyText = logState.lines.length ? "当前过滤条件下暂无日志。" : "等待任务输出...";
+      const emptyText = logState.lines.length ? "当前过滤条件下暂无日志。" : "暂无可显示日志。运行任务后会显示最近一次输出。";
       setText("#logBox", lines.join("\n") || emptyText);
     }
 
@@ -1403,16 +1405,65 @@
       });
     }
 
+    async function refreshApprovalSummary(options = {}) {
+      if (approvalStateLoaded && !options.force) return;
+      if (!document.querySelector("#suggestionTable") && !document.querySelector("#suggestionRows")) return;
+      const response = await fetch("/api/approval_summary");
+      const approval = await response.json();
+      approvalStateLoaded = true;
+      setText("#suggestionRows", safe(approval.rows, "0"));
+      setText("#suggestionMeta", approval.exists ? `最近更新：${safe(approval.modified)}` : "尚未生成 approval_suggestions.xlsx");
+      renderTags(approval.categories || {});
+      renderSuggestions(approval.preview || []);
+    }
+
+    async function refreshReviewQueue(options = {}) {
+      if (reviewStateLoaded && !options.force) return;
+      if (!document.querySelector("#reviewTable") && !document.querySelector("#manualReview")) return;
+      const params = new URLSearchParams({
+        page: String(reviewState.page || 1),
+        per_page: String(reviewState.perPage || 20),
+        list_number: reviewState.listNumber || "",
+        sort: reviewState.sortDirection || "desc",
+      });
+      const response = await fetch(`/api/review_queue?${params.toString()}`);
+      const reviewQueue = await response.json();
+      reviewStateLoaded = true;
+      setText("#manualReview", safe(reviewQueue.pending, "0"));
+      if (options.force || !reviewInteractionActive()) {
+        renderReviewQueue(reviewQueue);
+      }
+    }
+
+    async function refreshArtifacts(options = {}) {
+      if (artifactStateLoaded && !options.force) return;
+      if (!document.querySelector("#artifactList")) return;
+      const response = await fetch("/api/artifacts");
+      const payload = await response.json();
+      artifactStateLoaded = true;
+      renderArtifacts(payload.artifacts || []);
+    }
+
+    async function refreshLogTail(options = {}) {
+      if (logStateLoaded && !options.force) return;
+      if (!document.querySelector("#logBox")) return;
+      const response = await fetch("/api/log_tail");
+      const payload = await response.json();
+      logStateLoaded = true;
+      logState.lines = payload.log_tail || [];
+      renderLogBox();
+    }
+
     async function refreshStatus(options = {}) {
       const response = await fetch("/api/status");
       const data = await response.json();
       const status = data.status || {};
       const runSummary = status.summary || {};
       const runtime = data.runtime || {};
-      const approval = data.approval || {};
-      const reviewQueue = data.review_queue || {};
       const todoTasks = data.todo_tasks || {};
       const scheduler = data.scheduler || {};
+      const runJustFinished = !status.running && status.finished_at && status.finished_at !== lastFinishedAt;
+      if (status.finished_at) lastFinishedAt = status.finished_at;
       if (runtime.review_decision_options && runtime.review_decision_options.length) {
         reviewCategories = runtime.review_decision_options;
       }
@@ -1440,6 +1491,8 @@
       setText("#runSearchFailures", safe(runSummary.search_failure_count, "-"));
       setText("#runWriteSuccess", safe(runSummary.write_success_count, "-"));
       setText("#runWriteFailure", safe(runSummary.write_failure_count, "-"));
+      setText("#runDeferredWrites", safe(runSummary.deferred_write_count, "-"));
+      setText("#runNotFoundAfterReread", safe(runSummary.not_found_after_reread_count, "-"));
       setText("#runLogPath", safe(status.run_log_path, "-"));
       updateDryRunUi(runtime.app_dry_run);
       setText("#autoPassText", safe(runtime.auto_pass));
@@ -1450,26 +1503,31 @@
       setText("#llmModel", safe(runtime.llm_model));
       const llmModel = document.querySelector("#llmModel");
       if (llmModel) llmModel.title = safe(runtime.llm_model);
-      setText("#suggestionRows", safe(approval.rows, "0"));
-      setText("#manualReview", safe(reviewQueue.pending, "0"));
+      if (status.running) {
+        setText("#suggestionRows", safe(runSummary.suggestion_count, "0"));
+        setText("#manualReview", safe(runSummary.manual_review_count, "0"));
+      }
       setText("#safetyGate", runtime.auto_pass === "true" ? "启用校验" : "默认关闭");
-      setText("#suggestionMeta", approval.exists ? `最近更新：${safe(approval.modified)}` : "尚未生成 approval_suggestions.xlsx");
       setText("#schedulerNextRun", safe(scheduler.next_run_at));
       setText("#schedulerLastRun", safe(scheduler.last_run_at));
       setText("#schedulerLastResult", safe(scheduler.last_result));
       setText("#currentVersionText", safe(runtime.app_version));
       setText("#appModeText", runtime.app_frozen ? "安装版" : "源码模式");
 
-      renderTags(approval.categories || {});
-      renderSuggestions(approval.preview || []);
-      if (options.forceReview || !reviewInteractionActive()) {
-        renderReviewQueue(reviewQueue);
-      }
       renderTodoTasks(todoTasks);
       renderWorkflow(status.workflow || {});
-      renderArtifacts(data.artifacts || []);
-      logState.lines = status.log_tail || [];
-      renderLogBox();
+      if (activePage === "overview" || activePage === "suggestions" || options.forceApproval) {
+        await refreshApprovalSummary({force: options.forceApproval || runJustFinished});
+      }
+      if (activePage === "overview" || activePage === "review" || options.forceReview) {
+        await refreshReviewQueue({force: options.forceReview || runJustFinished});
+      }
+      if (activePage === "artifacts") {
+        await refreshArtifacts({force: runJustFinished});
+      }
+      if (activePage === "logs") {
+        await refreshLogTail({force: status.running || runJustFinished});
+      }
     }
 
     function setUpdateState(state, label) {

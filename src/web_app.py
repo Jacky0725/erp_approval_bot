@@ -33,6 +33,7 @@ from web_runner import (
     manager,
     memory_summary,
     normalize_web_write_mode,
+    current_run_lines,
     review_queue_summary,
     runtime_config_snapshot,
     save_runtime_config,
@@ -134,16 +135,20 @@ def static_asset_version() -> str:
 def dashboard_context(request: Request, active_page: str) -> dict:
     page = PAGE_DEFS.get(active_page, PAGE_DEFS["overview"])
     runtime = runtime_config_snapshot()
+    status = manager.status()
+    approval = approval_summary() if active_page in {"overview", "suggestions"} else {"exists": False, "rows": 0, "categories": {}, "manual_review": 0, "preview": []}
+    review_queue = review_queue_summary() if active_page in {"overview", "review"} else {"exists": False, "rows": 0, "pending": 0, "preview": [], "list_numbers": []}
+    artifacts = artifact_summary() if active_page == "artifacts" else []
     return {
         "request": request,
         "active_page": active_page,
         "page": page,
         "pages": PAGE_DEFS,
         "runtime": runtime,
-        "status": manager.status(),
-        "approval": approval_summary(),
-        "artifacts": artifact_summary(),
-        "review_queue": review_queue_summary(),
+        "status": status,
+        "approval": approval,
+        "artifacts": artifacts,
+        "review_queue": review_queue,
         "todo_tasks": todo_tasks_summary(),
         "scheduler": scheduler.status(),
         "dingtalk_stream": dingtalk_stream_bot.status(),
@@ -222,14 +227,46 @@ def api_status() -> JSONResponse:
         {
             "runtime": runtime_config_snapshot(),
             "status": manager.status(),
-            "approval": approval_summary(),
-            "artifacts": artifact_summary(),
-            "review_queue": review_queue_summary(),
             "todo_tasks": todo_tasks_summary(),
             "scheduler": scheduler.status(),
             "dingtalk_stream": dingtalk_stream_bot.status(),
         }
     )
+
+
+@app.get("/api/approval_summary")
+def api_approval_summary() -> JSONResponse:
+    return JSONResponse(approval_summary())
+
+
+@app.get("/api/review_queue")
+def api_review_queue(
+    page: int = 1,
+    per_page: int = 20,
+    list_number: str = "",
+    sort: str = "desc",
+) -> JSONResponse:
+    return JSONResponse(
+        review_queue_summary(
+            page=page,
+            per_page=per_page,
+            list_number=list_number,
+            sort_direction=sort,
+        )
+    )
+
+
+@app.get("/api/artifacts")
+def api_artifacts() -> JSONResponse:
+    return JSONResponse({"artifacts": artifact_summary()})
+
+
+@app.get("/api/log_tail")
+def api_log_tail() -> JSONResponse:
+    status = manager.status()
+    fallback = status.get("log_tail") or []
+    lines = current_run_lines(status.get("run_log_path"), fallback=fallback)
+    return JSONResponse({"log_tail": lines[-160:]})
 
 
 @app.get("/CLodopfuncs.js")

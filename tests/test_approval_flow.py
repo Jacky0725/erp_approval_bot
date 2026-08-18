@@ -1526,7 +1526,7 @@ class ApprovalFlowTodoLoopTest(unittest.TestCase):
                 )
             )
 
-    def test_write_failure_for_reusable_suggestion_skips_manual_review_queue(self) -> None:
+    def test_write_failure_for_reusable_suggestion_queues_review_without_memory(self) -> None:
         class WriteFailureBot(Bot):
             def __init__(self, root_dir: Path) -> None:
                 self.root_dir = root_dir
@@ -1560,11 +1560,9 @@ class ApprovalFlowTodoLoopTest(unittest.TestCase):
             memory = ReagentMemory.from_settings(bot.settings, root)
             match = memory.lookup(cas="123-45-6")
 
-        self.assertEqual(bot.review_items, [])
-        self.assertIsNotNone(match)
-        assert match is not None
-        self.assertEqual(match["final_category"], "\u666e\u901a\u7c7b")
-        self.assertEqual(match["reusable"], 1)
+        self.assertEqual(len(bot.review_items), 1)
+        self.assertIsNone(match)
+        self.assertIn("网页写入失败", bot.review_items[0][1])
 
     def test_write_failure_for_manual_review_suggestion_still_queues_review(self) -> None:
         class WriteFailureBot(Bot):
@@ -1600,7 +1598,7 @@ class ApprovalFlowTodoLoopTest(unittest.TestCase):
         self.assertEqual(len(bot.review_items), 1)
         self.assertIn("\u7f51\u9875\u5199\u5165\u5931\u8d25", bot.review_items[0][1])
 
-    def test_multi_page_mode_stops_when_sorted_current_page_has_no_unmatched_rows(self) -> None:
+    def test_multi_page_mode_scans_next_page_when_sorted_current_page_has_no_unmatched_rows(self) -> None:
         class MultiPageBot(Bot):
             def __init__(self) -> None:
                 self.page_number = 1
@@ -1608,6 +1606,7 @@ class ApprovalFlowTodoLoopTest(unittest.TestCase):
                 self.partial_lengths: list[int] = []
                 self.next_clicks = 0
                 self.stage_logger = StageLogger()
+                self.settings = {}
 
             def goto_first_reagent_page(self, page: object) -> bool:
                 self.page_number = 1
@@ -1650,7 +1649,79 @@ class ApprovalFlowTodoLoopTest(unittest.TestCase):
         self.assertEqual([row["\u5e8f\u53f7"] for row in result], ["1", "2"])
         self.assertEqual(len(bot.applied_pages), 2)
         self.assertEqual(bot.partial_lengths, [1, 2])
-        self.assertEqual(bot.next_clicks, 2)
+        self.assertEqual(bot.next_clicks, 3)
+
+    def test_multi_page_mode_records_deferred_candidates_not_found_at_terminal_page(self) -> None:
+        class DeferredBot(Bot):
+            def __init__(self) -> None:
+                self.settings = {"approval": {"write_mode": "multi_page", "write_max_attempts": 2}}
+                self.stage_logger = StageLogger()
+                self.read_calls = 0
+                self.failures: list[tuple[str, str]] = []
+
+            def goto_first_reagent_page(self, page: object) -> bool:
+                return True
+
+            def sort_property_column_until_unmatched_visible(self, page: object) -> bool:
+                return True
+
+            def current_reagent_page_number(self, page: object) -> str:
+                return "1"
+
+            def current_page_unmatched_reagents(self, page: object) -> list[dict[str, str]]:
+                self.read_calls += 1
+                if self.read_calls == 1:
+                    return [
+                        {
+                            "\u5e8f\u53f7": str(index),
+                            "\u8bd5\u5242\u540d\u79f0": f"reagent-{index}",
+                            "CAS\u53f7": "-",
+                            "\u7269\u5316\u7279\u6027": "-",
+                        }
+                        for index in range(1, 21)
+                    ]
+                return []
+
+            def process_current_unmatched_reagent_page(self, *args: object, **kwargs: object) -> list[dict[str, object]]:
+                return [
+                    {
+                        "\u5e8f\u53f7": str(index),
+                        "\u8bd5\u5242\u540d\u79f0": f"reagent-{index}",
+                        "CAS\u53f7": "-",
+                        "\u6700\u7ec8\u5efa\u8bae\u7c7b\u522b": "\u666e\u901a\u7c7b",
+                        "\u7f6e\u4fe1\u5ea6": 1.0,
+                        "\u9700\u4eba\u5de5\u590d\u6838": False,
+                    }
+                    for index in range(1, 21)
+                ]
+
+            def high_confidence_write_candidates(
+                self, suggestions: list[dict[str, object]]
+            ) -> list[dict[str, object]]:
+                return suggestions
+
+            def apply_approval_write_mode(self, page: object, suggestions: list[dict[str, object]]) -> dict[str, set[str]]:
+                attempted = {self.suggestion_work_key(suggestion) for suggestion in suggestions[:5]}
+                deferred = {self.suggestion_work_key(suggestion) for suggestion in suggestions[5:]}
+                return {"attempted": attempted, "handled": attempted, "failed": set(), "deferred": deferred}
+
+            def write_partial_approval_suggestions(self, suggestions: list[dict[str, object]]) -> None:
+                return None
+
+            def click_next_reagent_page(self, page: object) -> tuple[bool, bool]:
+                return False, True
+
+            def record_web_write_failure(self, suggestion: dict[str, object], category: str, reason: str) -> None:
+                self.failures.append((str(suggestion.get("\u5e8f\u53f7") or ""), reason))
+
+        bot = DeferredBot()
+
+        result = bot.process_unmatched_reagent_pages(object(), None, None, {})
+
+        self.assertEqual(len(result), 20)
+        self.assertEqual(len(bot.failures), 15)
+        self.assertEqual(bot.failures[0], ("6", "not_found_after_reread"))
+        self.assertEqual(bot.failures[-1], ("20", "not_found_after_reread"))
 
     def test_multi_page_mode_advances_after_current_page_write_attempt(self) -> None:
         class RetryBot(Bot):
