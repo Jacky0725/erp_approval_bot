@@ -272,6 +272,104 @@ class WebReviewConfirmationTest(unittest.TestCase):
         self.assertEqual(row["display_suggestion"], "强反应性")
         self.assertEqual(row["allow_suggestion_preselect"], "True")
 
+    def test_review_queue_summary_shows_llm_rule_fallback_without_auto_preselect_when_low_confidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            data_dir = root / "data"
+            data_dir.mkdir(parents=True)
+            queue_path = data_dir / "review_queue.xlsx"
+            pd.DataFrame(
+                [
+                    {
+                        "timestamp": "2026-08-19T06:54:45",
+                        "list_number": "SJ1",
+                        "chemical_name": "未知硼酸类",
+                        "standard_name": "未知硼酸类",
+                        "status": "pending",
+                        "suggested_category": "强反应性",
+                        "classification_confidence": "0.65",
+                        "evidence_source_type": "llm_rule_fallback",
+                        "used_llm_rule_fallback": "True",
+                        "llm_rule_confidence": "0.65",
+                        "llm_rule_reason": "名称含硼酸结构，但没有可信网页证据。",
+                        "llm_rule_matched_rule": "硼酸类候选强反应性",
+                        "llm_rule_must_manual_review": "False",
+                    }
+                ]
+            ).to_excel(queue_path, index=False)
+
+            summary = review_queue_summary(root)
+
+        row = summary["preview"][0]
+        self.assertEqual(row["suggested_category"], "强反应")
+        self.assertEqual(row["display_suggestion"], "LLM按规则辅助建议：强反应性")
+        self.assertEqual(row["evidence_status"], "LLM规则辅助，置信度 0.65，需人工确认")
+        self.assertEqual(row["allow_suggestion_preselect"], "False")
+        self.assertIn("匹配规则：硼酸类候选强反应性", row["detail_summary"])
+
+    def test_review_queue_summary_keeps_unmapped_llm_rule_candidate_visible(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            data_dir = root / "data"
+            data_dir.mkdir(parents=True)
+            queue_path = data_dir / "review_queue.xlsx"
+            pd.DataFrame(
+                [
+                    {
+                        "timestamp": "2026-08-19T06:54:45",
+                        "list_number": "SJ1",
+                        "chemical_name": "未映射试剂",
+                        "standard_name": "未映射试剂",
+                        "status": "pending",
+                        "suggested_category": "未配置类别",
+                        "classification_confidence": "0.9",
+                        "evidence_source_type": "llm_rule_fallback",
+                        "used_llm_rule_fallback": "True",
+                        "llm_rule_confidence": "0.9",
+                        "llm_rule_reason": "模型返回了未配置类别。",
+                        "llm_rule_must_manual_review": "False",
+                    }
+                ]
+            ).to_excel(queue_path, index=False)
+
+            summary = review_queue_summary(root)
+
+        row = summary["preview"][0]
+        self.assertEqual(row["suggested_category"], "未配置类别")
+        self.assertEqual(row["allow_suggestion_preselect"], "True")
+        self.assertEqual(row["display_suggestion"], "LLM按规则辅助建议：未配置类别")
+
+    def test_review_queue_summary_does_not_preselect_high_risk_llm_rule_candidate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            data_dir = root / "data"
+            data_dir.mkdir(parents=True)
+            queue_path = data_dir / "review_queue.xlsx"
+            pd.DataFrame(
+                [
+                    {
+                        "timestamp": "2026-08-19T06:54:45",
+                        "list_number": "SJ1",
+                        "chemical_name": "高风险试剂",
+                        "standard_name": "高风险试剂",
+                        "status": "pending",
+                        "suggested_category": "高毒类",
+                        "classification_confidence": "0.9",
+                        "evidence_source_type": "llm_rule_fallback",
+                        "used_llm_rule_fallback": "True",
+                        "llm_rule_confidence": "0.9",
+                        "llm_rule_reason": "模型按规则提示高风险，但缺少可信网页证据。",
+                        "llm_rule_must_manual_review": "False",
+                    }
+                ]
+            ).to_excel(queue_path, index=False)
+
+            summary = review_queue_summary(root)
+
+        row = summary["preview"][0]
+        self.assertEqual(row["display_suggestion"], "LLM按规则辅助建议：高毒类")
+        self.assertEqual(row["allow_suggestion_preselect"], "False")
+
     def test_review_queue_summary_shows_applied_cas_correction(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

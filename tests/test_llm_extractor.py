@@ -12,6 +12,101 @@ from llm_extractor import LlmExtractor  # noqa: E402
 
 
 class LlmExtractorFallbackTest(unittest.TestCase):
+    def test_classify_by_rules_fallback_skips_without_api_key(self) -> None:
+        class OfflineExtractor(LlmExtractor):
+            def _has_api_key(self) -> bool:
+                return False
+
+        result = OfflineExtractor().classify_by_rules_fallback({"raw_name": "unknown"})
+
+        self.assertFalse(result["used_llm"])
+        self.assertEqual(result["candidate_category"], "")
+        self.assertTrue(result["must_manual_review"])
+
+    def test_classify_by_rules_fallback_parses_structured_json(self) -> None:
+        class FakeMessage:
+            content = (
+                '{"candidate_category":"强反应性","confidence":0.92,'
+                '"reason":"名称提示可能按强反应性规则处理。",'
+                '"matched_rule_summary":"硼酸类需按强反应性复核",'
+                '"evidence_type":"name_based","must_manual_review":false}'
+            )
+
+        class FakeChoice:
+            message = FakeMessage()
+
+        class FakeResponse:
+            choices = [FakeChoice()]
+
+        class FakeCompletions:
+            def create(self, **kwargs: object) -> FakeResponse:
+                self.kwargs = kwargs
+                return FakeResponse()
+
+        class FakeChat:
+            def __init__(self) -> None:
+                self.completions = FakeCompletions()
+
+        class FakeClient:
+            def __init__(self) -> None:
+                self.chat = FakeChat()
+
+        class OnlineExtractor(LlmExtractor):
+            def _has_api_key(self) -> bool:
+                return True
+
+            def _client(self) -> FakeClient:
+                return FakeClient()
+
+        result = OnlineExtractor().classify_by_rules_fallback(
+            {
+                "raw_name": "4-乙氧基-2-甲基苯基硼酸",
+                "rule_summary": [{"category": "强反应性", "rule_keywords": "硼酸", "example_names": ""}],
+            }
+        )
+
+        self.assertTrue(result["used_llm"])
+        self.assertEqual(result["candidate_category"], "强反应性")
+        self.assertEqual(result["confidence"], 0.92)
+        self.assertEqual(result["evidence_type"], "name_based")
+        self.assertFalse(result["must_manual_review"])
+
+    def test_classify_by_rules_fallback_caps_insufficient_confidence(self) -> None:
+        class FakeMessage:
+            content = (
+                '{"candidate_category":"普通类","confidence":0.95,'
+                '"reason":"无法识别。","matched_rule_summary":"",'
+                '"evidence_type":"insufficient","must_manual_review":true}'
+            )
+
+        class FakeChoice:
+            message = FakeMessage()
+
+        class FakeResponse:
+            choices = [FakeChoice()]
+
+        class FakeCompletions:
+            def create(self, **kwargs: object) -> FakeResponse:
+                return FakeResponse()
+
+        class FakeChat:
+            completions = FakeCompletions()
+
+        class FakeClient:
+            chat = FakeChat()
+
+        class OnlineExtractor(LlmExtractor):
+            def _has_api_key(self) -> bool:
+                return True
+
+            def _client(self) -> FakeClient:
+                return FakeClient()
+
+        result = OnlineExtractor().classify_by_rules_fallback({"raw_name": "unknown"})
+
+        self.assertLess(result["confidence"], 0.7)
+        self.assertTrue(result["must_manual_review"])
+
     def test_common_mineral_acids_fallback_to_regular_acid(self) -> None:
         extractor = LlmExtractor()
         for name, raw_text in (

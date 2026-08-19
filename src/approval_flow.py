@@ -1217,6 +1217,42 @@ class ApprovalFlowMixin:
         print(f"[parallel llm] START {item['progress']} {reagent_name}")
         extractor = LlmExtractor(settings=self.settings)
         if self._search_result_needs_llm_knowledge_fallback(search_result):
+            rule_fallback: dict[str, Any] = {}
+            if hasattr(extractor, "classify_by_rules_fallback"):
+                rule_fallback = extractor.classify_by_rules_fallback(
+                    {
+                        "raw_name": reagent_name,
+                        "name": reagent_name,
+                        "cas": search_result.get("cas") or str(item.get("search_cas") or reagent.get("CAS\u53f7", "")),
+                        "standard_name": (search_result.get("name_normalization") or {}).get("standard_name", ""),
+                        "cleaned_name": (search_result.get("name_normalization") or {}).get("cleaned_name", ""),
+                        "failed_queries": [search_result.get("query", "")],
+                        "no_web_evidence_reason": search_result.get("failure_reason") or search_result.get("raw_text") or "",
+                        "web_evidence_quality": search_result.get("evidence_quality", ""),
+                        "rule_summary": self._rule_summary_for_llm(rule_engine),
+                    }
+                )
+                if rule_fallback.get("used_llm"):
+                    search_result = dict(search_result)
+                    search_result["evidence_quality"] = "llm_rule_low"
+                    search_result["used_llm_rule_fallback"] = True
+                    search_result["llm_rule_confidence"] = min(
+                        self._float_confidence(rule_fallback.get("confidence")),
+                        1.0,
+                    )
+                    search_result["llm_rule_candidate_category"] = str(
+                        rule_fallback.get("candidate_category") or ""
+                    ).strip()
+                    search_result["llm_rule_reason"] = str(rule_fallback.get("reason") or "").strip()
+                    search_result["llm_rule_matched_rule"] = str(
+                        rule_fallback.get("matched_rule_summary") or ""
+                    ).strip()
+                    search_result["llm_rule_evidence_type"] = str(rule_fallback.get("evidence_type") or "").strip()
+                    search_result["llm_rule_must_manual_review"] = bool(
+                        rule_fallback.get("must_manual_review")
+                    )
+                    search_result["need_manual_review"] = True
+                    item["search_result"] = search_result
             fallback = extractor.generate_knowledge_fallback(
                 {
                     "raw_name": reagent_name,
@@ -1254,10 +1290,40 @@ class ApprovalFlowMixin:
         if search_result.get("used_llm_knowledge_fallback"):
             extracted["used_llm_knowledge_fallback"] = True
             extracted["llm_confidence"] = search_result.get("llm_confidence", "")
+        if search_result.get("used_llm_rule_fallback"):
+            rule_category = str(search_result.get("llm_rule_candidate_category") or "").strip()
+            if rule_category:
+                categories = list(extracted.get("suggested_categories") or [])
+                if rule_category not in categories:
+                    categories.insert(0, rule_category)
+                extracted["suggested_categories"] = categories
+                evidence = list(extracted.get("evidence") or [])
+                rule_reason = str(search_result.get("llm_rule_reason") or "").strip()
+                matched_rule = str(search_result.get("llm_rule_matched_rule") or "").strip()
+                if rule_reason:
+                    evidence.append(f"LLM按规则辅助判断：{rule_reason}")
+                if matched_rule:
+                    evidence.append(f"LLM命中规则摘要：{matched_rule}")
+                extracted["evidence"] = evidence
+            extracted["used_llm_rule_fallback"] = True
+            extracted["llm_rule_confidence"] = search_result.get("llm_rule_confidence", "")
+            extracted["llm_rule_reason"] = search_result.get("llm_rule_reason", "")
+            extracted["llm_rule_matched_rule"] = search_result.get("llm_rule_matched_rule", "")
+            extracted["llm_rule_must_manual_review"] = search_result.get("llm_rule_must_manual_review", True)
         classification = rule_engine.classify(self._classification_input(reagent, search_result, extracted))
-        if search_result.get("used_llm_knowledge_fallback"):
+        if search_result.get("used_llm_knowledge_fallback") or search_result.get("used_llm_rule_fallback"):
             classification = dict(classification)
             classification["need_manual_review"] = True
+            if search_result.get("used_llm_rule_fallback"):
+                rule_category = str(search_result.get("llm_rule_candidate_category") or "").strip()
+                if rule_category and not classification.get("final_category"):
+                    classification["final_category"] = rule_category
+                    classification["matched_categories"] = [rule_category]
+                classification["llm_rule_confidence"] = search_result.get("llm_rule_confidence", "")
+                classification["llm_rule_must_manual_review"] = search_result.get(
+                    "llm_rule_must_manual_review",
+                    True,
+                )
             classification["reason"] = (
                 f"{classification.get('reason') or ''} "
                 "LLM fallback evidence is advisory only and requires manual review."
@@ -1278,6 +1344,25 @@ class ApprovalFlowMixin:
             search_result.get("need_manual_review", False)
             and (not search_result.get("raw_text") or evidence_quality in {"", "none", "low"} or source_confidence < 0.7)
         )
+
+    @staticmethod
+    def _rule_summary_for_llm(rule_engine: RuleEngine) -> list[dict[str, str]]:
+        summary: list[dict[str, str]] = []
+        rules_by_category = {rule.category: rule for rule in getattr(rule_engine, "rules", [])}
+        for category in getattr(rule_engine, "priority", []) or []:
+            rule = rules_by_category.get(category)
+            if not rule:
+                continue
+            explanation = "；".join(rule.explanation_keywords[:12]) or rule.explanation[:300]
+            examples = "；".join(rule.example_keywords[:12]) or rule.examples[:300]
+            summary.append(
+                {
+                    "category": category,
+                    "rule_keywords": explanation[:800],
+                    "example_names": examples[:800],
+                }
+            )
+        return summary
 
     def parallel_worker_count(self) -> int:
         approval_settings = self.settings.get("approval", {}) or {}

@@ -231,6 +231,94 @@ reagent_info:
             "used_llm": bool(raw_text),
         }
 
+    def classify_by_rules_fallback(self, reagent_info: dict[str, Any]) -> dict[str, Any]:
+        """Return an advisory category candidate based on configured rules when web evidence is weak."""
+        if not self._has_api_key():
+            return {
+                "candidate_category": "",
+                "confidence": 0.0,
+                "reason": "LLM rule fallback skipped because no API key is configured.",
+                "matched_rule_summary": "",
+                "evidence_type": "insufficient",
+                "must_manual_review": True,
+                "used_llm": False,
+            }
+
+        prompt = f"""
+No trusted website evidence was found for this reagent. Review the configured
+physicochemical classification rules and provide an advisory candidate category
+for manual review.
+
+Return strict JSON only:
+
+{{
+  "candidate_category": string,
+  "confidence": number,
+  "reason": string,
+  "matched_rule_summary": string,
+  "evidence_type": "name_based" | "llm_chemical_knowledge" | "insufficient",
+  "must_manual_review": boolean
+}}
+
+Requirements:
+- Do not claim that this is website evidence.
+- Do not decide ERP approval or write eligibility.
+- If the reagent identity is unclear, set candidate_category to "" and confidence below 0.7.
+- If the category is uncertain or depends on unavailable SDS/property data, set must_manual_review=true.
+- A hydrochloride salt is not hydrochloric acid. Do not infer regular/special acid only from hydrochloride/盐酸盐.
+- Nitrate and sulfate/sulphate salts are not nitric acid or sulfuric acid. Do not infer regular acid only from nitrate/sulfate salts.
+- Keep the reason concise and in Chinese.
+- candidate_category must be one of the configured rule/ERP categories when possible.
+
+reagent_info:
+{json.dumps(reagent_info, ensure_ascii=False)}
+""".strip()
+        try:
+            client = self._client()
+            response = client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "You are an advisory chemical rule reviewer. "
+                            "You use configured rules and conservative chemical knowledge only. "
+                            "You never claim web verification and never make ERP approval decisions."
+                        ),
+                    },
+                    {"role": "user", "content": prompt},
+                ],
+                response_format={"type": "json_object"},
+                temperature=0,
+            )
+            parsed = json.loads(response.choices[0].message.content or "{}")
+        except Exception as error:
+            return {
+                "candidate_category": "",
+                "confidence": 0.0,
+                "reason": f"LLM rule fallback failed: {error}",
+                "matched_rule_summary": "",
+                "evidence_type": "insufficient",
+                "must_manual_review": True,
+                "used_llm": False,
+            }
+
+        evidence_type = str(parsed.get("evidence_type") or "insufficient").strip()
+        if evidence_type not in {"name_based", "llm_chemical_knowledge", "insufficient"}:
+            evidence_type = "insufficient"
+        confidence = self._normalize_confidence(parsed.get("confidence"))
+        if evidence_type == "insufficient":
+            confidence = min(confidence, 0.69)
+        return {
+            "candidate_category": str(parsed.get("candidate_category") or "").strip(),
+            "confidence": confidence,
+            "reason": str(parsed.get("reason") or "").strip(),
+            "matched_rule_summary": str(parsed.get("matched_rule_summary") or "").strip(),
+            "evidence_type": evidence_type,
+            "must_manual_review": self._truthy(parsed.get("must_manual_review")),
+            "used_llm": True,
+        }
+
     def generate_search_candidates(self, reagent_info: dict[str, Any]) -> dict[str, Any]:
         local_candidates = self._local_search_candidates(reagent_info)
         prompt = f"""
@@ -535,6 +623,12 @@ raw_text:
         except (TypeError, ValueError):
             return 0.0
         return max(0.0, min(1.0, confidence))
+
+    @staticmethod
+    def _truthy(value: Any) -> bool:
+        if isinstance(value, bool):
+            return value
+        return str(value or "").strip().lower() in {"1", "true", "yes", "y", "on", "是"}
 
     @staticmethod
     def _extract_cas(text: str) -> str:

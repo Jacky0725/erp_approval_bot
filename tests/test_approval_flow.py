@@ -1217,6 +1217,103 @@ class ApprovalFlowTodoLoopTest(unittest.TestCase):
         self.assertTrue(classification["need_manual_review"])
         self.assertIn("advisory only", classification["reason"])
 
+    def test_low_quality_search_uses_llm_rule_fallback_as_manual_review_advice(self) -> None:
+        class FakeExtractor:
+            def __init__(self, *args: object, **kwargs: object) -> None:
+                pass
+
+            def classify_by_rules_fallback(self, reagent_info: dict[str, object]) -> dict[str, object]:
+                return {
+                    "candidate_category": "强反应性",
+                    "confidence": 0.88,
+                    "reason": "名称含硼酸结构，按强反应性规则辅助判断。",
+                    "matched_rule_summary": "硼酸类候选强反应性",
+                    "evidence_type": "name_based",
+                    "must_manual_review": False,
+                    "used_llm": True,
+                }
+
+            def generate_knowledge_fallback(self, reagent_info: dict[str, object]) -> dict[str, object]:
+                return {
+                    "raw_text": "",
+                    "reason": "",
+                    "confidence": 0.0,
+                    "used_llm": False,
+                }
+
+            def extract_properties(self, raw_text: str, name: str = "", cas: str = "") -> dict[str, object]:
+                return {
+                    "name": name,
+                    "cas": cas,
+                    "flash_point": "",
+                    "boiling_point": "",
+                    "toxicity": "",
+                    "corrosive": None,
+                    "oxidizing": None,
+                    "flammable": None,
+                    "water_reactive": None,
+                    "explosive_risk": None,
+                    "heavy_metal": None,
+                    "suggested_categories": [],
+                    "evidence": [],
+                    "confidence": 0.0,
+                }
+
+        class FakeRuleEngine:
+            rules = []
+            priority = []
+
+            def __init__(self) -> None:
+                self.last_input: dict[str, object] = {}
+
+            def classify(self, reagent_info: dict[str, object]) -> dict[str, object]:
+                self.last_input = reagent_info
+                return {
+                    "final_category": "强反应性",
+                    "matched_categories": ["强反应性"],
+                    "reason": "candidate category matched",
+                    "confidence": 0.8,
+                    "need_manual_review": False,
+                }
+
+        item = {
+            "index": 1,
+            "progress": "1/1",
+            "reagent": {
+                "试剂名称": "4-乙氧基-2-甲基苯基硼酸",
+                "CAS号": "",
+                "规格": "",
+                "规格单位": "",
+            },
+            "search_result": {
+                "name": "4-乙氧基-2-甲基苯基硼酸",
+                "cas": "",
+                "source": "",
+                "raw_text": "",
+                "need_manual_review": True,
+                "source_confidence": 0.0,
+                "evidence_quality": "none",
+                "failure_reason": "no trusted web evidence",
+                "name_normalization": {},
+            },
+            "search_name": "4-乙氧基-2-甲基苯基硼酸",
+            "search_cas": "",
+        }
+
+        bot = Bot()
+        bot.settings = {}
+        engine = FakeRuleEngine()
+        with patch("approval_flow.LlmExtractor", FakeExtractor):
+            extracted, classification = bot.extract_and_classify_worker(item, engine)  # type: ignore[arg-type]
+
+        self.assertTrue(item["search_result"]["used_llm_rule_fallback"])
+        self.assertEqual(item["search_result"]["llm_rule_confidence"], 0.88)
+        self.assertIn("强反应性", extracted["suggested_categories"])
+        self.assertTrue(extracted["used_llm_rule_fallback"])
+        self.assertIn("强反应性", engine.last_input["suggested_categories"])
+        self.assertTrue(classification["need_manual_review"])
+        self.assertEqual(classification["llm_rule_confidence"], 0.88)
+
     def test_reagent_memory_match_skips_chemical_search(self) -> None:
         class MemoryBot(Bot):
             def __init__(self, root_dir: Path) -> None:

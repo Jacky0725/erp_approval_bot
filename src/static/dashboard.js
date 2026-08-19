@@ -653,6 +653,7 @@
 
     function reviewEvidenceLabel(row) {
       const type = row.evidence_source_type || "";
+      if (type === "llm_rule_fallback") return "LLM规则辅助";
       if (type === "llm_fallback") return "LLM辅助";
       if (type === "trusted_web") return "可信网站";
       if (type === "web_fallback") return "网页兜底";
@@ -682,7 +683,7 @@
         ? `<a href="${escapeHtml(row.source_url)}" target="_blank" rel="noreferrer">来源链接</a>`
         : "";
       return `
-        <div class="review-evidence ${row.evidence_source_type === "llm_fallback" ? "llm-evidence" : ""}">
+        <div class="review-evidence ${row.evidence_source_type === "llm_fallback" || row.evidence_source_type === "llm_rule_fallback" ? "llm-evidence" : ""}">
           <div class="review-evidence-head">
             <span>${escapeHtml(evidenceStatus)}</span>
             ${sourceLink}
@@ -713,8 +714,10 @@
         water_reactive: "遇水反应",
         explosive_risk: "爆炸风险",
         evidence: "证据",
+        llm_rule_reason: "LLM规则辅助依据",
+        llm_rule_matched_rule: "LLM匹配规则",
       };
-      text = text.replace(/\b(flash_point|boiling_point|toxicity|corrosive|oxidizing|flammable|water_reactive|explosive_risk|evidence)=/g, (_, key) => `${keyLabels[key] || key}：`);
+      text = text.replace(/\b(flash_point|boiling_point|toxicity|corrosive|oxidizing|flammable|water_reactive|explosive_risk|evidence|llm_rule_reason|llm_rule_matched_rule)=/g, (_, key) => `${keyLabels[key] || key}：`);
       const replacements = [
         ["No specific acute toxicity data provided.", "未提供明确的急性毒性数据。"],
         ["No specific acute toxicity data provided", "未提供明确的急性毒性数据"],

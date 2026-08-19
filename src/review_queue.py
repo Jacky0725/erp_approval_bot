@@ -24,6 +24,12 @@ REVIEW_EVIDENCE_COLUMNS = [
     "water_reactive",
     "explosive_risk",
     "used_llm_knowledge_fallback",
+    "used_llm_rule_fallback",
+    "llm_rule_confidence",
+    "llm_rule_reason",
+    "llm_rule_matched_rule",
+    "llm_rule_evidence_type",
+    "llm_rule_must_manual_review",
     "review_advice",
     "original_erp_cas",
     "corrected_cas",
@@ -51,6 +57,8 @@ BLOCKING_REVIEW_STATUSES = {
     "人工复核",
     "需人工复核",
 }
+
+HIGH_RISK_LLM_RULE_CATEGORIES = {"高毒类", "易爆类", "发烟类", "特殊酸"}
 
 
 class ReviewQueueMixin:
@@ -347,9 +355,12 @@ class ReviewQueueMixin:
         suggested_category = str(classification.get("final_category") or "").strip()
         if not suggested_category:
             suggested_category = ", ".join(str(item) for item in classification.get("matched_categories", []) or [])
+        used_llm_rule = bool(search_result.get("used_llm_rule_fallback") or extracted.get("used_llm_rule_fallback"))
         used_llm = bool(search_result.get("used_llm_knowledge_fallback") or extracted.get("used_llm_knowledge_fallback"))
         source = str(search_result.get("source") or search_result.get("fallback_source") or "").strip()
-        if used_llm:
+        if used_llm_rule:
+            evidence_source_type = "llm_rule_fallback"
+        elif used_llm:
             evidence_source_type = "llm_fallback"
         elif source in {"Chemsrc", "ChemicalBook"}:
             evidence_source_type = "trusted_web"
@@ -379,9 +390,16 @@ class ReviewQueueMixin:
                 property_parts.append(f"{label}={value}")
         if evidence_text:
             property_parts.append(f"evidence={evidence_text[:300]}")
+        if used_llm_rule:
+            if search_result.get("llm_rule_reason"):
+                property_parts.append(f"llm_rule_reason={search_result.get('llm_rule_reason')}")
+            if search_result.get("llm_rule_matched_rule"):
+                property_parts.append(f"llm_rule_matched_rule={search_result.get('llm_rule_matched_rule')}")
 
         advice = "Manual review required; confirm the physicochemical category before writing to ERP."
-        if used_llm:
+        if used_llm_rule:
+            advice = "LLM rule fallback is advisory only; manually confirm the category before writing to ERP."
+        elif used_llm:
             advice = "Website evidence is missing or insufficient; LLM fallback is advisory only and must be manually verified."
         elif evidence_source_type == "trusted_web":
             advice = "Trusted website evidence is available; verify the suggested category and source evidence."
@@ -410,6 +428,15 @@ class ReviewQueueMixin:
             "water_reactive": extracted.get("water_reactive", ""),
             "explosive_risk": extracted.get("explosive_risk", ""),
             "used_llm_knowledge_fallback": used_llm,
+            "used_llm_rule_fallback": used_llm_rule,
+            "llm_rule_confidence": search_result.get("llm_rule_confidence")
+            or extracted.get("llm_rule_confidence", ""),
+            "llm_rule_reason": search_result.get("llm_rule_reason") or extracted.get("llm_rule_reason", ""),
+            "llm_rule_matched_rule": search_result.get("llm_rule_matched_rule")
+            or extracted.get("llm_rule_matched_rule", ""),
+            "llm_rule_evidence_type": search_result.get("llm_rule_evidence_type") or "",
+            "llm_rule_must_manual_review": search_result.get("llm_rule_must_manual_review")
+            or extracted.get("llm_rule_must_manual_review", False),
             "review_advice": advice,
             "original_erp_cas": search_result.get("original_erp_cas") or name_result.get("original_erp_cas") or "",
             "corrected_cas": search_result.get("corrected_cas") or name_result.get("corrected_cas") or "",
@@ -485,6 +512,11 @@ def review_display_summary(
     salt_like = _looks_like_acid_salt(text_for_salt_check)
     trusted_web = source_type == "trusted_web" or source in {"Chemsrc", "ChemicalBook"}
     used_llm = source_type == "llm_fallback" or _truthy(evidence_fields.get("used_llm_knowledge_fallback"))
+    used_llm_rule = source_type == "llm_rule_fallback" or _truthy(evidence_fields.get("used_llm_rule_fallback"))
+    llm_rule_confidence = _float(evidence_fields.get("llm_rule_confidence"), 0.0)
+    llm_rule_must_manual = _truthy(evidence_fields.get("llm_rule_must_manual_review"))
+    llm_rule_reason = str(evidence_fields.get("llm_rule_reason") or "").strip()
+    llm_rule_matched_rule = str(evidence_fields.get("llm_rule_matched_rule") or "").strip()
     cas_correction_applied = _truthy(evidence_fields.get("cas_correction_applied"))
     original_erp_cas = str(evidence_fields.get("original_erp_cas") or "").strip()
     corrected_cas = str(evidence_fields.get("corrected_cas") or "").strip()
@@ -515,6 +547,27 @@ def review_display_summary(
             "evidence_status": f"{evidence_fields.get('cas_correction_source') or source or '可信网站'}，CAS修正已应用",
             "detail_summary": detail_summary,
             "allow_suggestion_preselect": bool(suggested),
+        }
+
+    if used_llm_rule:
+        confidence_text = f"{llm_rule_confidence:.2f}" if llm_rule_confidence else "未知"
+        rule_detail = []
+        if llm_rule_reason:
+            rule_detail.append(f"依据：{llm_rule_reason}")
+        if llm_rule_matched_rule:
+            rule_detail.append(f"匹配规则：{llm_rule_matched_rule}")
+        allow_preselect = bool(
+            suggested
+            and llm_rule_confidence >= 0.7
+            and not llm_rule_must_manual
+            and suggested not in HIGH_RISK_LLM_RULE_CATEGORIES
+        )
+        return {
+            "display_suggestion": f"LLM按规则辅助建议：{suggested or '暂无可靠建议'}",
+            "display_reason": llm_rule_reason or "没有足够可信网页证据，LLM 仅按规则给出辅助判断，需人工确认。",
+            "evidence_status": f"LLM规则辅助，置信度 {confidence_text}，需人工确认",
+            "detail_summary": " | ".join([detail_summary, *rule_detail]).strip(" |"),
+            "allow_suggestion_preselect": allow_preselect,
         }
 
     if salt_like and not trusted_web:
@@ -679,6 +732,8 @@ def localize_review_detail_text(text: Any) -> str:
         "water_reactive": "遇水反应",
         "explosive_risk": "爆炸风险",
         "evidence": "证据",
+        "llm_rule_reason": "LLM规则辅助依据",
+        "llm_rule_matched_rule": "LLM匹配规则",
     }
 
     value_replacements = [
@@ -723,3 +778,10 @@ def localize_review_detail_text(text: Any) -> str:
 
 def _truthy(value: Any) -> bool:
     return str(value or "").strip().lower() in {"1", "true", "yes", "y"}
+
+
+def _float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
