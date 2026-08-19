@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import html
 import copy
+import os
 import re
 import socket
 import threading
@@ -88,6 +89,11 @@ class ChemicalSearcher:
         name = reagent_name.strip()
         normalizer = NameNormalizer(settings=self.settings, root_dir=self.root_dir)
         name_result = normalizer.normalize(raw_name=name, cas=cas, specification=specification, unit=unit)
+        name_only_result = (
+            normalizer.normalize(raw_name=name, cas="", specification=specification, unit=unit)
+            if self._extract_cas(str(cas or ""))
+            else name_result
+        )
 
         input_cas = self._extract_cas(str(cas or ""))
         cas_no = input_cas or self._extract_cas(str(name_result.get("cas") or ""))
@@ -153,6 +159,30 @@ class ChemicalSearcher:
             for provider in (self._search_chemsrc, self._search_chemicalbook):
                 result = self._run_provider(provider, name=query, cas=cas_no, query=query, validation_names=validation_names)
                 if result:
+                    if input_cas and query == cas_no and self._cas_name_conflict(result, name, name_only_result):
+                        correction = self._search_by_name_for_corrected_cas(
+                            original_name=name,
+                            original_cas=input_cas,
+                            specification=specification,
+                            unit=unit,
+                            name_result=name_only_result,
+                            normalizer=normalizer,
+                        )
+                        if correction:
+                            return self._remember_result(cache_key, correction, persistent_key)
+                        conflict_result = self._manual_result(
+                            name=name,
+                            cas=input_cas,
+                            reason=(
+                                "ERP CAS appears to conflict with the reagent name; trusted name-based "
+                                "CAS correction was not found."
+                            ),
+                            name_normalization=name_result,
+                        )
+                        conflict_result["cas_name_conflict"] = True
+                        conflict_result["original_erp_cas"] = input_cas
+                        conflict_result["candidate_cas"] = ""
+                        return self._remember_result(cache_key, conflict_result, persistent_key)
                     name_result = self._verified_name_normalization(
                         original_name=name,
                         specification=specification,
@@ -167,16 +197,17 @@ class ChemicalSearcher:
                     return self._remember_result(cache_key, result, persistent_key)
             failed_queries.append(query)
 
-        fallback_result = self._fallback_web_research(
-            reagent_name=name,
-            cas=cas_no,
-            search_name=search_name,
-            name_result=name_result,
-            failed_queries=failed_queries,
-            validation_names=self._validation_names(search_name, standard_name, cleaned_name, english_name, aliases),
-        )
-        if fallback_result:
-            return self._remember_result(cache_key, fallback_result, persistent_key)
+        if self._fallback_web_research_enabled():
+            fallback_result = self._fallback_web_research(
+                reagent_name=name,
+                cas=cas_no,
+                search_name=search_name,
+                name_result=name_result,
+                failed_queries=failed_queries,
+                validation_names=self._validation_names(search_name, standard_name, cleaned_name, english_name, aliases),
+            )
+            if fallback_result:
+                return self._remember_result(cache_key, fallback_result, persistent_key)
 
         name_result = self._name_result_with_nonstandard_diagnostic(name_result, name=name, cas=cas_no)
         nonstandard_reason = str(name_result.get("suspected_invalid_reason") or "").strip()
@@ -247,6 +278,113 @@ class ChemicalSearcher:
             "settings_version": ChemicalSearchCache.settings_version(self.settings),
         }
 
+    def _search_by_name_for_corrected_cas(
+        self,
+        *,
+        original_name: str,
+        original_cas: str,
+        specification: str,
+        unit: str,
+        name_result: dict[str, Any],
+        normalizer: NameNormalizer,
+    ) -> dict[str, Any] | None:
+        standard_name = str(name_result.get("standard_name") or "").strip()
+        cleaned_name = str(name_result.get("cleaned_name") or "").strip()
+        english_name = str(name_result.get("english_name") or "").strip()
+        aliases = [str(value).strip() for value in (name_result.get("aliases") or []) if str(value).strip()]
+        name_based_cas = self._extract_cas(str(name_result.get("cas") or ""))
+        queries = self._query_candidates(name_based_cas, standard_name, cleaned_name or original_name, english_name)
+        if original_name and original_name not in queries:
+            queries.append(original_name)
+        for query in queries:
+            validation_names = self._validation_names(query, standard_name, cleaned_name, english_name, aliases)
+            for provider in (self._search_chemsrc, self._search_chemicalbook):
+                result = self._run_provider(provider, name=query, cas="", query=query, validation_names=validation_names)
+                if not result or not self._trusted_name_verification(result):
+                    continue
+                corrected_cas = self._extract_cas(str(result.get("cas") or ""))
+                if not corrected_cas:
+                    corrected_cas = self._extract_cas(str(result.get("raw_text") or ""))
+                if not corrected_cas or self._same_cas(corrected_cas, original_cas):
+                    continue
+                corrected_name_result = self._verified_name_normalization(
+                    original_name=original_name,
+                    specification=specification,
+                    unit=unit,
+                    name_result=name_result,
+                    search_result={**result, "cas": corrected_cas},
+                    normalizer=normalizer,
+                )
+                corrected_name_result["cas"] = corrected_cas
+                corrected_name_result["original_erp_cas"] = original_cas
+                corrected_name_result["corrected_cas"] = corrected_cas
+                corrected_name_result["cas_name_conflict"] = True
+                corrected_name_result["cas_correction_applied"] = True
+                corrected_name_result["cas_correction_reason"] = (
+                    f"ERP CAS {original_cas} conflicts with reagent name; corrected to {corrected_cas} "
+                    f"from trusted name-based {result.get('source')} result."
+                )
+                corrected_name_result["cas_correction_source"] = result.get("source", "")
+                corrected_name_result["cas_correction_url"] = result.get("url", "")
+
+                result = dict(result)
+                result["cas"] = corrected_cas
+                result["name_normalization"] = corrected_name_result
+                result["query"] = query
+                result["original_erp_cas"] = original_cas
+                result["corrected_cas"] = corrected_cas
+                result["cas_name_conflict"] = True
+                result["cas_correction_applied"] = True
+                result["cas_correction_reason"] = corrected_name_result["cas_correction_reason"]
+                result["cas_correction_source"] = result.get("source", "")
+                result["cas_correction_url"] = result.get("url", "")
+                self._record_verified_alias_candidate(corrected_name_result, result, normalizer)
+                return result
+        return None
+
+    def _cas_name_conflict(
+        self,
+        search_result: dict[str, Any],
+        original_name: str,
+        name_result: dict[str, Any],
+    ) -> bool:
+        if not search_result.get("relevance_passed", False):
+            return False
+        if self._non_informative_name_text(
+            original_name,
+            name_result.get("raw_name", ""),
+            name_result.get("cleaned_name", ""),
+            name_result.get("standard_name", ""),
+        ):
+            return False
+        site_names = [
+            self._site_verified_name(search_result),
+            str(search_result.get("matched_site_name") or "").strip(),
+            *self._primary_names(str(search_result.get("raw_text") or "")),
+        ]
+        site_names = [self._clean_site_name(value) for value in site_names if self._clean_site_name(value)]
+        if not site_names:
+            return False
+        validation_names = self._validation_names(
+            original_name,
+            str(name_result.get("standard_name") or ""),
+            str(name_result.get("cleaned_name") or ""),
+            str(name_result.get("english_name") or ""),
+            [str(value).strip() for value in (name_result.get("aliases") or []) if str(value).strip()],
+        )
+        best = 0.0
+        for validation_name in validation_names:
+            target = self._normalize_for_similarity(validation_name)
+            if not target:
+                continue
+            for site_name in site_names:
+                best = max(best, self._similarity(target, self._normalize_for_similarity(site_name)))
+        return best < 0.82
+
+    @staticmethod
+    def _same_cas(left: str, right: str) -> bool:
+        return str(left or "").strip().lower() == str(right or "").strip().lower()
+
     def _verified_name_normalization(
         self,
         *,
@@ -261,12 +399,75 @@ class ChemicalSearcher:
         if not self._trusted_name_verification(search_result):
             return current
 
-        current_confidence = self._normalize_confidence(current.get("confidence"))
         source = str(search_result.get("source") or "").strip()
         source_confidence = self._normalize_confidence(search_result.get("source_confidence"))
         verified_cas = self._extract_cas(str(search_result.get("cas") or ""))
         if not verified_cas:
             verified_cas = self._extract_cas(str(search_result.get("raw_text") or ""))
+        site_name = self._site_verified_name(search_result)
+        current_confidence = self._normalize_confidence(current.get("confidence"))
+        current_has_verified_cas = bool(self._extract_cas(str(current.get("cas") or "")))
+        current_is_invalid_name = bool(current.get("suspected_invalid_name")) or bool(
+            self._non_informative_name_text(
+                current.get("raw_name", ""),
+                current.get("cleaned_name", ""),
+                current.get("standard_name", ""),
+            )
+        )
+        if (
+            current_confidence >= 0.8
+            and not current.get("need_manual_review", True)
+            and (not verified_cas or current_has_verified_cas)
+            and not current_is_invalid_name
+        ):
+            return current
+
+        if verified_cas:
+            cas_result = normalizer.normalize(
+                raw_name=original_name,
+                cas=verified_cas,
+                specification=specification,
+                unit=unit,
+            )
+            cas_standard = str(cas_result.get("standard_name") or "").strip()
+            cas_result_invalid = bool(cas_result.get("suspected_invalid_name")) or self._non_informative_name_text(
+                cas_result.get("raw_name", ""),
+                cas_result.get("cleaned_name", ""),
+                cas_standard,
+            )
+            if cas_standard and not cas_result.get("need_manual_review", True) and not cas_result_invalid:
+                upgraded = dict(cas_result)
+                upgraded["confidence"] = max(
+                    self._normalize_confidence(upgraded.get("confidence")),
+                    source_confidence,
+                    current_confidence,
+                )
+                upgraded["need_manual_review"] = False
+                upgraded["reason"] = self._append_reason(
+                    str(upgraded.get("reason") or current.get("reason") or ""),
+                    f"Verified by {source} result; CAS-based local standard name was confirmed by web evidence.",
+                )
+                upgraded["web_verified_alias"] = True
+                upgraded["web_verification_source"] = source
+                upgraded["web_verification_url"] = str(search_result.get("url") or "")
+                return upgraded
+
+        if verified_cas and site_name:
+            upgraded = dict(current)
+            upgraded["standard_name"] = site_name
+            upgraded["english_name"] = site_name if self._looks_english_name(site_name) else str(upgraded.get("english_name") or "")
+            upgraded["cas"] = verified_cas
+            upgraded["confidence"] = max(current_confidence, source_confidence, 0.9)
+            upgraded["need_manual_review"] = False
+            upgraded["reason"] = self._append_reason(
+                str(upgraded.get("reason") or ""),
+                f"CAS {verified_cas} was verified by {source}; standard name was aligned to the trusted website name.",
+            )
+            upgraded["web_verified_alias"] = True
+            upgraded["web_verification_source"] = source
+            upgraded["web_verification_url"] = str(search_result.get("url") or "")
+            return upgraded
+
         if (
             current_confidence >= 0.8
             and not current.get("need_manual_review", True)
@@ -320,6 +521,59 @@ class ChemicalSearcher:
             and not search_result.get("need_manual_review", True)
             and search_result.get("relevance_passed", False)
             and self._normalize_confidence(search_result.get("source_confidence")) >= 0.86
+        )
+
+    @classmethod
+    def _site_verified_name(cls, search_result: dict[str, Any]) -> str:
+        candidates = [
+            str(search_result.get("matched_site_name") or "").strip(),
+            *cls._primary_names(str(search_result.get("raw_text") or "")),
+        ]
+        for candidate in candidates:
+            name = cls._clean_site_name(candidate)
+            if name:
+                return name
+        return ""
+
+    @staticmethod
+    def _clean_site_name(value: str) -> str:
+        text = re.sub(r"\s+", " ", str(value or "")).strip(" -|,;，；")
+        if not text or ChemicalSearcher._looks_like_cas(text):
+            return ""
+        reject_fragments = (
+            "cas#",
+            "cas no",
+            "cas number",
+            "search",
+            "login",
+            "copyright",
+            "molecular formula",
+            "molecular weight",
+        )
+        lowered = text.lower()
+        if any(fragment in lowered for fragment in reject_fragments):
+            return ""
+        if len(text) > 120:
+            text = text[:120].strip()
+        return text
+
+    @staticmethod
+    def _looks_english_name(value: str) -> bool:
+        return bool(re.search(r"[A-Za-z]", value or "")) and not re.search(r"[\u4e00-\u9fff]", value or "")
+
+    @staticmethod
+    def _non_informative_name_text(*values: Any) -> bool:
+        text = re.sub(r"\s+", "", " ".join(str(value or "") for value in values)).lower()
+        return any(
+            token in text
+            for token in (
+                "没写",
+                "未写",
+                "未填写",
+                "未填",
+                "空白",
+                "无名称",
+            )
         )
 
     def _record_verified_alias_candidate(
@@ -655,6 +909,13 @@ class ChemicalSearcher:
         failed_queries: list[str],
         reason: str,
     ) -> dict[str, Any] | None:
+        search_settings = ((self.settings or {}).get("chemical_search") or {})
+        enabled = str(
+            os.getenv("ENABLE_LLM_KNOWLEDGE_FALLBACK")
+            or search_settings.get("enable_llm_knowledge_fallback", True)
+        ).strip().lower()
+        if enabled in {"0", "false", "no", "off"}:
+            return None
         fallback = LlmExtractor(settings=self.settings).generate_knowledge_fallback(
             {
                 "raw_name": reagent_name,
@@ -693,6 +954,14 @@ class ChemicalSearcher:
         result["fallback_url"] = ""
         result["used_llm_knowledge_fallback"] = True
         return result
+
+    def _fallback_web_research_enabled(self) -> bool:
+        search_settings = ((self.settings or {}).get("chemical_search") or {})
+        enabled = str(
+            os.getenv("ENABLE_FALLBACK_WEB_RESEARCH")
+            or search_settings.get("enable_fallback_web_research", True)
+        ).strip().lower()
+        return enabled not in {"0", "false", "no", "off"}
 
     @staticmethod
     def _query_candidates(cas: str, standard_name: str, cleaned_name: str, english_name: str = "") -> list[str]:
@@ -970,9 +1239,13 @@ class ChemicalSearcher:
     ) -> dict[str, Any]:
         normalized_text = self._normalize_for_similarity(raw_text)
         if cas and cas.lower() in normalized_text:
+            site_name = self._clean_site_name(preferred_name)
+            if not site_name:
+                primary_names = self._primary_names(raw_text)
+                site_name = self._clean_site_name(primary_names[0] if primary_names else "")
             return {
                 "relevance_passed": True,
-                "matched_site_name": preferred_name,
+                "matched_site_name": site_name,
                 "name_similarity": 1.0,
                 "passed": True,
             }

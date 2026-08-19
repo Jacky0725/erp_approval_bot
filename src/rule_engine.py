@@ -12,6 +12,7 @@ RULE_COLUMNS = ["category", "explanation", "examples"]
 CRITICAL_PRIORITY = ["不建议接收类", "拒收类", "剧毒品"]
 UNKNOWN_CATEGORY = "未知类"
 NORMAL_CATEGORY = "普通类"
+FLAMMABLE_CATEGORY = "易燃液体"
 
 
 @dataclass(frozen=True)
@@ -220,7 +221,10 @@ class RuleEngine:
                 explanation_hits = [
                     hit for hit in explanation_hits if not self._is_non_decision_normal_hint(hit)
                 ]
-            example_hits = self._specific_example_hits(rule.example_keywords, reagent_info)
+            if rule.category == FLAMMABLE_CATEGORY:
+                example_hits = self._flammable_example_hits(rule.example_keywords, reagent_info)
+            else:
+                example_hits = self._specific_example_hits(rule.example_keywords, reagent_info)
             category_hits = self._category_suggestion_hits(rule.category, reagent_info)
             halogen_hits = self._bromine_iodine_hits(rule.category, reagent_info)
             conditional_hits = self._conditional_rule_hits(rule.category, reagent_info)
@@ -232,7 +236,10 @@ class RuleEngine:
             if toxic_hits is not None:
                 explanation_hits = toxic_hits
                 if not toxic_hits:
-                    example_hits = self._specific_example_hits(rule.example_keywords, reagent_info)
+                    if rule.category == FLAMMABLE_CATEGORY:
+                        example_hits = self._flammable_example_hits(rule.example_keywords, reagent_info)
+                    else:
+                        example_hits = self._specific_example_hits(rule.example_keywords, reagent_info)
 
             if not explanation_hits:
                 example_hits = self._exact_example_hits(rule.example_keywords, reagent_info)
@@ -265,6 +272,10 @@ class RuleEngine:
                 "confidence": 0.9,
                 "need_manual_review": False,
             }
+
+        flammable_issue = self.flammable_evidence_issue(reagent_info)
+        if flammable_issue and not matches:
+            return self._manual_result(f"无法自动判定易燃类：{flammable_issue}")
 
         if not matches:
             if reagent_info.get("allow_default_normal"):
@@ -358,7 +369,6 @@ class RuleEngine:
             "flash_point",
             "boiling_point",
             "toxicity",
-            "suggested_categories",
             "evidence",
         )
         for key in keys:
@@ -371,7 +381,7 @@ class RuleEngine:
         for field, words in {
             "corrosive": ["腐蚀性", "腐蚀"],
             "oxidizing": ["氧化性", "氧化剂"],
-            "flammable": ["易燃", "闪点低"],
+            "flammable": [],
             "water_reactive": ["与水反应", "遇湿易燃"],
             "explosive_risk": ["爆炸", "易爆"],
             "heavy_metal": ["重金属"],
@@ -414,6 +424,8 @@ class RuleEngine:
             return []
         if category == "\u6eb4\u7898\u7c7b":
             return []
+        if category == FLAMMABLE_CATEGORY:
+            return []
 
         suggested = reagent_info.get("suggested_categories", [])
         if isinstance(suggested, str):
@@ -451,6 +463,19 @@ class RuleEngine:
             exact_name_hit = normalized == name_text
             long_name_hit = len(normalized) >= 3 and normalized in name_text
             if (exact_name_hit or long_name_hit) and keyword not in hits:
+                hits.append(keyword)
+        return hits
+
+    @staticmethod
+    def _flammable_example_hits(keywords: tuple[str, ...], reagent_info: dict[str, Any]) -> list[str]:
+        name_values = []
+        for key in ("name", "reagent_name", "chemical_name", "standard_name", "cleaned_name"):
+            value = reagent_info.get(key)
+            if value:
+                name_values.append(str(value))
+        hits = []
+        for keyword in keywords:
+            if RuleEngine._is_flammable_example_name(keyword, name_values) and keyword not in hits:
                 hits.append(keyword)
         return hits
 
@@ -539,7 +564,9 @@ class RuleEngine:
             if category == "\u7279\u6b8a\u9178" and concentration is not None and concentration < 72.0:
                 hits.append("\u9ad8\u6c2f\u9178<72%")
 
-        if category == "\u6613\u71c3\u6db2\u4f53":
+        if category == FLAMMABLE_CATEGORY:
+            if RuleEngine._has_common_flammable_liquid_example(reagent_info):
+                hits.append("易燃液体常见举例")
             hits.extend(RuleEngine._flash_point_flammable_hits(reagent_info))
 
         return hits
@@ -627,11 +654,175 @@ class RuleEngine:
 
     @staticmethod
     def _flash_point_flammable_hits(reagent_info: dict[str, Any]) -> list[str]:
+        if not RuleEngine._has_auto_flammable_context(reagent_info):
+            return []
         hits: list[str] = []
         for celsius, source in RuleEngine._flash_points_celsius(reagent_info):
             if celsius < 60.0:
                 hits.append(f"\u95ea\u70b9 {celsius:.1f}\u00b0C < 60\u00b0C\uff08{source}\uff09")
         return list(dict.fromkeys(hits))
+
+    @staticmethod
+    def flammable_evidence_issue(reagent_info: dict[str, Any]) -> str:
+        low_flash_hits = [
+            f"{celsius:.1f}°C（{source}）"
+            for celsius, source in RuleEngine._flash_points_celsius(reagent_info)
+            if celsius < 60.0
+        ]
+        if not low_flash_hits:
+            return ""
+        if RuleEngine._has_auto_flammable_context(reagent_info):
+            return ""
+        if RuleEngine._has_flammable_blocking_context(reagent_info):
+            return (
+                "检测到低闪点信息，但试剂名称或证据显示可能为固体、盐酸盐、聚合物、"
+                "Boc/氨基酸衍生物、硅胶或叠氮/四氮唑类；不自动判定易燃类。"
+            )
+        return "检测到低闪点信息，但缺少液体、溶液、溶剂或油状物证据；不自动判定易燃类。"
+
+    @staticmethod
+    def is_reusable_flammable_evidence(reagent_info: dict[str, Any]) -> bool:
+        text = RuleEngine._raw_reagent_text(reagent_info).lower()
+        if RuleEngine._has_write_failure_evidence(text):
+            return False
+        return bool(
+            RuleEngine._has_auto_flammable_context(reagent_info)
+            or RuleEngine._has_common_flammable_liquid_example(reagent_info)
+        )
+
+    @staticmethod
+    def _has_auto_flammable_context(reagent_info: dict[str, Any]) -> bool:
+        low_flash = any(celsius < 60.0 for celsius, _ in RuleEngine._flash_points_celsius(reagent_info))
+        if not low_flash:
+            return False
+        if RuleEngine._has_flammable_blocking_context(reagent_info):
+            return False
+        return RuleEngine._has_liquid_context(reagent_info) or RuleEngine._has_common_flammable_liquid_example(reagent_info)
+
+    @staticmethod
+    def _has_liquid_context(reagent_info: dict[str, Any]) -> bool:
+        text = RuleEngine._raw_reagent_text(reagent_info).lower()
+        tokens = (
+            "液体",
+            "液态",
+            "溶液",
+            "水溶液",
+            "醇溶液",
+            "溶剂",
+            "油状",
+            "油",
+            "liquid",
+            "solution",
+            "solvent",
+            "oil",
+            "neat liquid",
+        )
+        return any(token in text for token in tokens)
+
+    @staticmethod
+    def _has_flammable_blocking_context(reagent_info: dict[str, Any]) -> bool:
+        text = RuleEngine._raw_reagent_text(reagent_info).lower()
+        tokens = (
+            "固体",
+            "粉末",
+            "晶体",
+            "结晶",
+            "solid",
+            "powder",
+            "crystal",
+            "盐酸盐",
+            "hydrochloride",
+            "boc",
+            "叔丁氧羰基",
+            "氨基酸",
+            "amino acid",
+            "聚",
+            "poly",
+            "硅胶",
+            "silica gel",
+            "四氮唑",
+            "tetrazole",
+            "叠氮",
+            "叠化",
+            "azide",
+        )
+        return any(token in text for token in tokens)
+
+    @staticmethod
+    def _has_write_failure_evidence(text: str) -> bool:
+        return any(
+            token in text
+            for token in (
+                "网页写入失败",
+                "could not select",
+                "row still shows",
+                "selected 易燃类, but",
+            )
+        )
+
+    @staticmethod
+    def _has_common_flammable_liquid_example(reagent_info: dict[str, Any]) -> bool:
+        name_text = RuleEngine._normalize_text(
+            " ".join(
+                str(reagent_info.get(key) or "")
+                for key in ("name", "reagent_name", "chemical_name", "standard_name", "cleaned_name")
+            )
+        )
+        if not name_text:
+            return False
+        examples = (
+            "正戊烷",
+            "异戊烷",
+            "车用汽油",
+            "汽油",
+            "乙醚",
+            "乙醛",
+            "2-环氧丙烷",
+            "环氧丙烷",
+            "呋喃",
+            "甲酸甲酯",
+            "正己烷",
+            "环戊烷",
+            "丁醛丙醚",
+            "石油醚",
+            "甲醇",
+            "乙醇",
+            "无水乙醇",
+            "异丙醇",
+            "丙酮",
+            "乙酸乙酯",
+            "甲苯",
+            "二甲苯",
+            "2-丁酮",
+            "甲乙酮",
+        )
+        for example in examples:
+            if RuleEngine._is_flammable_example_name(example, [name_text]):
+                return True
+        return False
+
+    @staticmethod
+    def _is_flammable_example_name(example: str, name_values: list[str]) -> bool:
+        normalized_example = RuleEngine._normalize_text(example)
+        if not normalized_example:
+            return False
+        safe_prefixes = ("无水", "无醛", "工业", "分析纯", "色谱", "hplc", "95", "99", "75")
+        safe_suffixes = ("溶液", "水溶液", "试剂", "液", "无水")
+        for name in name_values:
+            normalized_name = RuleEngine._normalize_text(name)
+            if not normalized_name:
+                continue
+            if normalized_name == normalized_example:
+                return True
+            for prefix in safe_prefixes:
+                if normalized_name == RuleEngine._normalize_text(f"{prefix}{example}"):
+                    return True
+            for suffix in safe_suffixes:
+                if normalized_name == RuleEngine._normalize_text(f"{example}{suffix}"):
+                    return True
+            if normalized_example in {"石油醚", "车用汽油", "甲乙酮"} and normalized_example in normalized_name:
+                return True
+        return False
 
     @staticmethod
     def _flash_points_celsius(reagent_info: dict[str, Any]) -> list[tuple[float, str]]:

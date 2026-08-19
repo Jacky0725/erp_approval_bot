@@ -31,6 +31,14 @@ NOISE_PATTERN = re.compile(
     r"(?:≥|>=|≤|<=)?\s*\d+(?:\.\d+)?\s*%?\s*(?:纯度|含量|浓度)?|"
     r"(?:纯度|含量|浓度|规格|包装|原装|进口|国产|现货|危化品|易制毒|易制爆)"
 )
+NON_INFORMATIVE_NAME_PATTERNS = (
+    "没写",
+    "未写",
+    "未填写",
+    "未填",
+    "空白",
+    "无名称",
+)
 BRACKET_PATTERN = re.compile(r"[\[\]【】()（）{}]")
 INTERNAL_CODE_SUFFIX_PATTERN = re.compile(
     r"^(.+?)\s*[:：]\s*([A-Za-z0-9][A-Za-z0-9_.\-/\\ ]{1,})$"
@@ -82,6 +90,7 @@ class NameNormalizer:
         cas_no = self._extract_cas(cas) or self._extract_cas(raw_name)
         concentration = self._extract_concentration(" ".join([raw_name, str(specification or ""), str(unit or "")]))
         cleaned_name = self._clean_name(raw_name)
+        non_informative_reason = self._non_informative_name_reason(raw_name, cleaned_name)
         aliases: list[str] = []
 
         if cas_no:
@@ -156,6 +165,15 @@ class NameNormalizer:
                 extra_fields=extra_fields,
             )
             if llm_result:
+                if non_informative_reason:
+                    llm_result["suspected_invalid_name"] = True
+                    llm_result["suspected_invalid_reason"] = non_informative_reason
+                    llm_result["need_manual_review"] = True
+                    llm_result["confidence"] = min(self._normalize_confidence(llm_result.get("confidence")), 0.65)
+                    llm_result["reason"] = self._append_reason(
+                        str(llm_result.get("reason") or ""),
+                        non_informative_reason,
+                    )
                 return llm_result
 
             return self._result(
@@ -168,7 +186,12 @@ class NameNormalizer:
                 concentration=concentration,
                 aliases=[],
                 confidence=0.65,
-                reason="Cleaned name by rules, but no alias/CAS/abbreviation matched.",
+                reason=self._append_reason(
+                    "Cleaned name by rules, but no alias/CAS/abbreviation matched.",
+                    non_informative_reason,
+                ),
+                suspected_invalid_name=bool(non_informative_reason),
+                suspected_invalid_reason=non_informative_reason,
             )
 
         return self._result(
@@ -196,6 +219,28 @@ class NameNormalizer:
                 "aliases": self._string_list(value.get("aliases")),
             }
         return None
+
+    @staticmethod
+    def _non_informative_name_reason(raw_name: str, cleaned_name: str = "") -> str:
+        text = re.sub(r"\s+", "", f"{raw_name or ''} {cleaned_name or ''}").lower()
+        if not text:
+            return "ERP 试剂名称为空，不能作为标准化学名称依据。"
+        for pattern in NON_INFORMATIVE_NAME_PATTERNS:
+            if pattern.lower() in text:
+                return f"ERP 试剂名称包含“{pattern}”，不是有效化学名称；应优先依赖 CAS 或可信网页名称。"
+        return ""
+
+    @staticmethod
+    def _append_reason(base: str, extra: str) -> str:
+        base = str(base or "").strip()
+        extra = str(extra or "").strip()
+        if not extra:
+            return base
+        if not base:
+            return extra
+        if extra in base:
+            return base
+        return f"{base} {extra}"
 
     def _lookup_alias(self, cleaned_name: str, raw_name: str) -> dict[str, Any] | None:
         aliases = self.alias_data.get("aliases") or {}
@@ -536,6 +581,8 @@ class NameNormalizer:
         aliases: list[str],
         confidence: float,
         reason: str,
+        suspected_invalid_name: bool = False,
+        suspected_invalid_reason: str = "",
     ) -> dict[str, Any]:
         result = dict(DEFAULT_RESULT)
         result.update(
@@ -551,6 +598,8 @@ class NameNormalizer:
                 "confidence": confidence,
                 "need_manual_review": confidence < 0.8,
                 "reason": reason,
+                "suspected_invalid_name": suspected_invalid_name,
+                "suspected_invalid_reason": suspected_invalid_reason,
             }
         )
         return result

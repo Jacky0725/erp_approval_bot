@@ -216,6 +216,65 @@ abbreviations: {}
             candidates = pd.read_excel(candidates_path, dtype=str).fillna("")
             self.assertEqual(len(candidates), 1)
 
+    def test_trusted_cas_result_overrides_non_informative_wrong_standard_name(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config_dir = root / "config"
+            config_dir.mkdir()
+            (config_dir / "name_aliases.yaml").write_text(
+                "cas: {}\naliases: {}\nabbreviations: {}\n",
+                encoding="utf-8",
+            )
+
+            class TrustedCasNameSearcher(ChemicalSearcher):
+                def _search_chemsrc(
+                    self,
+                    name: str,
+                    cas: str,
+                    query: str,
+                    validation_names: list[str] | None = None,
+                ) -> dict[str, Any] | None:
+                    result = self._result(
+                        name=name,
+                        cas="272-14-0",
+                        source="Chemsrc",
+                        url="https://example.test/272-14-0",
+                        raw_text=(
+                            "Name: Thieno[3,2-c]pyridine Chemical Name: Thieno[3,2-c]pyridine "
+                            "CAS Number: 272-14-0 Hazard Codes Xn"
+                        ),
+                    )
+                    result.update(
+                        {
+                            "relevance_passed": True,
+                            "passed": True,
+                            "matched_site_name": "Thieno[3,2-c]pyridine",
+                            "name_similarity": 1.0,
+                        }
+                    )
+                    return result
+
+                def _search_chemicalbook(
+                    self,
+                    name: str,
+                    cas: str,
+                    query: str,
+                    validation_names: list[str] | None = None,
+                ) -> dict[str, Any] | None:
+                    return None
+
+            settings = {"paths": {"name_aliases_yaml": "config/name_aliases.yaml"}}
+            with patch.dict("os.environ", NO_LLM_ENV, clear=False):
+                result = TrustedCasNameSearcher(root_dir=root, settings=settings).search("没写", cas="272-14-0")
+
+        name_result = result["name_normalization"]
+        self.assertEqual(name_result["standard_name"], "Thieno[3,2-c]pyridine")
+        self.assertEqual(name_result["english_name"], "Thieno[3,2-c]pyridine")
+        self.assertEqual(name_result["cas"], "272-14-0")
+        self.assertFalse(name_result["need_manual_review"])
+        self.assertTrue(name_result["web_verified_alias"])
+        self.assertIn("CAS 272-14-0 was verified", name_result["reason"])
+
     def test_low_confidence_web_result_does_not_upgrade_unknown_alias(self) -> None:
         class LowConfidenceAliasSearcher(ChemicalSearcher):
             def _search_chemsrc(
@@ -767,6 +826,162 @@ abbreviations: {}
         self.assertEqual(searcher.queries, ["1310-73-2"])
         self.assertEqual(result["query"], "1310-73-2")
         self.assertEqual(result["cas"], "1310-73-2")
+
+    def test_conflicting_erp_cas_is_corrected_by_trusted_name_search(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config_dir = root / "config"
+            config_dir.mkdir()
+            (config_dir / "name_aliases.yaml").write_text(
+                """
+cas:
+  64-17-5:
+    standard_name: 乙醇
+    english_name: ethanol
+    aliases: [乙醇, ethanol]
+  1310-73-2:
+    standard_name: 氢氧化钠
+    english_name: sodium hydroxide
+    aliases: [氢氧化钠, 烧碱, sodium hydroxide]
+aliases:
+  氢氧化钠: 氢氧化钠
+  乙醇: 乙醇
+abbreviations: {}
+""".strip(),
+                encoding="utf-8",
+            )
+
+            class ConflictingCasSearcher(ChemicalSearcher):
+                def __init__(self, *args: Any, **kwargs: Any) -> None:
+                    super().__init__(*args, **kwargs)
+                    self.queries: list[tuple[str, str]] = []
+
+                def _search_chemsrc(
+                    self,
+                    name: str,
+                    cas: str,
+                    query: str,
+                    validation_names: list[str] | None = None,
+                ) -> dict[str, Any] | None:
+                    self.queries.append((query, cas))
+                    if query == "64-17-5":
+                        result = self._result(
+                            name=name,
+                            cas="64-17-5",
+                            source="Chemsrc",
+                            url="https://example.test/ethanol",
+                            raw_text="Product Name: ethanol CAS No. 64-17-5",
+                        )
+                        result.update(
+                            {
+                                "relevance_passed": True,
+                                "passed": True,
+                                "matched_site_name": "ethanol",
+                                "name_similarity": 1.0,
+                            }
+                        )
+                        return result
+                    if query in {"1310-73-2", "氢氧化钠"}:
+                        result = self._result(
+                            name=name,
+                            cas="1310-73-2",
+                            source="Chemsrc",
+                            url="https://example.test/sodium-hydroxide",
+                            raw_text="Product Name: 氢氧化钠 sodium hydroxide CAS No. 1310-73-2",
+                        )
+                        result.update(
+                            {
+                                "relevance_passed": True,
+                                "passed": True,
+                                "matched_site_name": "氢氧化钠",
+                                "name_similarity": 0.95,
+                            }
+                        )
+                        return result
+                    return None
+
+                def _search_chemicalbook(
+                    self,
+                    name: str,
+                    cas: str,
+                    query: str,
+                    validation_names: list[str] | None = None,
+                ) -> dict[str, Any] | None:
+                    return None
+
+            settings = {"paths": {"name_aliases_yaml": "config/name_aliases.yaml"}}
+            searcher = ConflictingCasSearcher(root_dir=root, settings=settings)
+            result = searcher.search("氢氧化钠", cas="64-17-5")
+
+        self.assertEqual(result["cas"], "1310-73-2")
+        self.assertEqual(result["original_erp_cas"], "64-17-5")
+        self.assertEqual(result["corrected_cas"], "1310-73-2")
+        self.assertTrue(result["cas_name_conflict"])
+        self.assertTrue(result["cas_correction_applied"])
+        self.assertEqual(result["name_normalization"]["cas"], "1310-73-2")
+        self.assertEqual(result["name_normalization"]["original_erp_cas"], "64-17-5")
+        self.assertIn(("64-17-5", "64-17-5"), searcher.queries)
+        self.assertIn(("1310-73-2", ""), searcher.queries)
+
+    def test_conflicting_erp_cas_without_trusted_name_result_is_not_corrected(self) -> None:
+        class LowTrustCorrectionSearcher(ChemicalSearcher):
+            def _search_chemsrc(
+                self,
+                name: str,
+                cas: str,
+                query: str,
+                validation_names: list[str] | None = None,
+            ) -> dict[str, Any] | None:
+                if query == "64-17-5":
+                    result = self._result(
+                        name=name,
+                        cas="64-17-5",
+                        source="Chemsrc",
+                        url="https://example.test/ethanol",
+                        raw_text="Product Name: ethanol CAS No. 64-17-5",
+                    )
+                    result.update(
+                        {
+                            "relevance_passed": True,
+                            "passed": True,
+                            "matched_site_name": "ethanol",
+                            "name_similarity": 1.0,
+                        }
+                    )
+                    return result
+                result = self._result(
+                    name=name,
+                    cas="1310-73-2",
+                    source="GuideChem",
+                    url="https://example.test/naoh",
+                    raw_text="氢氧化钠 CAS No. 1310-73-2",
+                )
+                result.update(
+                    {
+                        "relevance_passed": True,
+                        "passed": True,
+                        "matched_site_name": "氢氧化钠",
+                        "name_similarity": 0.95,
+                        "source_confidence": 0.6,
+                    }
+                )
+                return result
+
+            def _search_chemicalbook(
+                self,
+                name: str,
+                cas: str,
+                query: str,
+                validation_names: list[str] | None = None,
+            ) -> dict[str, Any] | None:
+                return None
+
+        result = LowTrustCorrectionSearcher(root_dir=ROOT_DIR).search("氢氧化钠", cas="64-17-5")
+
+        self.assertTrue(result["need_manual_review"])
+        self.assertTrue(result["cas_name_conflict"])
+        self.assertEqual(result["original_erp_cas"], "64-17-5")
+        self.assertNotIn("corrected_cas", result)
 
 
 if __name__ == "__main__":

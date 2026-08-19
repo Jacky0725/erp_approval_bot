@@ -526,6 +526,46 @@ class ApprovalFlowTodoLoopTest(unittest.TestCase):
 
         self.assertTrue(result)
 
+    def test_approval_suggestion_uses_corrected_cas_and_preserves_original(self) -> None:
+        bot = Bot()
+        row = bot._approval_suggestion_row(
+            reagent={
+                "\u5e8f\u53f7": "1",
+                "\u8bd5\u5242\u540d\u79f0": "\u6c22\u6c27\u5316\u94a0",
+                "CAS\u53f7": "64-17-5",
+            },
+            name_result={
+                "standard_name": "\u6c22\u6c27\u5316\u94a0",
+                "cas": "1310-73-2",
+                "corrected_cas": "1310-73-2",
+                "original_erp_cas": "64-17-5",
+                "confidence": 0.95,
+                "need_manual_review": False,
+            },
+            search_result={
+                "source": "Chemsrc",
+                "cas": "1310-73-2",
+                "corrected_cas": "1310-73-2",
+                "original_erp_cas": "64-17-5",
+                "cas_name_conflict": True,
+                "cas_correction_applied": True,
+                "cas_correction_reason": "corrected by trusted name search",
+                "cas_correction_source": "Chemsrc",
+                "cas_correction_url": "https://example.test/naoh",
+                "need_manual_review": False,
+                "relevance_passed": True,
+                "source_confidence": 0.92,
+            },
+            extracted={"evidence": [], "confidence": 0.8},
+            classification={"need_manual_review": False, "final_category": "\u666e\u901a\u7c7b", "confidence": 0.8},
+        )
+
+        self.assertEqual(row["CAS\u53f7"], "1310-73-2")
+        self.assertEqual(row["\u539fERP CAS\u53f7"], "64-17-5")
+        self.assertEqual(row["\u4fee\u6b63CAS\u53f7"], "1310-73-2")
+        self.assertTrue(row["CAS\u540d\u79f0\u51b2\u7a81"])
+        self.assertTrue(row["CAS\u4fee\u6b63\u5df2\u5e94\u7528"])
+
     def test_high_confidence_candidate_allows_empty_evidence_when_not_manual_review(self) -> None:
         bot = Bot()
         bot.settings = {"approval": {"write_min_confidence": 0.8}}
@@ -1392,7 +1432,7 @@ class ApprovalFlowTodoLoopTest(unittest.TestCase):
             },
         )
 
-        self.assertEqual(suggestion["CAS\u53f7"], "")
+        self.assertEqual(suggestion["CAS\u53f7"], "376584-63-3")
         self.assertEqual(suggestion["\u67e5\u8be2\u6765\u6e90"], "reagent_memory")
         self.assertEqual(suggestion["\u67e5\u8be2URL"], "https://www.chemsrc.com/en/cas/376584-63-3_727612.html")
         self.assertIn("724710-02-5", suggestion["\u89c4\u5219\u539f\u56e0"])
@@ -1469,6 +1509,50 @@ class ApprovalFlowTodoLoopTest(unittest.TestCase):
                 row,
                 rule_engine=engine,
             )
+        )
+
+    def test_flammable_memory_with_write_failure_is_unsafe(self) -> None:
+        bot = Bot()
+        engine = RuleEngine.from_structured_excel(ROOT_DIR / "config" / "rules_structured.xlsx")
+        row = {
+            "raw_name": "3-azabicyclo[3.1.0]hexane",
+            "cleaned_name": "3-azabicyclo[3.1.0]hexane",
+            "standard_name": "3-氮杂双环[3.1.0]己烷",
+            "final_category": "易燃类",
+            "reason": "网页写入失败：could not select 易燃类。",
+        }
+
+        self.assertFalse(
+            bot.memory_match_is_safe(
+                {"试剂名称": "3-azabicyclo[3.1.0]hexane"},
+                row,
+                rule_engine=engine,
+            )
+        )
+
+    def test_flammable_memory_requires_reliable_flash_and_liquid_context(self) -> None:
+        bot = Bot()
+        engine = RuleEngine.from_structured_excel(ROOT_DIR / "config" / "rules_structured.xlsx")
+        unsafe = {
+            "raw_name": "5-Aminotetrazole",
+            "cleaned_name": "Aminotetrazole",
+            "standard_name": "5-氨基四氮唑",
+            "final_category": "易燃类",
+            "reason": "以 rules.xlsx 的解释列为主要依据判定为 易燃液体。命中依据：易燃液体(解释列命中: 易燃类)",
+        }
+        safe = {
+            "raw_name": "乙醚",
+            "cleaned_name": "乙醚",
+            "standard_name": "乙醚",
+            "final_category": "易燃类",
+            "reason": "闪点 -45.0°C < 60°C；无色易挥发液体。",
+        }
+
+        self.assertFalse(
+            bot.memory_match_is_safe({"试剂名称": "5-Aminotetrazole"}, unsafe, rule_engine=engine)
+        )
+        self.assertTrue(
+            bot.memory_match_is_safe({"试剂名称": "乙醚"}, safe, rule_engine=engine)
         )
 
     def test_reagent_memory_source_is_not_remembered_again(self) -> None:
@@ -1605,6 +1689,8 @@ class ApprovalFlowTodoLoopTest(unittest.TestCase):
                 self.applied_pages: list[list[dict[str, object]]] = []
                 self.partial_lengths: list[int] = []
                 self.next_clicks = 0
+                self.sort_calls = 0
+                self.light_scan_calls = 0
                 self.stage_logger = StageLogger()
                 self.settings = {}
 
@@ -1613,6 +1699,11 @@ class ApprovalFlowTodoLoopTest(unittest.TestCase):
                 return True
 
             def sort_property_column_until_unmatched_visible(self, page: object) -> bool:
+                self.sort_calls += 1
+                return True
+
+            def prepare_next_reagent_page_for_light_scan(self, page: object, reason: str) -> bool:
+                self.light_scan_calls += 1
                 return True
 
             def stabilize_reagent_detail_after_write_failure(self, page: object) -> bool:
@@ -1650,6 +1741,8 @@ class ApprovalFlowTodoLoopTest(unittest.TestCase):
         self.assertEqual(len(bot.applied_pages), 2)
         self.assertEqual(bot.partial_lengths, [1, 2])
         self.assertEqual(bot.next_clicks, 3)
+        self.assertEqual(bot.sort_calls, 1)
+        self.assertEqual(bot.light_scan_calls, 2)
 
     def test_multi_page_mode_records_deferred_candidates_not_found_at_terminal_page(self) -> None:
         class DeferredBot(Bot):
@@ -1657,12 +1750,19 @@ class ApprovalFlowTodoLoopTest(unittest.TestCase):
                 self.settings = {"approval": {"write_mode": "multi_page", "write_max_attempts": 2}}
                 self.stage_logger = StageLogger()
                 self.read_calls = 0
+                self.sort_calls = 0
+                self.light_scan_calls = 0
                 self.failures: list[tuple[str, str]] = []
 
             def goto_first_reagent_page(self, page: object) -> bool:
                 return True
 
             def sort_property_column_until_unmatched_visible(self, page: object) -> bool:
+                self.sort_calls += 1
+                return True
+
+            def prepare_next_reagent_page_for_light_scan(self, page: object, reason: str) -> bool:
+                self.light_scan_calls += 1
                 return True
 
             def current_reagent_page_number(self, page: object) -> str:
@@ -1722,6 +1822,8 @@ class ApprovalFlowTodoLoopTest(unittest.TestCase):
         self.assertEqual(len(bot.failures), 15)
         self.assertEqual(bot.failures[0], ("6", "not_found_after_reread"))
         self.assertEqual(bot.failures[-1], ("20", "not_found_after_reread"))
+        self.assertEqual(bot.sort_calls, 2)
+        self.assertEqual(bot.light_scan_calls, 0)
 
     def test_multi_page_mode_advances_after_current_page_write_attempt(self) -> None:
         class RetryBot(Bot):

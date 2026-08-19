@@ -204,6 +204,46 @@ class WebReviewConfirmationTest(unittest.TestCase):
         self.assertEqual(row["evidence_status"], "可信网站，资料可信度 0.92")
         self.assertEqual(row["allow_suggestion_preselect"], "True")
 
+    def test_review_queue_summary_shows_applied_cas_correction(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            data_dir = root / "data"
+            data_dir.mkdir(parents=True)
+            queue_path = data_dir / "review_queue.xlsx"
+            pd.DataFrame(
+                [
+                    {
+                        "timestamp": "2026-06-25T10:00:00",
+                        "list_number": "SJ1",
+                        "chemical_name": "氢氧化钠",
+                        "cas": "1310-73-2",
+                        "standard_name": "氢氧化钠",
+                        "reason": "CAS corrected",
+                        "status": "pending",
+                        "suggested_category": "普通类",
+                        "classification_confidence": "0.9",
+                        "evidence_source_type": "trusted_web",
+                        "source_confidence": "0.92",
+                        "original_erp_cas": "64-17-5",
+                        "corrected_cas": "1310-73-2",
+                        "cas_name_conflict": "True",
+                        "cas_correction_applied": "True",
+                        "cas_correction_source": "Chemsrc",
+                        "cas_correction_url": "https://example.test/naoh",
+                    }
+                ]
+            ).to_excel(queue_path, index=False)
+
+            summary = review_queue_summary(root)
+
+        row = summary["preview"][0]
+        self.assertEqual(row["display_suggestion"], "CAS 已按试剂名称自动修正")
+        self.assertIn("原 CAS：64-17-5", row["display_reason"])
+        self.assertIn("修正 CAS：1310-73-2", row["display_reason"])
+        self.assertEqual(row["evidence_status"], "Chemsrc，CAS修正已应用")
+        self.assertEqual(row["original_erp_cas"], "64-17-5")
+        self.assertEqual(row["corrected_cas"], "1310-73-2")
+
     def test_confirm_review_item_marks_resolved_and_adds_memory(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

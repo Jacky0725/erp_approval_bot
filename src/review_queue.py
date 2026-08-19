@@ -24,6 +24,13 @@ REVIEW_EVIDENCE_COLUMNS = [
     "explosive_risk",
     "used_llm_knowledge_fallback",
     "review_advice",
+    "original_erp_cas",
+    "corrected_cas",
+    "cas_name_conflict",
+    "cas_correction_applied",
+    "cas_correction_reason",
+    "cas_correction_source",
+    "cas_correction_url",
     "display_suggestion",
     "display_reason",
     "evidence_status",
@@ -196,7 +203,13 @@ class ReviewQueueMixin:
 
         list_number = detail_info.get("\u5f53\u524d\u6e05\u5355\u53f7", "")
         chemical_name = reagent.get("\u8bd5\u5242\u540d\u79f0", "")
-        cas = reagent.get("CAS\u53f7", "")
+        cas = (
+            (search_result or {}).get("corrected_cas")
+            or name_result.get("corrected_cas")
+            or (search_result or {}).get("cas")
+            or name_result.get("cas")
+            or reagent.get("CAS\u53f7", "")
+        )
         sequence = reagent.get("\u5e8f\u53f7", "")
         specification = reagent.get("\u89c4\u683c", "")
         unit = reagent.get("\u89c4\u683c\u5355\u4f4d", "")
@@ -397,6 +410,19 @@ class ReviewQueueMixin:
             "explosive_risk": extracted.get("explosive_risk", ""),
             "used_llm_knowledge_fallback": used_llm,
             "review_advice": advice,
+            "original_erp_cas": search_result.get("original_erp_cas") or name_result.get("original_erp_cas") or "",
+            "corrected_cas": search_result.get("corrected_cas") or name_result.get("corrected_cas") or "",
+            "cas_name_conflict": search_result.get("cas_name_conflict") or name_result.get("cas_name_conflict") or False,
+            "cas_correction_applied": search_result.get("cas_correction_applied")
+            or name_result.get("cas_correction_applied")
+            or False,
+            "cas_correction_reason": search_result.get("cas_correction_reason")
+            or name_result.get("cas_correction_reason")
+            or "",
+            "cas_correction_source": search_result.get("cas_correction_source")
+            or name_result.get("cas_correction_source")
+            or "",
+            "cas_correction_url": search_result.get("cas_correction_url") or name_result.get("cas_correction_url") or "",
         }
         fields.update(
             review_display_summary(
@@ -457,14 +483,34 @@ def review_display_summary(
     salt_like = _looks_like_acid_salt(text_for_salt_check)
     trusted_web = source_type == "trusted_web" or source in {"Chemsrc", "ChemicalBook"}
     used_llm = source_type == "llm_fallback" or _truthy(evidence_fields.get("used_llm_knowledge_fallback"))
+    cas_correction_applied = _truthy(evidence_fields.get("cas_correction_applied"))
+    original_erp_cas = str(evidence_fields.get("original_erp_cas") or "").strip()
+    corrected_cas = str(evidence_fields.get("corrected_cas") or "").strip()
 
     detail_parts = []
     if evidence_fields.get("property_summary"):
         property_summary = str(evidence_fields.get("property_summary"))
         detail_parts.append(_compact_error(property_summary, limit=320) if _llm_failed(property_summary) else property_summary)
+    if cas_correction_applied:
+        detail_parts.append(
+            f"原 CAS：{original_erp_cas or '-'}；修正 CAS：{corrected_cas or '-'}；"
+            f"来源：{evidence_fields.get('cas_correction_source') or source or '-'}"
+        )
     if raw_reason.strip():
         detail_parts.append(_compact_error(raw_reason, limit=320))
     detail_summary = " | ".join(part for part in detail_parts if part)
+
+    if cas_correction_applied and corrected_cas:
+        return {
+            "display_suggestion": "CAS 已按试剂名称自动修正",
+            "display_reason": (
+                "ERP CAS 与试剂名称不匹配，已按试剂名称在可信网站查到更匹配 CAS；"
+                f"原 CAS：{original_erp_cas or '-'}，修正 CAS：{corrected_cas}。"
+            ),
+            "evidence_status": f"{evidence_fields.get('cas_correction_source') or source or '可信网站'}，CAS修正已应用",
+            "detail_summary": detail_summary,
+            "allow_suggestion_preselect": bool(suggested),
+        }
 
     if salt_like and not trusted_web:
         return {

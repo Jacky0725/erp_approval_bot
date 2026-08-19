@@ -6,6 +6,7 @@ data/logs/*.html
 data/logs/*.png
 data/logs/*.xlsx
 config/rule_candidates.xlsx
+config/name_alias_candidates.xlsx
 
 /data/
 /rules.xlsx

@@ -57,6 +57,14 @@ class NameNormalizerTest(unittest.TestCase):
         self.assertLess(result["confidence"], 0.8)
         self.assertTrue(result["need_manual_review"])
 
+    def test_non_informative_name_is_flagged_for_cas_based_resolution(self) -> None:
+        result = self.normalizer.normalize(raw_name="没写")
+
+        self.assertEqual(result["cleaned_name"], "没写")
+        self.assertTrue(result["suspected_invalid_name"])
+        self.assertIn("不是有效化学名称", result["suspected_invalid_reason"])
+        self.assertTrue(result["need_manual_review"])
+
     def test_internal_code_suffix_after_colon_is_removed(self) -> None:
         result = self.normalizer.normalize(raw_name="卡马西平：AC-O-11-01")
 

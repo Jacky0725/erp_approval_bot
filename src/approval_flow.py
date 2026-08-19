@@ -356,7 +356,8 @@ class ApprovalFlowMixin:
                     else:
                         print("Multi-page mode stopped because next-page navigation could not be verified.")
                     break
-                self.sort_property_column_until_unmatched_visible(page)
+                if not self.prepare_next_reagent_page_for_light_scan(page, "processed '-' rows"):
+                    break
                 continue
 
             if not current_unmatched:
@@ -385,7 +386,8 @@ class ApprovalFlowMixin:
                     else:
                         print("Multi-page mode stopped because next-page navigation could not be verified.")
                     break
-                self.sort_property_column_until_unmatched_visible(page)
+                if not self.prepare_next_reagent_page_for_light_scan(page, "no '-' rows on current page"):
+                    break
                 continue
 
             page_suggestions = self.process_current_unmatched_reagent_page(
@@ -481,16 +483,27 @@ class ApprovalFlowMixin:
                 else:
                     print("Multi-page mode stopped because next-page navigation could not be verified.")
                 break
-            try:
-                self.sort_property_column_until_unmatched_visible(page)
-            except Exception as error:
-                print(f"Multi-page mode stopped because sorting after next-page navigation failed: {error}")
+            if not self.prepare_next_reagent_page_for_light_scan(page, "normal next-page navigation"):
                 break
 
             if visited_steps >= 200:
                 raise RuntimeError("Stopped multi-page approval after 200 pages; page navigation may be stuck.")
 
         return all_suggestions
+
+    def prepare_next_reagent_page_for_light_scan(self, page: Page, reason: str) -> bool:
+        try:
+            self.wait_for_reagent_table_ready(page)
+            wait_until_spinner_hidden(page, timeout_ms=5000)
+            page.wait_for_timeout(200)
+        except Exception as error:
+            print(f"Multi-page mode stopped because the next reagent page was not ready after {reason}: {error}")
+            return False
+        print(
+            "Moved to the next reagent page for completion scanning; "
+            "skipping property-header re-sort and reading visible rows directly."
+        )
+        return True
 
     def record_not_found_pending_write_failures(
         self,
@@ -920,6 +933,8 @@ class ApprovalFlowMixin:
         rule_engine: RuleEngine | None = None,
     ) -> bool:
         final_category = str(memory_row.get("final_category") or "").strip()
+        if final_category in {"易燃类", "易燃液体"}:
+            return self._flammable_memory_match_is_safe(reagent, memory_row, name_result, rule_engine)
         if final_category != "普通类":
             return True
 
@@ -978,6 +993,75 @@ class ApprovalFlowMixin:
         )
         category = str(classification.get("final_category") or "").strip()
         return bool(category and category != "普通类")
+
+    @staticmethod
+    def _flammable_memory_match_is_safe(
+        reagent: dict[str, str],
+        memory_row: dict[str, Any],
+        name_result: dict[str, Any] | None,
+        rule_engine: RuleEngine | None,
+    ) -> bool:
+        reason = str(memory_row.get("reason") or "").strip()
+        lowered_reason = reason.lower()
+        if any(
+            token in lowered_reason or token in reason
+            for token in (
+                "网页写入失败",
+                "could not select",
+                "row still shows",
+                "selected 易燃类, but",
+            )
+        ):
+            return False
+        if rule_engine is None:
+            return False
+
+        raw_name = str(reagent.get("试剂名称", "") or memory_row.get("raw_name") or "").strip()
+        cleaned_name = str(
+            (name_result or {}).get("cleaned_name")
+            or memory_row.get("cleaned_name")
+            or raw_name
+        ).strip()
+        standard_name = str(
+            (name_result or {}).get("standard_name")
+            or memory_row.get("standard_name")
+            or raw_name
+        ).strip()
+        classification = rule_engine.classify(
+            {
+                "reagent_name": raw_name,
+                "name": standard_name or raw_name,
+                "standard_name": standard_name,
+                "cleaned_name": cleaned_name,
+                "cas": reagent.get("CAS号", "") or memory_row.get("cas") or "",
+                "text": " ".join(
+                    value
+                    for value in (
+                        raw_name,
+                        cleaned_name,
+                        standard_name,
+                        reason,
+                        str(memory_row.get("source") or ""),
+                    )
+                    if value
+                ),
+                "allow_default_normal": False,
+            }
+        )
+        return bool(
+            classification.get("final_category") == "易燃液体"
+            and not classification.get("need_manual_review", True)
+            and RuleEngine.is_reusable_flammable_evidence(
+                {
+                    "reagent_name": raw_name,
+                    "name": standard_name or raw_name,
+                    "standard_name": standard_name,
+                    "cleaned_name": cleaned_name,
+                    "text": reason,
+                    "evidence": [reason],
+                }
+            )
+        )
 
     def disable_unsafe_memory_match(
         self,
@@ -2315,10 +2399,24 @@ class ApprovalFlowMixin:
         extracted: dict[str, Any],
         classification: dict[str, Any],
     ) -> dict[str, Any]:
+        effective_cas = (
+            search_result.get("corrected_cas")
+            or name_result.get("corrected_cas")
+            or search_result.get("cas")
+            or name_result.get("cas")
+            or reagent.get("CAS\u53f7", "")
+        )
         return {
             "\u5e8f\u53f7": reagent.get("\u5e8f\u53f7", ""),
             "\u8bd5\u5242\u540d\u79f0": reagent.get("\u8bd5\u5242\u540d\u79f0", ""),
-            "CAS\u53f7": reagent.get("CAS\u53f7", ""),
+            "CAS\u53f7": effective_cas,
+            "\u539fERP CAS\u53f7": search_result.get("original_erp_cas") or name_result.get("original_erp_cas") or "",
+            "\u4fee\u6b63CAS\u53f7": search_result.get("corrected_cas") or name_result.get("corrected_cas") or "",
+            "CAS\u540d\u79f0\u51b2\u7a81": search_result.get("cas_name_conflict") or name_result.get("cas_name_conflict") or False,
+            "CAS\u4fee\u6b63\u5df2\u5e94\u7528": search_result.get("cas_correction_applied") or name_result.get("cas_correction_applied") or False,
+            "CAS\u4fee\u6b63\u539f\u56e0": search_result.get("cas_correction_reason") or name_result.get("cas_correction_reason") or "",
+            "CAS\u4fee\u6b63\u6765\u6e90": search_result.get("cas_correction_source") or name_result.get("cas_correction_source") or "",
+            "CAS\u4fee\u6b63URL": search_result.get("cas_correction_url") or name_result.get("cas_correction_url") or "",
             "\u89c4\u683c": reagent.get("\u89c4\u683c", ""),
             "\u89c4\u683c\u5355\u4f4d": reagent.get("\u89c4\u683c\u5355\u4f4d", ""),
             "\u8bd5\u5242\u6570\u91cf": reagent.get("\u8bd5\u5242\u6570\u91cf", ""),

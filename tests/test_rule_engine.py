@@ -212,7 +212,7 @@ class RuleEngineTest(unittest.TestCase):
         result = self.engine.classify(
             {
                 "reagent_name": "(2S)-2-(甲氧基甲基)环氧乙烷",
-                "text": "Glycidyl methyl ether. Flash Point 8.1±3.4 °C.",
+                "text": "Glycidyl methyl ether is a liquid. Flash Point 8.1±3.4 °C.",
                 "flash_point": "8.1±3.4 °C",
                 "allow_default_normal": True,
             }
@@ -221,11 +221,60 @@ class RuleEngineTest(unittest.TestCase):
         self.assertEqual(result["final_category"], "易燃液体")
         self.assertFalse(result["need_manual_review"])
 
+    def test_low_flash_point_without_liquid_context_needs_manual_review(self) -> None:
+        result = self.engine.classify(
+            {
+                "reagent_name": "Boc-L-2-氯苯丙氨酸",
+                "text": "Flash Point 25 °C. Solid amino acid derivative.",
+                "flash_point": "25 °C",
+                "allow_default_normal": True,
+            }
+        )
+
+        self.assertTrue(result["need_manual_review"])
+        self.assertNotEqual(result["final_category"], "易燃液体")
+
+    def test_flammable_suggestion_alone_does_not_classify(self) -> None:
+        result = self.engine.classify(
+            {
+                "reagent_name": "普通有机中间体",
+                "suggested_categories": ["易燃类"],
+                "flammable": True,
+                "allow_default_normal": True,
+            }
+        )
+
+        self.assertEqual(result["final_category"], "普通类")
+        self.assertNotIn("易燃液体", result["matched_categories"])
+
+    def test_tetrazole_and_silica_are_not_auto_flammable(self) -> None:
+        for name in ("5-Aminotetrazole", "硅胶（200-300目）"):
+            with self.subTest(name=name):
+                result = self.engine.classify(
+                    {
+                        "reagent_name": name,
+                        "text": "Flash Point 25 °C. Solid powder.",
+                        "flash_point": "25 °C",
+                        "allow_default_normal": True,
+                    }
+                )
+
+                self.assertTrue(result["need_manual_review"])
+                self.assertNotEqual(result["final_category"], "易燃液体")
+
+    def test_common_flammable_examples_are_still_flammable(self) -> None:
+        for name in ("乙醚", "丙酮", "甲醇", "乙醇", "石油醚"):
+            with self.subTest(name=name):
+                result = self.engine.classify({"reagent_name": name, "allow_default_normal": True})
+
+                self.assertEqual(result["final_category"], "易燃液体")
+                self.assertFalse(result["need_manual_review"])
+
     def test_flash_point_fahrenheit_is_converted_before_classifying(self) -> None:
         result = self.engine.classify(
             {
                 "reagent_name": "(2S)-2-(甲氧基甲基)环氧乙烷",
-                "text": "Methyl glycidyl ether. Flash Point: less than 69°F.",
+                "text": "Methyl glycidyl ether is a liquid. Flash Point: less than 69°F.",
                 "allow_default_normal": True,
             }
         )
@@ -237,6 +286,7 @@ class RuleEngineTest(unittest.TestCase):
         result = self.engine.classify(
             {
                 "reagent_name": "低闪点模拟试剂",
+                "text": "低闪点模拟试剂为液体。",
                 "flash_point": "333 K",
                 "allow_default_normal": True,
             }
