@@ -144,6 +144,44 @@ class WebReviewConfirmationTest(unittest.TestCase):
         self.assertNotIn("Error code: 402", row["display_reason"])
         self.assertNotIn("30001", row["detail_summary"])
 
+    def test_review_queue_summary_localizes_review_detail_text(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            data_dir = root / "data"
+            data_dir.mkdir(parents=True)
+            queue_path = data_dir / "review_queue.xlsx"
+            pd.DataFrame(
+                [
+                    {
+                        "timestamp": "2026-08-19T05:31:29",
+                        "list_number": "SJ1",
+                        "chemical_name": "1-戊烷磺酸钠",
+                        "standard_name": "1-戊烷磺酸钠",
+                        "reason": "No trusted web evidence was found, so low-confidence LLM knowledge fallback was used.",
+                        "status": "pending",
+                        "classification_confidence": "0.5",
+                        "property_summary": (
+                            "toxicity=No specific acute toxicity data provided. | "
+                            "evidence=Based on general chemical knowledge of alkyl sulfonates, "
+                            "it is expected to be a white to off-white crystalline solid or powder at room temperature. | "
+                            "LLM fallback evidence is advisory only and requires manual review."
+                        ),
+                        "evidence_source_type": "llm_fallback",
+                        "used_llm_knowledge_fallback": "True",
+                    }
+                ]
+            ).to_excel(queue_path, index=False)
+
+            summary = review_queue_summary(root)
+
+        detail = summary["preview"][0]["detail_summary"]
+        self.assertIn("毒性：未提供明确的急性毒性数据", detail)
+        self.assertIn("证据：根据通用化学知识", detail)
+        self.assertIn("白色至类白色结晶固体或粉末", detail)
+        self.assertIn("LLM 辅助证据仅供参考，需要人工复核", detail)
+        self.assertNotIn("toxicity=", detail)
+        self.assertNotIn("evidence=", detail)
+
     def test_review_queue_summary_downgrades_acid_salt_without_trusted_web(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -202,6 +240,36 @@ class WebReviewConfirmationTest(unittest.TestCase):
         row = summary["preview"][0]
         self.assertEqual(row["display_suggestion"], "常规酸")
         self.assertEqual(row["evidence_status"], "可信网站，资料可信度 0.92")
+        self.assertEqual(row["allow_suggestion_preselect"], "True")
+
+    def test_review_queue_summary_maps_rule_category_for_preselect(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            data_dir = root / "data"
+            data_dir.mkdir(parents=True)
+            queue_path = data_dir / "review_queue.xlsx"
+            pd.DataFrame(
+                [
+                    {
+                        "timestamp": "2026-08-19T06:54:45",
+                        "list_number": "SJ1",
+                        "chemical_name": "4-乙氧基-2-甲基苯基硼酸",
+                        "standard_name": "4-乙氧基-2-甲基苯基硼酸",
+                        "reason": "trusted evidence",
+                        "status": "pending",
+                        "suggested_category": "强反应性",
+                        "classification_confidence": "0.9",
+                        "evidence_source_type": "trusted_web",
+                        "source_confidence": "0.92",
+                    }
+                ]
+            ).to_excel(queue_path, index=False)
+
+            summary = review_queue_summary(root)
+
+        row = summary["preview"][0]
+        self.assertEqual(row["suggested_category"], "强反应")
+        self.assertEqual(row["display_suggestion"], "强反应性")
         self.assertEqual(row["allow_suggestion_preselect"], "True")
 
     def test_review_queue_summary_shows_applied_cas_correction(self) -> None:

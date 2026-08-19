@@ -667,7 +667,7 @@
       const suggestion = row.display_suggestion || row.suggested_category || "暂无可靠建议";
       const reason = row.display_reason || row.review_advice || "需人工核对物化特性。";
       const evidenceStatus = row.evidence_status || reviewEvidenceLabel(row);
-      const detail = row.detail_summary || row.property_summary || "";
+      const detail = localizeReviewDetailText(row.detail_summary || row.property_summary || "");
       const properties = [
         ["闪点", row.flash_point],
         ["沸点", row.boiling_point],
@@ -693,11 +693,50 @@
             <details class="review-evidence-detail">
               <summary>查看详情</summary>
               ${detail ? `<p>${escapeHtml(detail)}</p>` : ""}
-              ${properties.length ? `<p>${properties.map((item) => `${escapeHtml(item[0])}=${escapeHtml(item[1])}`).join(" · ")}</p>` : ""}
+              ${properties.length ? `<p>${properties.map((item) => `${escapeHtml(item[0])}：${escapeHtml(localizeReviewDetailText(item[1]))}`).join(" · ")}</p>` : ""}
             </details>
           ` : ""}
         </div>
       `;
+    }
+
+    function localizeReviewDetailText(value) {
+      let text = String(value || "").trim();
+      if (!text) return "";
+      const keyLabels = {
+        flash_point: "闪点",
+        boiling_point: "沸点",
+        toxicity: "毒性",
+        corrosive: "腐蚀性",
+        oxidizing: "氧化性",
+        flammable: "易燃性",
+        water_reactive: "遇水反应",
+        explosive_risk: "爆炸风险",
+        evidence: "证据",
+      };
+      text = text.replace(/\b(flash_point|boiling_point|toxicity|corrosive|oxidizing|flammable|water_reactive|explosive_risk|evidence)=/g, (_, key) => `${keyLabels[key] || key}：`);
+      const replacements = [
+        ["No specific acute toxicity data provided.", "未提供明确的急性毒性数据。"],
+        ["No specific acute toxicity data provided", "未提供明确的急性毒性数据"],
+        ["LLM fallback evidence is advisory only and requires manual review.", "LLM 辅助证据仅供参考，需要人工复核。"],
+        ["LLM fallback evidence is advisory only and requires manual review", "LLM 辅助证据仅供参考，需要人工复核"],
+        ["No trusted web evidence was found, so low-confidence LLM knowledge fallback was used.", "未找到可信网页证据，因此使用低置信度的 LLM 知识兜底。"],
+        ["No trusted web evidence was found", "未找到可信网页证据"],
+        ["No web evidence found.", "未找到网页证据。"],
+        ["Summary is based on conservative LLM fallback.", "摘要基于保守的 LLM 兜底判断。"],
+        ["Based on general chemical knowledge", "根据通用化学知识"],
+        ["it is expected to be", "预计为"],
+        ["It is likely highly soluble in water", "可能高度溶于水"],
+        ["due to its ionic nature and polar sulfonate group", "因为其离子特性和极性磺酸基"],
+        ["It is probably hygroscopic.", "可能具有吸湿性。"],
+        ["Its melting point is uncertain", "熔点不确定"],
+        ["white to off-white crystalline solid or powder", "白色至类白色结晶固体或粉末"],
+        ["at room temperature", "在室温下"],
+      ];
+      replacements.forEach(([source, target]) => {
+        text = text.split(source).join(target);
+      });
+      return text;
     }
 
     function renderReviewRows() {

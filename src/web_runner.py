@@ -1276,6 +1276,7 @@ class DateSortKey:
 
 def build_review_queue_payload(path: Path) -> dict[str, Any]:
     frame = pd.read_excel(path, dtype=str).fillna("")
+    settings = load_settings()
 
     def first_existing(row: pd.Series, columns: list[str]) -> str:
         for column in columns:
@@ -1366,6 +1367,8 @@ def build_review_queue_payload(path: Path) -> dict[str, Any]:
     for _, row in pending_frame.iterrows():
         reason = first_existing(row, ["reason", "原因", "复核原因", "manual_review_reason"])
         display_summary = review_display_summary_from_row(row, reason=reason)
+        suggested_category = first_existing(row, ["suggested_category"])
+        mapped_suggested_category = to_erp_property(suggested_category, settings) or suggested_category
         preview.append(
             {
                 "review_key": first_existing(row, ["_review_key"]),
@@ -1381,7 +1384,7 @@ def build_review_queue_payload(path: Path) -> dict[str, Any]:
                 "reason": natural_reason(reason),
                 "reason_full": reason,
                 "status": first_existing(row, ["status", "状态", "处理状态"]) or "pending",
-                "suggested_category": first_existing(row, ["suggested_category"]),
+                "suggested_category": mapped_suggested_category,
                 "classification_confidence": first_existing(row, ["classification_confidence"]),
                 "property_summary": first_existing(row, ["property_summary"]),
                 "evidence_source_type": first_existing(row, ["evidence_source_type"]),

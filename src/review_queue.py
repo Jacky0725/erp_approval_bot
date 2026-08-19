@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Any
 
 import pandas as pd
@@ -465,6 +466,7 @@ def review_display_summary(
     source_confidence = str(evidence_fields.get("source_confidence") or search_result.get("source_confidence") or "").strip()
     llm_confidence = str(evidence_fields.get("llm_confidence") or search_result.get("llm_confidence") or "").strip()
     raw_reason = " ".join(str(value or "") for value in (reason, search_result.get("failure_reason"), evidence_fields.get("property_summary")))
+    detail_reason = " ".join(str(value or "") for value in (reason, search_result.get("failure_reason")))
     text_for_salt_check = " ".join(
         str(value or "")
         for value in (
@@ -490,14 +492,17 @@ def review_display_summary(
     detail_parts = []
     if evidence_fields.get("property_summary"):
         property_summary = str(evidence_fields.get("property_summary"))
-        detail_parts.append(_compact_error(property_summary, limit=320) if _llm_failed(property_summary) else property_summary)
+        if _llm_failed(property_summary):
+            detail_parts.append(_compact_error(property_summary, limit=320))
+        else:
+            detail_parts.append(localize_review_detail_text(property_summary))
     if cas_correction_applied:
         detail_parts.append(
             f"原 CAS：{original_erp_cas or '-'}；修正 CAS：{corrected_cas or '-'}；"
             f"来源：{evidence_fields.get('cas_correction_source') or source or '-'}"
         )
-    if raw_reason.strip():
-        detail_parts.append(_compact_error(raw_reason, limit=320))
+    if detail_reason.strip():
+        detail_parts.append(localize_review_detail_text(_compact_error(detail_reason, limit=320)))
     detail_summary = " | ".join(part for part in detail_parts if part)
 
     if cas_correction_applied and corrected_cas:
@@ -657,6 +662,63 @@ def _compact_error(text: str, limit: int = 220) -> str:
     if len(compact) <= limit:
         return compact
     return compact[:limit].rstrip() + "..."
+
+
+def localize_review_detail_text(text: Any) -> str:
+    detail = str(text or "").strip()
+    if not detail:
+        return ""
+
+    key_labels = {
+        "flash_point": "闪点",
+        "boiling_point": "沸点",
+        "toxicity": "毒性",
+        "corrosive": "腐蚀性",
+        "oxidizing": "氧化性",
+        "flammable": "易燃性",
+        "water_reactive": "遇水反应",
+        "explosive_risk": "爆炸风险",
+        "evidence": "证据",
+    }
+
+    value_replacements = [
+        ("No specific acute toxicity data provided.", "未提供明确的急性毒性数据。"),
+        ("No specific acute toxicity data provided", "未提供明确的急性毒性数据"),
+        ("LLM fallback evidence is advisory only and requires manual review.", "LLM 辅助证据仅供参考，需要人工复核。"),
+        ("LLM fallback evidence is advisory only and requires manual review", "LLM 辅助证据仅供参考，需要人工复核"),
+        ("Chemsrc 和 ChemicalBook 均查询失败或无有效结果。", "Chemsrc 和 ChemicalBook 均查询失败或无有效结果。"),
+        ("No trusted web evidence was found, so low-confidence LLM knowledge fallback was used.", "未找到可信网页证据，因此使用低置信度的 LLM 知识兜底。"),
+        ("No trusted web evidence was found", "未找到可信网页证据"),
+        ("No web evidence found.", "未找到网页证据。"),
+        ("Summary is based on conservative LLM fallback.", "摘要基于保守的 LLM 兜底判断。"),
+        ("Based on general chemical knowledge", "根据通用化学知识"),
+        ("it is expected to be", "预计为"),
+        ("It is likely highly soluble in water", "可能高度溶于水"),
+        ("due to its ionic nature and polar sulfonate group", "因为其离子特性和极性磺酸基"),
+        ("It is probably hygroscopic.", "可能具有吸湿性。"),
+        ("Its melting point is uncertain", "熔点不确定"),
+        ("white to off-white crystalline solid or powder", "白色至类白色结晶固体或粉末"),
+        ("at room temperature", "在室温下"),
+    ]
+
+    def localize_value(value: str) -> str:
+        localized = value.strip()
+        for source, target in value_replacements:
+            localized = localized.replace(source, target)
+        return localized
+
+    parts = []
+    for raw_part in re.split(r"\s*\|\s*", detail):
+        part = raw_part.strip()
+        if not part:
+            continue
+        if "=" in part:
+            key, value = part.split("=", 1)
+            label = key_labels.get(key.strip(), key.strip())
+            parts.append(f"{label}：{localize_value(value)}")
+        else:
+            parts.append(localize_value(part))
+    return "；".join(parts)
 
 
 def _truthy(value: Any) -> bool:
