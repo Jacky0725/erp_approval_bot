@@ -22,13 +22,19 @@ from reagent_memory import ReagentMemory  # noqa: E402
 class FakeWebDav:
     def __init__(self) -> None:
         self.files: dict[str, bytes] = {}
+        self.dirs: set[str] = set()
         self.methods: list[tuple[str, str]] = []
 
     def request(self, method: str, url: str, data: bytes | None, headers: dict[str, str]) -> WebDavResponse:
         self.methods.append((method, url))
         if "Authorization" not in headers:
             raise AssertionError("missing auth header")
+        if method == "PROPFIND":
+            if url in self.dirs:
+                return WebDavResponse(207, {}, b"")
+            raise MemorySyncError("not found", status_code=404)
         if method == "MKCOL":
+            self.dirs.add(url)
             return WebDavResponse(201, {}, b"")
         if method == "PUT":
             self.files[url] = data or b""
@@ -151,6 +157,27 @@ class MemorySyncTest(unittest.TestCase):
 
         with self.assertRaisesRegex(MemorySyncError, "用户名或应用密码"):
             self.service.test_connection()
+
+    def test_missing_webdav_ancestor_is_not_ignored(self) -> None:
+        def request(method: str, url: str, data: bytes | None, headers: dict[str, str]) -> WebDavResponse:
+            if method == "PROPFIND":
+                raise MemorySyncError("not found", status_code=404)
+            if method == "MKCOL":
+                raise MemorySyncError(
+                    "WebDAV 请求失败（409）：<s:exception>AncestorsNotFound</s:exception>",
+                    status_code=409,
+                )
+            raise AssertionError(f"unexpected method {method}")
+
+        service = MemorySyncService(
+            root_dir=self.root,
+            settings=self.settings,
+            request_func=request,
+            now_func=lambda: datetime(2026, 8, 20, 10, 3, 10),
+        )
+
+        with self.assertRaisesRegex(MemorySyncError, "父目录不存在"):
+            service.test_connection()
 
 
 if __name__ == "__main__":

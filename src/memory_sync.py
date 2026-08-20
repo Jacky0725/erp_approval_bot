@@ -333,15 +333,37 @@ class MemorySyncService:
         current = ""
         for segment in segments:
             current = f"{current}/{segment}" if current else segment
-            self._mkcol(current)
-        self._mkcol(f"{self._remote_dir_path()}/versions")
+            self._ensure_remote_dir(current)
+        self._ensure_remote_dir(f"{self._remote_dir_path()}/versions")
+
+    def _ensure_remote_dir(self, relative: str) -> None:
+        if self._remote_exists(relative):
+            return
+        self._mkcol(relative)
 
     def _mkcol(self, relative: str) -> None:
         try:
             self._request("MKCOL", self._remote_url(relative), None, {})
         except MemorySyncError as error:
-            if error.status_code not in {405, 409}:
-                raise
+            if error.status_code == 405 or (error.status_code == 409 and self._remote_exists(relative)):
+                return
+            if error.status_code == 409 and _looks_like_missing_ancestor(str(error)):
+                raise MemorySyncError(
+                    "WebDAV 远端目录创建失败：父目录不存在。请检查 WebDAV 地址是否为 "
+                    "https://dav.jianguoyun.com/dav/，远端目录不要填写不存在的多级路径；"
+                    "建议先使用 reagent-approval-bot，或在坚果云中手动创建父目录。",
+                    status_code=409,
+                ) from error
+            raise
+
+    def _remote_exists(self, relative: str) -> bool:
+        try:
+            self._request("PROPFIND", self._remote_url(relative), None, {"Depth": "0"})
+            return True
+        except MemorySyncError as error:
+            if error.status_code in {404, 409}:
+                return False
+            raise
 
     def _delete_remote(self, relative: str) -> None:
         try:
@@ -446,3 +468,8 @@ def _parse_iso(value: Any) -> datetime:
         return datetime.fromisoformat(text)
     except ValueError:
         return datetime.min
+
+
+def _looks_like_missing_ancestor(message: str) -> bool:
+    lowered = message.lower()
+    return "ancestorsnotfound" in lowered or "ancestors of this location" in lowered
