@@ -115,6 +115,15 @@ class MemorySyncTest(unittest.TestCase):
         self.assertEqual(manifest["latest"]["records"], 1)
         self.assertEqual(self.service.read_state()["last_remote_version"], "20260820_100310")
 
+    def test_upload_creates_versions_directory_under_remote_dir_once(self) -> None:
+        self.service.upload()
+
+        created_dirs = [url for method, url in self.fake.methods if method == "MKCOL"]
+        self.assertIn("https://dav.example.test/dav/approval", created_dirs)
+        self.assertIn("https://dav.example.test/dav/approval/memory", created_dirs)
+        self.assertIn("https://dav.example.test/dav/approval/memory/versions", created_dirs)
+        self.assertFalse(any("/approval/memory/approval" in url for url in created_dirs))
+
     def test_snapshot_is_valid_sqlite(self) -> None:
         snapshot = self.service.create_sqlite_snapshot(self.root / "data" / "reagent_memory.sqlite")
         try:

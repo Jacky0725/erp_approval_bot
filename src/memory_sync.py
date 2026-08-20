@@ -334,19 +334,17 @@ class MemorySyncService:
 
     def _ensure_remote_dirs(self) -> None:
         segments = self._remote_dir_segments()
-        current = ""
-        for segment in segments:
-            current = f"{current}/{segment}" if current else segment
-            self._ensure_remote_dir(current)
-        self._ensure_remote_dir(f"{self._remote_dir_path()}/versions")
+        for index in range(1, len(segments) + 1):
+            self._ensure_remote_dir_path(segments[:index])
+        self._ensure_remote_dir_path([*segments, "versions"])
 
-    def _ensure_remote_dir(self, relative: str) -> None:
-        if self._remote_exists(relative):
+    def _ensure_remote_dir_path(self, parts: list[str]) -> None:
+        if self._remote_path_exists(parts):
             return
         last_error: MemorySyncError | None = None
         for attempt in range(4):
             try:
-                self._mkcol(relative)
+                self._mkcol_path(parts)
                 return
             except MemorySyncError as error:
                 last_error = error
@@ -363,17 +361,17 @@ class MemorySyncService:
         if last_error:
             raise last_error
 
-    def _mkcol(self, relative: str) -> None:
+    def _mkcol_path(self, parts: list[str]) -> None:
         try:
-            self._request("MKCOL", self._remote_url(relative), None, {})
+            self._request("MKCOL", self._remote_url_from_parts(parts), None, {})
         except MemorySyncError as error:
-            if error.status_code == 405 or (error.status_code == 409 and self._remote_exists(relative)):
+            if error.status_code == 405 or (error.status_code == 409 and self._remote_path_exists(parts)):
                 return
             raise
 
-    def _remote_exists(self, relative: str) -> bool:
+    def _remote_path_exists(self, parts: list[str]) -> bool:
         try:
-            self._request("PROPFIND", self._remote_url(relative), None, {"Depth": "0"})
+            self._request("PROPFIND", self._remote_url_from_parts(parts), None, {"Depth": "0"})
             return True
         except MemorySyncError as error:
             if error.status_code in {404, 409}:
@@ -388,8 +386,11 @@ class MemorySyncService:
                 raise
 
     def _remote_url(self, relative: str) -> str:
-        base = self.config["base_url"].rstrip("/") + "/"
         parts = [*self._remote_dir_segments(), *[part for part in relative.split("/") if part]]
+        return self._remote_url_from_parts(parts)
+
+    def _remote_url_from_parts(self, parts: list[str]) -> str:
+        base = self.config["base_url"].rstrip("/") + "/"
         encoded = "/".join(urllib.parse.quote(part.strip("/")) for part in parts)
         return urllib.parse.urljoin(base, encoded)
 
