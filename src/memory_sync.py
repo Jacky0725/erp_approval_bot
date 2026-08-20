@@ -5,6 +5,7 @@ import os
 import shutil
 import sqlite3
 import tempfile
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -339,7 +340,25 @@ class MemorySyncService:
     def _ensure_remote_dir(self, relative: str) -> None:
         if self._remote_exists(relative):
             return
-        self._mkcol(relative)
+        last_error: MemorySyncError | None = None
+        for attempt in range(4):
+            try:
+                self._mkcol(relative)
+                return
+            except MemorySyncError as error:
+                last_error = error
+                if error.status_code != 409 or not _looks_like_missing_ancestor(str(error)):
+                    raise
+                if attempt == 3:
+                    raise MemorySyncError(
+                        "WebDAV 远端目录创建失败：父目录不存在。请检查 WebDAV 地址是否为 "
+                        "https://dav.jianguoyun.com/dav/，远端目录不要填写不存在的多级路径；"
+                        "建议先使用 reagent-approval-bot，或在坚果云中手动创建父目录。",
+                        status_code=409,
+                    ) from error
+                time.sleep(0.5)
+        if last_error:
+            raise last_error
 
     def _mkcol(self, relative: str) -> None:
         try:
@@ -347,13 +366,6 @@ class MemorySyncService:
         except MemorySyncError as error:
             if error.status_code == 405 or (error.status_code == 409 and self._remote_exists(relative)):
                 return
-            if error.status_code == 409 and _looks_like_missing_ancestor(str(error)):
-                raise MemorySyncError(
-                    "WebDAV 远端目录创建失败：父目录不存在。请检查 WebDAV 地址是否为 "
-                    "https://dav.jianguoyun.com/dav/，远端目录不要填写不存在的多级路径；"
-                    "建议先使用 reagent-approval-bot，或在坚果云中手动创建父目录。",
-                    status_code=409,
-                ) from error
             raise
 
     def _remote_exists(self, relative: str) -> bool:

@@ -7,6 +7,7 @@ from contextlib import closing
 from datetime import datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 import yaml
 
@@ -159,10 +160,13 @@ class MemorySyncTest(unittest.TestCase):
             self.service.test_connection()
 
     def test_missing_webdav_ancestor_is_not_ignored(self) -> None:
+        attempts = {"mkcol": 0}
+
         def request(method: str, url: str, data: bytes | None, headers: dict[str, str]) -> WebDavResponse:
             if method == "PROPFIND":
                 raise MemorySyncError("not found", status_code=404)
             if method == "MKCOL":
+                attempts["mkcol"] += 1
                 raise MemorySyncError(
                     "WebDAV 请求失败（409）：<s:exception>AncestorsNotFound</s:exception>",
                     status_code=409,
@@ -176,8 +180,40 @@ class MemorySyncTest(unittest.TestCase):
             now_func=lambda: datetime(2026, 8, 20, 10, 3, 10),
         )
 
-        with self.assertRaisesRegex(MemorySyncError, "父目录不存在"):
+        with patch("memory_sync.time.sleep", return_value=None), self.assertRaisesRegex(MemorySyncError, "父目录不存在"):
             service.test_connection()
+        self.assertEqual(attempts["mkcol"], 4)
+
+    def test_missing_webdav_ancestor_retries_before_success(self) -> None:
+        attempts = {"mkcol": 0}
+
+        def request(method: str, url: str, data: bytes | None, headers: dict[str, str]) -> WebDavResponse:
+            if method == "PROPFIND":
+                raise MemorySyncError("not found", status_code=404)
+            if method == "MKCOL":
+                attempts["mkcol"] += 1
+                if attempts["mkcol"] < 3:
+                    raise MemorySyncError(
+                        "WebDAV 请求失败（409）：<s:exception>AncestorsNotFound</s:exception>",
+                        status_code=409,
+                    )
+                return WebDavResponse(201, {}, b"")
+            if method == "GET":
+                raise MemorySyncError("not found", status_code=404)
+            raise AssertionError(f"unexpected method {method}")
+
+        service = MemorySyncService(
+            root_dir=self.root,
+            settings=self.settings,
+            request_func=request,
+            now_func=lambda: datetime(2026, 8, 20, 10, 3, 10),
+        )
+
+        with patch("memory_sync.time.sleep", return_value=None):
+            result = service.test_connection()
+
+        self.assertTrue(result["ok"])
+        self.assertGreaterEqual(attempts["mkcol"], 3)
 
 
 if __name__ == "__main__":
