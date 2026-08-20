@@ -159,6 +159,15 @@ class MemorySyncTest(unittest.TestCase):
         with self.assertRaisesRegex(MemorySyncError, "用户名或应用密码"):
             self.service.test_connection()
 
+    def test_missing_manifest_is_empty_remote_not_connection_failure(self) -> None:
+        result = self.service.test_connection()
+        status = self.service.status(check_remote=True)
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(status["ok"])
+        self.assertEqual(status["remote"], {})
+        self.assertIn("尚未上传", status["message"])
+
     def test_missing_webdav_ancestor_is_not_ignored(self) -> None:
         attempts = {"mkcol": 0}
 

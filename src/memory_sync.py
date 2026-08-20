@@ -112,11 +112,14 @@ class MemorySyncService:
         }
         if check_remote and self.config["enabled"] and payload["username_configured"] and payload["password_configured"]:
             try:
-                manifest = self.fetch_manifest()
+                manifest = self.fetch_manifest(default={})
                 latest = (manifest or {}).get("latest") or {}
                 payload["remote"] = latest
-                payload["remote_newer"] = self._is_remote_newer(latest, local)
-                payload["conflict"] = self._has_possible_conflict(latest, local, state)
+                if latest:
+                    payload["remote_newer"] = self._is_remote_newer(latest, local)
+                    payload["conflict"] = self._has_possible_conflict(latest, local, state)
+                else:
+                    payload["message"] = "云端尚未上传试剂库，可先执行上传本地试剂库。"
             except MemorySyncError as error:
                 payload["ok"] = False
                 payload["message"] = str(error)
