@@ -19,6 +19,7 @@ from llm_providers import fetch_provider_models, provider_options
 from dingtalk_stream_bot import DingTalkStreamBot
 from scheduler import ApprovalScheduler
 from update_checker import check_for_update, current_process_is_frozen, download_update, launch_update_package
+from memory_sync import MemorySyncError
 from web_runner import (
     ENV_PATH,
     ROOT_DIR,
@@ -32,13 +33,18 @@ from web_runner import (
     load_settings,
     manager,
     memory_summary,
+    memory_sync_status,
+    memory_sync_versions,
     normalize_web_write_mode,
     current_run_lines,
     review_queue_summary,
     runtime_config_snapshot,
     save_runtime_config,
+    test_memory_sync_connection,
     todo_tasks_summary,
     update_memory_record,
+    upload_memory_sync,
+    download_memory_sync,
 )
 from runtime_paths import source_root
 
@@ -342,6 +348,49 @@ def api_memory_import_suggestions() -> JSONResponse:
     return JSONResponse(import_approval_suggestions_to_memory())
 
 
+@app.get("/api/memory/sync/status")
+def api_memory_sync_status(check_remote: bool = False) -> JSONResponse:
+    return JSONResponse(memory_sync_status(check_remote=check_remote))
+
+
+@app.post("/api/memory/sync/test")
+def api_memory_sync_test() -> JSONResponse:
+    try:
+        return JSONResponse(test_memory_sync_connection())
+    except MemorySyncError as error:
+        raise HTTPException(status_code=error.status_code, detail=str(error)) from error
+
+
+@app.post("/api/memory/sync/upload")
+def api_memory_sync_upload() -> JSONResponse:
+    if manager.status().get("running"):
+        raise HTTPException(status_code=409, detail="当前自动化任务正在运行，结束后再上传试剂记忆库。")
+    try:
+        return JSONResponse(upload_memory_sync())
+    except MemorySyncError as error:
+        raise HTTPException(status_code=error.status_code, detail=str(error)) from error
+
+
+@app.post("/api/memory/sync/download")
+def api_memory_sync_download(force: Annotated[str, Form()] = "") -> JSONResponse:
+    if manager.status().get("running"):
+        raise HTTPException(status_code=409, detail="当前自动化任务正在运行，结束后再下载试剂记忆库。")
+    try:
+        return JSONResponse(download_memory_sync(force=normalize_checkbox(force) == "true"))
+    except MemorySyncError as error:
+        detail = error.payload or {"message": str(error)}
+        detail.setdefault("message", str(error))
+        raise HTTPException(status_code=error.status_code, detail=detail) from error
+
+
+@app.get("/api/memory/sync/versions")
+def api_memory_sync_versions() -> JSONResponse:
+    try:
+        return JSONResponse(memory_sync_versions())
+    except MemorySyncError as error:
+        raise HTTPException(status_code=error.status_code, detail=str(error)) from error
+
+
 @app.post("/api/memory/delete_conflicting")
 def api_memory_delete_conflicting() -> JSONResponse:
     if manager.status().get("running"):
@@ -426,6 +475,14 @@ def api_settings(
     dingtalk_stream_client_id: Annotated[str, Form()] = "",
     dingtalk_stream_client_secret: Annotated[str, Form()] = "",
     dingtalk_stream_api_token: Annotated[str, Form()] = "",
+    memory_sync_enabled: Annotated[str, Form()] = "",
+    memory_sync_base_url: Annotated[str, Form()] = "",
+    memory_sync_remote_dir: Annotated[str, Form()] = "",
+    memory_sync_username: Annotated[str, Form()] = "",
+    memory_sync_password: Annotated[str, Form()] = "",
+    memory_sync_keep_versions: Annotated[str, Form()] = "10",
+    memory_sync_auto_upload_after_memory_change: Annotated[str, Form()] = "",
+    memory_sync_check_remote_on_startup: Annotated[str, Form()] = "",
     update_token: Annotated[str, Form()] = "",
     llm_provider: Annotated[str, Form()] = "siliconflow",
     llm_base_url: Annotated[str, Form()] = "",
@@ -471,6 +528,16 @@ def api_settings(
             "dingtalk_stream_client_id": dingtalk_stream_client_id,
             "dingtalk_stream_client_secret": dingtalk_stream_client_secret,
             "dingtalk_stream_api_token": dingtalk_stream_api_token,
+            "memory_sync_enabled": normalize_checkbox(memory_sync_enabled),
+            "memory_sync_base_url": memory_sync_base_url,
+            "memory_sync_remote_dir": memory_sync_remote_dir,
+            "memory_sync_username": memory_sync_username,
+            "memory_sync_password": memory_sync_password,
+            "memory_sync_keep_versions": memory_sync_keep_versions,
+            "memory_sync_auto_upload_after_memory_change": normalize_checkbox(
+                memory_sync_auto_upload_after_memory_change
+            ),
+            "memory_sync_check_remote_on_startup": normalize_checkbox(memory_sync_check_remote_on_startup),
             "update_token": update_token,
             "llm_provider": llm_provider,
             "llm_base_url": llm_base_url,

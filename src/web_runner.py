@@ -42,6 +42,7 @@ from category_mapper import (
     to_rule_category,
 )
 from app_info import app_version
+from memory_sync import MemorySyncError, MemorySyncService, memory_sync_config
 from reagent_memory import ReagentMemory
 from review_queue import review_display_summary_from_row
 from runtime_paths import ensure_runtime_layout, runtime_root, source_root
@@ -320,6 +321,7 @@ class AutomationJobManager:
         run_log_path = Path(self._run_log_path) if self._run_log_path else new_run_log_path(action)
         self._run_log_path = str(run_log_path)
         writer = LineBufferWriter(self.lines, [aggregate_log_path, run_log_path])
+        memory_signature_before = memory_file_signature(self.root_dir) if action == "suggestions" else None
 
         try:
             if action == "todo_export":
@@ -352,6 +354,12 @@ class AutomationJobManager:
             writer.write(traceback.format_exc())
         finally:
             writer.close()
+            if (
+                action == "suggestions"
+                and success
+                and memory_signature_before != memory_file_signature(self.root_dir)
+            ):
+                self._auto_upload_memory_after_success()
             with self._lock:
                 self.running = False
                 self.finished_at = datetime.now().isoformat(timespec="seconds")
@@ -629,6 +637,21 @@ class AutomationJobManager:
         except Exception as exc:  # noqa: BLE001 - notification must not block automation
             self._record_notification_failure(f"DingTalk notification failed: {exc}")
 
+    def _auto_upload_memory_after_success(self) -> None:
+        try:
+            result = auto_upload_memory_if_configured(self.root_dir)
+            if result.get("skipped"):
+                return
+            message = result.get("message") or "试剂记忆库自动上传完成。"
+            self._record_notification_failure(f"Memory sync: {message}")
+        except Exception as exc:  # noqa: BLE001 - memory sync must not block automation cleanup
+            try:
+                service = memory_sync_service(self.root_dir)
+                service.update_state(last_error=f"自动上传失败：{exc}")
+            except Exception:
+                pass
+            self._record_notification_failure(f"Memory sync auto upload failed: {exc}")
+
     def _record_notification_failure(self, message: str) -> None:
         self.lines.append(message)
         for path in [LOG_DIR / "web_run_stdout.txt", Path(self._run_log_path) if self._run_log_path else None]:
@@ -658,6 +681,18 @@ def current_run_lines(run_log_path: str | Path | None, *, fallback: list[str] | 
         except OSError:
             pass
     return [repair_display_text(line) for line in (fallback or [])]
+
+
+def memory_file_signature(root_dir: Path = ROOT_DIR) -> tuple[bool, int, int]:
+    try:
+        memory = ReagentMemory.from_settings(load_settings(), root_dir)
+        path = memory.path
+        if not path.exists():
+            return (False, 0, 0)
+        stat = path.stat()
+        return (True, int(stat.st_size), int(stat.st_mtime_ns))
+    except OSError:
+        return (False, 0, 0)
 
 
 def action_label(action: str) -> str:
@@ -1533,10 +1568,17 @@ def confirm_review_item(payload: dict[str, Any], root_dir: Path = ROOT_DIR) -> d
             if memory_added
             else "已确认人工复核项；存在冲突或限制，未设为可自动复用。"
         )
+    sync_result: dict[str, Any] | None = None
+    if memory_added:
+        try:
+            sync_result = auto_upload_memory_if_configured(root_dir)
+        except Exception as error:  # noqa: BLE001 - review confirmation should survive sync failures
+            sync_result = {"ok": False, "message": f"试剂记忆库自动上传失败：{error}"}
     return {
         "confirmed": True,
         "memory_added": bool(memory_added),
         "message": message,
+        "memory_sync": sync_result,
     }
 
 
@@ -1714,6 +1756,54 @@ def delete_conflicting_memory(root_dir: Path = ROOT_DIR) -> dict[str, Any]:
     }
 
 
+def memory_sync_service(root_dir: Path = ROOT_DIR) -> MemorySyncService:
+    load_dotenv(ENV_PATH, override=True)
+    return MemorySyncService(root_dir=root_dir, settings=load_settings())
+
+
+def memory_sync_status(root_dir: Path = ROOT_DIR, *, check_remote: bool | None = None) -> dict[str, Any]:
+    service = memory_sync_service(root_dir)
+    if check_remote is None:
+        check_remote = bool(service.config.get("check_remote_on_startup"))
+    return service.status(check_remote=bool(check_remote))
+
+
+def test_memory_sync_connection(root_dir: Path = ROOT_DIR) -> dict[str, Any]:
+    try:
+        return memory_sync_service(root_dir).test_connection()
+    except MemorySyncError as error:
+        error.payload.setdefault("ok", False)
+        error.payload.setdefault("message", str(error))
+        raise
+
+
+def upload_memory_sync(root_dir: Path = ROOT_DIR) -> dict[str, Any]:
+    return memory_sync_service(root_dir).upload()
+
+
+def download_memory_sync(root_dir: Path = ROOT_DIR, *, force: bool = False) -> dict[str, Any]:
+    return memory_sync_service(root_dir).download(force=force)
+
+
+def memory_sync_versions(root_dir: Path = ROOT_DIR) -> dict[str, Any]:
+    return memory_sync_service(root_dir).versions()
+
+
+def auto_upload_memory_if_configured(root_dir: Path = ROOT_DIR) -> dict[str, Any]:
+    service = memory_sync_service(root_dir)
+    if not service.config.get("enabled") or not service.config.get("auto_upload_after_memory_change"):
+        return {"ok": True, "skipped": True, "message": "试剂库自动上传未启用。"}
+    memory_path = service.memory_path
+    if not memory_path.exists():
+        return {"ok": True, "skipped": True, "message": "本地试剂记忆库不存在，跳过自动上传。"}
+    state = service.read_state()
+    last_upload = str(state.get("last_upload_at") or "")
+    local = service.local_summary()
+    if last_upload and str(local.get("updated_at") or "") <= last_upload:
+        return {"ok": True, "skipped": True, "message": "试剂记忆库无新增变更，跳过自动上传。"}
+    return service.upload()
+
+
 def import_approval_suggestions_to_memory(root_dir: Path = ROOT_DIR) -> dict[str, Any]:
     settings = load_settings()
     memory = ReagentMemory.from_settings(settings, root_dir)
@@ -1838,6 +1928,13 @@ def import_approval_suggestions_to_memory(root_dir: Path = ROOT_DIR) -> dict[str
                 stats["imported"] += 1
             else:
                 stats["conflicts"] += 1
+    if stats["imported"] > 0:
+        try:
+            sync_result = auto_upload_memory_if_configured(root_dir)
+            if not sync_result.get("skipped"):
+                stats["memory_sync"] = sync_result
+        except Exception as error:  # noqa: BLE001 - import result should survive sync failures
+            stats["memory_sync"] = {"ok": False, "message": f"试剂记忆库自动上传失败：{error}"}
     return stats
 
 
@@ -1861,6 +1958,7 @@ def runtime_config_snapshot() -> dict[str, Any]:
     dingtalk_stream = dingtalk_stream_config(settings)
     llm = settings.get("llm", {}) or {}
     app_settings = settings.get("app", {}) or {}
+    sync_config = memory_sync_config(settings)
     mapping = category_mapping_summary(settings, ROOT_DIR)
     provider = get_llm_provider(os.getenv("LLM_PROVIDER") or llm.get("provider") or "siliconflow")
     configured_base_url = os.getenv("LLM_BASE_URL") or (
@@ -1934,6 +2032,16 @@ def runtime_config_snapshot() -> dict[str, Any]:
         "dingtalk_stream_api_token_configured": bool(
             os.getenv(str(dingtalk_stream.get("api_token_env")), "").strip()
         ),
+        "memory_sync_enabled": "true" if sync_config.get("enabled") else "false",
+        "memory_sync_base_url": sync_config.get("base_url", ""),
+        "memory_sync_remote_dir": sync_config.get("remote_dir", ""),
+        "memory_sync_username": os.getenv(str(sync_config.get("username_env") or ""), ""),
+        "memory_sync_password_configured": bool(os.getenv(str(sync_config.get("password_env") or ""), "").strip()),
+        "memory_sync_auto_upload_after_memory_change": (
+            "true" if sync_config.get("auto_upload_after_memory_change") else "false"
+        ),
+        "memory_sync_check_remote_on_startup": "true" if sync_config.get("check_remote_on_startup") else "false",
+        "memory_sync_keep_versions": str(sync_config.get("keep_versions", 10)),
         "llm_provider": provider.id,
         "llm_provider_label": provider.label,
         "llm_provider_options": provider_options(),
@@ -1993,6 +2101,13 @@ def save_runtime_config(form: dict[str, str]) -> dict[str, Any]:
     dingtalk_stream_api_token = form.get("dingtalk_stream_api_token", "").strip()
     if dingtalk_stream_api_token:
         env_updates["DINGTALK_STREAM_API_TOKEN"] = dingtalk_stream_api_token
+
+    memory_sync_username = form.get("memory_sync_username", "").strip()
+    if memory_sync_username:
+        env_updates["JIANGUOYUN_WEBDAV_USER"] = memory_sync_username
+    memory_sync_password = form.get("memory_sync_password", "").strip()
+    if memory_sync_password:
+        env_updates["JIANGUOYUN_WEBDAV_PASSWORD"] = memory_sync_password
 
     update_env_file(ENV_PATH, env_updates)
 
@@ -2065,6 +2180,32 @@ def save_runtime_config(form: dict[str, str]) -> dict[str, Any]:
     stream["client_secret_env"] = "DINGTALK_STREAM_CLIENT_SECRET"
     stream["api_token_env"] = "DINGTALK_STREAM_API_TOKEN"
     stream["require_at_in_group"] = True
+
+    memory_sync = settings.setdefault("memory_sync", {})
+    memory_sync["enabled"] = form.get("memory_sync_enabled", "false").strip().lower() == "true"
+    memory_sync["provider"] = "webdav"
+    memory_sync["base_url"] = (
+        form.get("memory_sync_base_url", "").strip()
+        or memory_sync.get("base_url")
+        or "https://dav.jianguoyun.com/dav/"
+    )
+    memory_sync["remote_dir"] = (
+        form.get("memory_sync_remote_dir", "").strip()
+        or memory_sync.get("remote_dir")
+        or "reagent-approval-bot"
+    )
+    memory_sync["username_env"] = "JIANGUOYUN_WEBDAV_USER"
+    memory_sync["password_env"] = "JIANGUOYUN_WEBDAV_PASSWORD"
+    memory_sync["keep_versions"] = coerce_int(
+        form.get("memory_sync_keep_versions", ""),
+        memory_sync.get("keep_versions", 10),
+    )
+    memory_sync["auto_upload_after_memory_change"] = (
+        form.get("memory_sync_auto_upload_after_memory_change", "false").strip().lower() == "true"
+    )
+    memory_sync["check_remote_on_startup"] = (
+        form.get("memory_sync_check_remote_on_startup", "false").strip().lower() == "true"
+    )
 
     save_settings(settings)
 

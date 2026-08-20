@@ -165,6 +165,44 @@
         <section class="settings-section update-section">
           <div class="settings-section-head">
             <div>
+              <h3>试剂库同步</h3>
+              <p>使用坚果云 WebDAV 上传和下载本地试剂记忆库快照；下载前会自动备份本地库。</p>
+            </div>
+          </div>
+          <div class="update-panel memory-sync-panel">
+            <div class="update-status-grid">
+              <span>本地记录 <strong id="memorySyncLocalRecords">-</strong></span>
+              <span>本地更新时间 <strong id="memorySyncLocalUpdated">-</strong></span>
+              <span>最近上传 <strong id="memorySyncLastUpload">-</strong></span>
+              <span>最近下载 <strong id="memorySyncLastDownload">-</strong></span>
+              <span>云端版本 <strong id="memorySyncRemoteVersion">-</strong></span>
+              <span>同步状态 <strong id="memorySyncStateText">未检查</strong></span>
+            </div>
+            <div class="settings-grid settings-grid-memory-sync">
+              <label class="check settings-check-field"><input type="checkbox" name="memory_sync_enabled" value="true"> 启用试剂库同步</label>
+              <label>WebDAV 地址 <input name="memory_sync_base_url" value="{{ runtime.memory_sync_base_url }}" placeholder="https://dav.jianguoyun.com/dav/"></label>
+              <label>远端目录 <input name="memory_sync_remote_dir" value="{{ runtime.memory_sync_remote_dir }}" placeholder="reagent-approval-bot"></label>
+              <label>用户名 <input name="memory_sync_username" value="{{ runtime.memory_sync_username }}" placeholder="坚果云账号邮箱"></label>
+              <label>应用密码 <input name="memory_sync_password" type="password" placeholder="{% if runtime.memory_sync_password_configured %}已配置，留空则不修改{% else %}坚果云 WebDAV 应用密码{% endif %}"></label>
+              <label>保留版本数 <input name="memory_sync_keep_versions" value="{{ runtime.memory_sync_keep_versions }}"></label>
+            </div>
+            <div class="switches settings-policy-strip">
+              <label class="check"><input type="checkbox" name="memory_sync_auto_upload_after_memory_change" value="true"> 任务结束后自动上传试剂库</label>
+              <label class="check"><input type="checkbox" name="memory_sync_check_remote_on_startup" value="true"> 打开设置时检查云端新版</label>
+            </div>
+            <div class="update-actions">
+              <button type="button" id="testMemorySyncButton">测试连接</button>
+              <button type="button" id="uploadMemorySyncButton" class="primary">上传本地试剂库</button>
+              <button type="button" id="downloadMemorySyncButton">下载云端试剂库</button>
+              <button type="button" id="forceDownloadMemorySyncButton" class="danger-button" hidden>强制覆盖本地库</button>
+            </div>
+            <p id="memorySyncMessage" class="field-note">建议使用坚果云应用密码；同步文件不进入 Git 仓库。</p>
+          </div>
+        </section>
+
+        <section class="settings-section update-section">
+          <div class="settings-section-head">
+            <div>
               <h3>程序更新</h3>
               <p>通过 GitHub Releases 检查新版安装包，下载后自动覆盖安装并保留本地配置与数据库。</p>
             </div>

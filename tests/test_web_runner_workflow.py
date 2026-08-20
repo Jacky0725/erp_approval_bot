@@ -21,6 +21,7 @@ from web_runner import (
     workflow_summary,
 )
 import web_app
+from memory_sync import MemorySyncError
 from web_app import artifact_path_for_download, run_options, web_ui_restart_command
 
 
@@ -324,6 +325,42 @@ class WorkflowSummaryTest(unittest.TestCase):
         self.assertIn('name="app_dry_run"', settings_text)
         self.assertIn("updateDryRunUi", dashboard_js)
         self.assertIn('setCheckbox(settingsForm, "app_dry_run"', dashboard_js)
+
+    def test_memory_sync_controls_are_visible_in_settings_ui(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        settings_text = (root / "src" / "templates" / "partials" / "settings.html").read_text(encoding="utf-8")
+        dashboard_js = (root / "src" / "static" / "dashboard.js").read_text(encoding="utf-8")
+
+        self.assertIn("试剂库同步", settings_text)
+        self.assertIn('name="memory_sync_enabled"', settings_text)
+        self.assertIn('name="memory_sync_base_url"', settings_text)
+        self.assertIn('id="uploadMemorySyncButton"', settings_text)
+        self.assertIn("/api/memory/sync/upload", dashboard_js)
+        self.assertIn("/api/memory/sync/download", dashboard_js)
+        self.assertIn('setCheckbox(settingsForm, "memory_sync_enabled"', dashboard_js)
+
+    def test_memory_sync_api_surfaces_clear_configuration_errors(self) -> None:
+        with patch("web_app.test_memory_sync_connection", side_effect=MemorySyncError("WebDAV 用户名或应用密码未配置。")):
+            with self.assertRaises(web_app.HTTPException) as context:
+                web_app.api_memory_sync_test()
+
+        self.assertEqual(context.exception.status_code, 400)
+        self.assertIn("应用密码", str(context.exception.detail))
+
+    def test_memory_sync_download_conflict_uses_409_response(self) -> None:
+        with patch(
+            "web_app.download_memory_sync",
+            side_effect=MemorySyncError(
+                "本地和云端试剂库可能存在冲突，未自动覆盖本地库。",
+                status_code=409,
+                payload={"conflict": True},
+            ),
+        ):
+            with self.assertRaises(web_app.HTTPException) as context:
+                web_app.api_memory_sync_download()
+
+        self.assertEqual(context.exception.status_code, 409)
+        self.assertTrue(context.exception.detail["conflict"])
 
     def test_web_write_mode_normalizes_retired_values(self) -> None:
         self.assertEqual(normalize_web_write_mode("save_one"), "disabled")

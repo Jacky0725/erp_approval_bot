@@ -134,6 +134,13 @@
     setCheckbox(settingsForm, "dingtalk_notification_enabled", initialRuntime.dingtalk_notification_enabled);
     setCheckbox(settingsForm, "dingtalk_at_all", initialRuntime.dingtalk_at_all || "true");
     setCheckbox(settingsForm, "dingtalk_stream_enabled", initialRuntime.dingtalk_stream_enabled);
+    setCheckbox(settingsForm, "memory_sync_enabled", initialRuntime.memory_sync_enabled);
+    setCheckbox(
+      settingsForm,
+      "memory_sync_auto_upload_after_memory_change",
+      initialRuntime.memory_sync_auto_upload_after_memory_change
+    );
+    setCheckbox(settingsForm, "memory_sync_check_remote_on_startup", initialRuntime.memory_sync_check_remote_on_startup);
     setSelectValue(settingsForm, "scheduler_mode", initialRuntime.scheduler_mode);
     setSelectValue(settingsForm, "scheduler_approval_write_mode", initialRuntime.scheduler_approval_write_mode);
     setText("#writeModeText", approvalWriteModeLabel(initialRuntime.approval_write_mode));
@@ -247,6 +254,31 @@
 
     if (document.querySelector("#checkUpdateButton")) {
       window.setTimeout(() => checkForUpdate(), 800);
+    }
+
+    on("#testMemorySyncButton", "click", async () => {
+      await runMemorySyncAction("/api/memory/sync/test", "正在测试连接...");
+    });
+
+    on("#uploadMemorySyncButton", "click", async () => {
+      if (!confirm("确认上传本地试剂记忆库到坚果云？")) return;
+      await runMemorySyncAction("/api/memory/sync/upload", "正在上传试剂库...");
+    });
+
+    on("#downloadMemorySyncButton", "click", async () => {
+      if (!confirm("确认下载云端试剂记忆库？下载前会自动备份本地库。")) return;
+      await runMemorySyncAction("/api/memory/sync/download", "正在下载试剂库...");
+    });
+
+    on("#forceDownloadMemorySyncButton", "click", async () => {
+      if (!confirm("确认强制用云端试剂库覆盖本地库？本地库会先备份。")) return;
+      const data = new FormData();
+      data.set("force", "true");
+      await runMemorySyncAction("/api/memory/sync/download", "正在强制下载试剂库...", data);
+    });
+
+    if (document.querySelector("#memorySyncStateText")) {
+      refreshMemorySyncStatus(Boolean(initialRuntime.memory_sync_check_remote_on_startup === "true"));
     }
 
     on("#selectAllTodos", "click", () => {
@@ -469,13 +501,94 @@
       settingsForm.querySelector('[name="llm_api_key"]').value = "";
       settingsForm.querySelector('[name="dingtalk_stream_client_secret"]').value = "";
       settingsForm.querySelector('[name="dingtalk_stream_api_token"]').value = "";
+      settingsForm.querySelector('[name="memory_sync_password"]').value = "";
       settingsForm.querySelector('[name="update_token"]').value = "";
       await refreshStatus();
+      await refreshMemorySyncStatus(false);
     });
 
     function safe(value, fallback = "-") {
       if (value === null || value === undefined || value === "") return fallback;
       return String(value);
+    }
+
+    function apiErrorMessage(payload) {
+      const detail = payload?.detail;
+      if (typeof detail === "string") return detail;
+      if (detail?.message) return detail.message;
+      return payload?.message || "操作失败。";
+    }
+
+    function setMemorySyncMessage(message, failed = false) {
+      setText("#memorySyncMessage", message || "试剂库同步状态已更新。");
+      const element = document.querySelector("#memorySyncMessage");
+      if (element) element.classList.toggle("sync-failed", Boolean(failed));
+    }
+
+    function renderMemorySyncStatus(payload) {
+      const local = payload?.local || {};
+      const state = payload?.state || {};
+      const remote = payload?.remote || {};
+      setText("#memorySyncLocalRecords", safe(local.records, "0"));
+      setText("#memorySyncLocalUpdated", safe(local.updated_at));
+      setText("#memorySyncLastUpload", safe(state.last_upload_at));
+      setText("#memorySyncLastDownload", safe(state.last_download_at));
+      setText("#memorySyncRemoteVersion", safe(remote.version || state.last_remote_version));
+      if (payload?.conflict) {
+        setText("#memorySyncStateText", "可能冲突");
+        document.querySelector("#forceDownloadMemorySyncButton")?.removeAttribute("hidden");
+      } else if (payload?.remote_newer) {
+        setText("#memorySyncStateText", "云端较新");
+        document.querySelector("#forceDownloadMemorySyncButton")?.setAttribute("hidden", "hidden");
+      } else if (payload?.ok === false) {
+        setText("#memorySyncStateText", "检查失败");
+      } else {
+        setText("#memorySyncStateText", payload?.enabled ? "已启用" : "未启用");
+        document.querySelector("#forceDownloadMemorySyncButton")?.setAttribute("hidden", "hidden");
+      }
+      if (payload?.message) setMemorySyncMessage(payload.message, payload.ok === false);
+    }
+
+    async function refreshMemorySyncStatus(checkRemote = false) {
+      if (!document.querySelector("#memorySyncStateText")) return;
+      try {
+        const response = await fetch(`/api/memory/sync/status?check_remote=${checkRemote ? "true" : "false"}`);
+        const payload = await response.json();
+        renderMemorySyncStatus(payload);
+      } catch (error) {
+        setText("#memorySyncStateText", "检查失败");
+        setMemorySyncMessage(`试剂库同步状态读取失败：${error}`, true);
+      }
+    }
+
+    async function runMemorySyncAction(url, busyMessage, body = null) {
+      setMemorySyncMessage(busyMessage);
+      setText("#memorySyncStateText", "处理中");
+      const buttons = [
+        "#testMemorySyncButton",
+        "#uploadMemorySyncButton",
+        "#downloadMemorySyncButton",
+        "#forceDownloadMemorySyncButton"
+      ];
+      buttons.forEach((selector) => setDisabled(selector, true));
+      try {
+        const response = await fetch(url, { method: "POST", body });
+        const payload = await response.json();
+        if (!response.ok || payload.ok === false) {
+          const conflict = response.status === 409 || payload?.detail?.conflict;
+          if (conflict) document.querySelector("#forceDownloadMemorySyncButton")?.removeAttribute("hidden");
+          setMemorySyncMessage(apiErrorMessage(payload), true);
+          await refreshMemorySyncStatus(false);
+          return;
+        }
+        setMemorySyncMessage(payload.message || "试剂库同步操作完成。");
+        renderMemorySyncStatus({ ok: true, enabled: true, local: payload.local, remote: payload.remote, state: {} });
+        await refreshMemorySyncStatus(true);
+      } catch (error) {
+        setMemorySyncMessage(`试剂库同步操作失败：${error}`, true);
+      } finally {
+        buttons.forEach((selector) => setDisabled(selector, false));
+      }
     }
 
     function escapeHtml(value) {

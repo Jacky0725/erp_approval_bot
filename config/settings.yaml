@@ -19,6 +19,16 @@ chemical_search:
     path: data/chemical_search_cache.sqlite
     success_ttl_days: 30
     failure_ttl_days: 1
+memory_sync:
+  enabled: false
+  provider: webdav
+  base_url: https://dav.jianguoyun.com/dav/
+  remote_dir: reagent-approval-bot
+  username_env: JIANGUOYUN_WEBDAV_USER
+  password_env: JIANGUOYUN_WEBDAV_PASSWORD
+  keep_versions: 10
+  auto_upload_after_memory_change: false
+  check_remote_on_startup: false
 paths:
   rules_excel: config/rules.xlsx
   structured_rules_excel: config/rules_structured.xlsx

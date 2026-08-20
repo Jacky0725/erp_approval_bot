@@ -2733,6 +2733,10 @@ body[data-page="run"] #run .button-row:not(.compact) {
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
+.settings-grid-memory-sync {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
 .settings-field-wide {
   grid-column: span 3;
 }
@@ -3125,7 +3129,8 @@ body[data-page="run"] #run .button-row:not(.compact) {
   .settings-grid-scheduler,
   .settings-grid-scheduler-policy,
   .settings-grid-dingtalk,
-  .settings-grid-dingtalk-stream {
+  .settings-grid-dingtalk-stream,
+  .settings-grid-memory-sync {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
@@ -3156,6 +3161,7 @@ body[data-page="run"] #run .button-row:not(.compact) {
   .settings-grid-scheduler-policy,
   .settings-grid-dingtalk,
   .settings-grid-dingtalk-stream,
+  .settings-grid-memory-sync,
   .scheduler-status {
     grid-template-columns: 1fr;
   }
