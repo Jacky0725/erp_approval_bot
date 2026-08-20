@@ -332,9 +332,12 @@ class WorkflowSummaryTest(unittest.TestCase):
         dashboard_js = (root / "src" / "static" / "dashboard.js").read_text(encoding="utf-8")
 
         self.assertIn("试剂库同步", settings_text)
+        self.assertIn('class="settings-section memory-sync-section"', settings_text)
         self.assertIn('name="memory_sync_enabled"', settings_text)
         self.assertIn('name="memory_sync_base_url"', settings_text)
         self.assertIn('id="uploadMemorySyncButton"', settings_text)
+        memory_sync_section = settings_text.split("试剂库同步", 1)[0].rsplit("<section", 1)[-1]
+        self.assertNotIn("update-section", memory_sync_section)
         self.assertIn("/api/memory/sync/upload", dashboard_js)
         self.assertIn("/api/memory/sync/download", dashboard_js)
         self.assertIn('setCheckbox(settingsForm, "memory_sync_enabled"', dashboard_js)
