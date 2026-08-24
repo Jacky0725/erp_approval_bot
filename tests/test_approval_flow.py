@@ -257,6 +257,17 @@ class ApprovalSuggestionExportTest(unittest.TestCase):
 
 
 class ApprovalFlowTodoLoopTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self._manual_advice_env = patch.dict(
+            os.environ,
+            {"ENABLE_LLM_MANUAL_REVIEW_ADVICE": "false"},
+            clear=False,
+        )
+        self._manual_advice_env.start()
+
+    def tearDown(self) -> None:
+        self._manual_advice_env.stop()
+
     def test_todo_list_numbers_strip_urgent_suffix(self) -> None:
         bot = Bot()
 
@@ -745,6 +756,74 @@ class ApprovalFlowTodoLoopTest(unittest.TestCase):
         self.assertFalse(suggestion["\u9700\u4eba\u5de5\u590d\u6838"])
         self.assertIn("\u786b\u9178\u6216\u78f7\u9178", suggestion["\u89c4\u5219\u539f\u56e0"])
 
+    def test_direct_business_rule_suggestion_short_circuits_acetone_by_cas(self) -> None:
+        bot = Bot()
+        engine = RuleEngine.from_excel(ROOT_DIR / "config" / "rules.xlsx")
+
+        suggestion = bot.direct_business_rule_suggestion(
+            {
+                "\u5e8f\u53f7": "25",
+                "\u8bd5\u5242\u540d\u79f0": "\u6ca1\u5199",
+                "CAS\u53f7": "67-64-1\u200b",
+                "\u89c4\u683c": "1",
+                "\u89c4\u683c\u5355\u4f4d": "kg",
+            },
+            engine,
+        )
+
+        self.assertIsNotNone(suggestion)
+        assert suggestion is not None
+        self.assertEqual(suggestion["\u6700\u7ec8\u5efa\u8bae\u7c7b\u522b"], "\u6613\u71c3\u7c7b")
+        self.assertEqual(suggestion["\u6807\u51c6\u5316\u540d\u79f0"], "\u4e19\u916e")
+        self.assertEqual(suggestion["\u67e5\u8be2\u6765\u6e90"], "local_basic_reagent_rule")
+        self.assertEqual(suggestion["\u7f6e\u4fe1\u5ea6"], 1.0)
+        self.assertFalse(suggestion["\u9700\u4eba\u5de5\u590d\u6838"])
+
+    def test_direct_business_rule_suggestion_uses_clear_name_when_cas_conflicts(self) -> None:
+        bot = Bot()
+        engine = RuleEngine.from_excel(ROOT_DIR / "config" / "rules.xlsx")
+
+        suggestion = bot.direct_business_rule_suggestion(
+            {
+                "\u5e8f\u53f7": "26",
+                "\u8bd5\u5242\u540d\u79f0": "\u6c22\u6c27\u5316\u94a0",
+                "CAS\u53f7": "64-17-5",
+            },
+            engine,
+        )
+
+        self.assertIsNotNone(suggestion)
+        assert suggestion is not None
+        self.assertEqual(suggestion["\u6700\u7ec8\u5efa\u8bae\u7c7b\u522b"], "\u5e38\u89c4\u78b1")
+        self.assertEqual(suggestion["CAS\u53f7"], "1310-73-2")
+        self.assertEqual(suggestion["\u539fERP CAS\u53f7"], "64-17-5")
+        self.assertEqual(suggestion["\u4fee\u6b63CAS\u53f7"], "1310-73-2")
+        self.assertTrue(suggestion["CAS\u540d\u79f0\u51b2\u7a81"])
+        self.assertTrue(suggestion["CAS\u4fee\u6b63\u5df2\u5e94\u7528"])
+        self.assertFalse(suggestion["\u9700\u4eba\u5de5\u590d\u6838"])
+
+    def test_reagent_work_key_normalizes_zero_width_cas(self) -> None:
+        left = Bot.reagent_work_key(
+            {
+                "\u5e8f\u53f7": "25",
+                "\u8bd5\u5242\u540d\u79f0": "\u4e19\u916e",
+                "CAS\u53f7": "67-64-1\u200b",
+                "\u89c4\u683c": "1",
+                "\u89c4\u683c\u5355\u4f4d": "kg",
+            }
+        )
+        right = Bot.reagent_work_key(
+            {
+                "\u5e8f\u53f7": "25",
+                "\u8bd5\u5242\u540d\u79f0": "\u4e19\u916e",
+                "CAS\u53f7": "67-64-1",
+                "\u89c4\u683c": "1",
+                "\u89c4\u683c\u5355\u4f4d": "kg",
+            }
+        )
+
+        self.assertEqual(left, right)
+
     def test_direct_business_rule_suggestion_allows_product_kit_without_search(self) -> None:
         bot = Bot()
         engine = RuleEngine.from_excel(ROOT_DIR / "config" / "rules.xlsx")
@@ -804,16 +883,38 @@ class ApprovalFlowTodoLoopTest(unittest.TestCase):
                 self.assertFalse(suggestion["\u9700\u4eba\u5de5\u590d\u6838"])
                 self.assertEqual(suggestion["\u67e5\u8be2\u6765\u6e90"], "business_rule")
 
-    def test_direct_business_rule_suggestion_allows_business_normal_keywords(self) -> None:
+    def test_direct_business_rule_suggestion_skips_broad_normal_keywords_with_risk_terms(self) -> None:
         bot = Bot()
         engine = RuleEngine.from_excel(ROOT_DIR / "config" / "rules.xlsx")
 
         for name in (
-            "\u94c5ICP\u6807\u51c6\u6eb6\u6db2",
-            "\u94cdICP\u6807\u51c6\u6db2",
-            "\u94c5\u6807\u51c6\u54c1",
-            "\u6c2f\u5316\u94cd\u6807\u5b9a\u6eb6\u6db2",
-            "\u5432\u54da\u6807\u51c6\u6eb6\u6db2",
+            "砷标准液",
+            "铅ICP标准溶液",
+            "镉ICP标准液",
+            "铅标准品",
+            "氯化镉标定溶液",
+            "吲哚标准溶液",
+        ):
+            with self.subTest(name=name):
+                suggestion = bot.direct_business_rule_suggestion(
+                    {
+                        "\u5e8f\u53f7": "27",
+                        "\u8bd5\u5242\u540d\u79f0": name,
+                        "CAS\u53f7": "-",
+                    },
+                    engine,
+                )
+
+                self.assertIsNone(suggestion)
+
+    def test_direct_business_rule_suggestion_allows_high_priority_business_normal_keywords(self) -> None:
+        bot = Bot()
+        engine = RuleEngine.from_excel(ROOT_DIR / "config" / "rules.xlsx")
+
+        for name in (
+            "砷试剂",
+            "二乙基二硫代氨基甲酸银",
+            "AgDDC",
             "\u86cb\u767d\u514d\u75ab\u6297\u4f53\u8bd5\u5242",
             "\u4e00\u6b21\u6027\u75c5\u6bd2\u91c7\u6837\u7ba1",
             "\u75c5\u6bd2\u4fdd\u5b58\u6db2",
@@ -1139,6 +1240,63 @@ class ApprovalFlowTodoLoopTest(unittest.TestCase):
         self.assertEqual(queue["flash_point"].tolist(), ["25 C"])
         self.assertEqual(queue["corrosive"].tolist(), ["True"])
         self.assertIn("uncertain evidence", queue["property_summary"].iloc[0])
+
+    def test_search_failure_manual_review_is_queued_once_after_final_suggestion(self) -> None:
+        class SearchFailureBot(Bot):
+            def __init__(self) -> None:
+                self.settings = {
+                    "paths": {"reagent_memory_sqlite": "data/memory.sqlite"},
+                    "approval": {"parallel_workers": 1},
+                }
+                self.root_dir = Path(tempfile.mkdtemp())
+                self.stage_logger = StageLogger()
+                self.search_failure_queue_calls = 0
+                self.suggestion_queue_calls = 0
+
+            def read_current_page_reagents(self, page: object) -> list[dict[str, str]]:
+                return [
+                    {
+                        "\u5e8f\u53f7": "1",
+                        "\u8bd5\u5242\u540d\u79f0": "needs-review",
+                        "CAS\u53f7": "-",
+                        "\u7269\u5316\u7279\u6027": "-",
+                    }
+                ]
+
+            def search_reagents_parallel(self, items: list[dict[str, object]]) -> dict[int, dict[str, object]]:
+                item = items[0]
+                return {int(item["index"]): self.search_failure_result(item["reagent"], "test search failed")}
+
+            def extract_and_classify_parallel(self, items: list[dict[str, object]], rule_engine: object) -> dict[int, tuple[dict[str, object], dict[str, object]]]:
+                item = items[0]
+                return {
+                    int(item["index"]): (
+                        {"evidence": ["fallback only"], "confidence": 0.2},
+                        {
+                            "final_category": "",
+                            "matched_categories": [],
+                            "reason": "manual",
+                            "confidence": 0.0,
+                            "need_manual_review": True,
+                        },
+                    )
+                }
+
+            def add_manual_review_item_from_search_failure(self, *args: object, **kwargs: object) -> None:
+                self.search_failure_queue_calls += 1
+
+            def add_manual_review_item_from_suggestion(self, *args: object, **kwargs: object) -> None:
+                self.suggestion_queue_calls += 1
+
+        bot = SearchFailureBot()
+        engine = RuleEngine.from_excel(ROOT_DIR / "config" / "rules.xlsx")
+
+        suggestions = bot.process_current_unmatched_reagent_page(object(), engine, None, {})
+
+        self.assertEqual(len(suggestions), 1)
+        self.assertTrue(suggestions[0]["\u9700\u4eba\u5de5\u590d\u6838"])
+        self.assertEqual(bot.search_failure_queue_calls, 0)
+        self.assertEqual(bot.suggestion_queue_calls, 1)
 
     def test_low_quality_search_uses_llm_fallback_but_keeps_manual_review(self) -> None:
         class FakeExtractor:
@@ -1535,6 +1693,72 @@ class ApprovalFlowTodoLoopTest(unittest.TestCase):
         self.assertIn("724710-02-5", suggestion["\u89c4\u5219\u539f\u56e0"])
         self.assertIn("376584-63-3", suggestion["\u89c4\u5219\u539f\u56e0"])
 
+    def test_manual_verified_flammable_memory_match_is_safe(self) -> None:
+        bot = Bot()
+        self.assertTrue(
+            bot.memory_match_is_safe(
+                {"试剂名称": "燃料及油品", "CAS号": "-"},
+                {
+                    "raw_name": "燃料及油品",
+                    "cleaned_name": "燃料及油品",
+                    "standard_name": "燃料及油品",
+                    "cas": "-",
+                    "final_category": "易燃类",
+                    "confidence": 1.0,
+                    "reason": "人工复核确认后加入高可信试剂记忆库。",
+                    "source": "manual_review_web_ui",
+                    "manual_verified": 1,
+                    "reusable": 1,
+                    "conflict": 0,
+                },
+                rule_engine=RuleEngine.from_excel(ROOT_DIR / "config" / "rules.xlsx"),
+            )
+        )
+
+    def test_web_write_failure_flammable_memory_remains_unsafe_even_if_manual_flagged(self) -> None:
+        bot = Bot()
+        self.assertFalse(
+            bot.memory_match_is_safe(
+                {"试剂名称": "燃料及油品", "CAS号": "-"},
+                {
+                    "raw_name": "燃料及油品",
+                    "cleaned_name": "燃料及油品",
+                    "standard_name": "燃料及油品",
+                    "cas": "-",
+                    "final_category": "易燃类",
+                    "confidence": 1.0,
+                    "reason": "网页写入失败：could not select 易燃类",
+                    "source": "manual_review_web_ui",
+                    "manual_verified": 1,
+                    "reusable": 1,
+                    "conflict": 0,
+                },
+                rule_engine=RuleEngine.from_excel(ROOT_DIR / "config" / "rules.xlsx"),
+            )
+        )
+
+    def test_web_write_failure_memory_is_unsafe_for_all_categories(self) -> None:
+        bot = Bot()
+        self.assertFalse(
+            bot.memory_match_is_safe(
+                {"试剂名称": "不明溶液", "CAS号": "-"},
+                {
+                    "raw_name": "不明溶液",
+                    "cleaned_name": "不明溶液",
+                    "standard_name": "不明溶液",
+                    "cas": "-",
+                    "final_category": "未知类",
+                    "confidence": 1.0,
+                    "reason": "网页写入失败：could not select 未知类",
+                    "source": "manual_review_web_ui",
+                    "manual_verified": 1,
+                    "reusable": 1,
+                    "conflict": 0,
+                },
+                rule_engine=RuleEngine.from_excel(ROOT_DIR / "config" / "rules.xlsx"),
+            )
+        )
+
     def test_unsafe_pharmacopoeia_memory_match_is_disabled(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -1676,7 +1900,7 @@ class ApprovalFlowTodoLoopTest(unittest.TestCase):
             self.assertFalse(saved)
             self.assertIsNone(memory.lookup(raw_name="\u6d4b\u8bd5\u8bd5\u5242"))
 
-    def test_memory_lookup_with_erp_cas_does_not_fall_back_to_name_only_match(self) -> None:
+    def test_memory_lookup_with_erp_cas_falls_back_to_name_when_cas_has_no_match(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             memory = ReagentMemory.from_settings(
@@ -1692,7 +1916,7 @@ class ApprovalFlowTodoLoopTest(unittest.TestCase):
                 confidence=0.95,
             )
 
-            self.assertIsNone(
+            self.assertIsNotNone(
                 Bot.lookup_reusable_memory(
                     memory,
                     cas="43094-80-0",
@@ -1706,6 +1930,40 @@ class ApprovalFlowTodoLoopTest(unittest.TestCase):
                     raw_name="多聚甲醛溶液",
                 )
             )
+
+    def test_memory_lookup_skips_conflicting_basic_cas_match(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            memory = ReagentMemory.from_settings(
+                {"paths": {"reagent_memory_sqlite": "data/memory.sqlite"}},
+                root,
+            )
+            memory.add_record(
+                raw_name="\u4e59\u9187",
+                cleaned_name="\u4e59\u9187",
+                standard_name="\u4e59\u9187",
+                cas="64-17-5",
+                final_category="\u6613\u71c3\u7c7b",
+                confidence=1.0,
+            )
+            memory.add_record(
+                raw_name="\u6c22\u6c27\u5316\u94a0",
+                cleaned_name="\u6c22\u6c27\u5316\u94a0",
+                standard_name="\u6c22\u6c27\u5316\u94a0",
+                cas="1310-73-2",
+                final_category="\u5e38\u89c4\u78b1",
+                confidence=1.0,
+            )
+
+            match = Bot.lookup_reusable_memory(
+                memory,
+                cas="64-17-5",
+                raw_name="\u6c22\u6c27\u5316\u94a0",
+            )
+
+            self.assertIsNotNone(match)
+            assert match is not None
+            self.assertEqual(match["final_category"], "\u5e38\u89c4\u78b1")
 
     def test_write_failure_for_reusable_suggestion_queues_review_without_memory(self) -> None:
         class WriteFailureBot(Bot):

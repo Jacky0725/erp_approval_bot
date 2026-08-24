@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import re
+import shutil
+from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 import pandas as pd
@@ -25,11 +28,26 @@ REVIEW_EVIDENCE_COLUMNS = [
     "explosive_risk",
     "used_llm_knowledge_fallback",
     "used_llm_rule_fallback",
+    "used_llm_manual_review_advice",
     "llm_rule_confidence",
     "llm_rule_reason",
     "llm_rule_matched_rule",
     "llm_rule_evidence_type",
     "llm_rule_must_manual_review",
+    "llm_advisory_category",
+    "llm_advisory_summary_cn",
+    "llm_advisory_reason_cn",
+    "llm_advisory_rule_cn",
+    "llm_advisory_uncertainties_cn",
+    "llm_advisory_confidence",
+    "llm_advisory_evidence_basis",
+    "llm_advisory_only",
+    "llm_advisory_high_risk",
+    "llm_model",
+    "llm_provider",
+    "llm_generated_at",
+    "llm_rules_fingerprint",
+    "reason_raw",
     "review_advice",
     "original_erp_cas",
     "corrected_cas",
@@ -58,7 +76,7 @@ BLOCKING_REVIEW_STATUSES = {
     "需人工复核",
 }
 
-HIGH_RISK_LLM_RULE_CATEGORIES = {"高毒类", "易爆类", "发烟类", "特殊酸"}
+_MIGRATED_REVIEW_SIGNATURES: dict[str, int] = {}
 
 
 class ReviewQueueMixin:
@@ -97,6 +115,11 @@ class ReviewQueueMixin:
         matched = pd.Series(False, index=queue.index)
         for column in present_list_columns:
             matched = matched | (queue[column].astype(str).str.strip() == list_number)
+
+        status_column = next((column for column in ("status", "状态", "处理状态") if column in queue.columns), "")
+        if status_column:
+            normalized_status = queue[status_column].astype(str).str.strip().str.lower()
+            matched = matched & normalized_status.isin(BLOCKING_REVIEW_STATUSES)
 
         removed_count = int(matched.sum())
         if not removed_count:
@@ -204,6 +227,7 @@ class ReviewQueueMixin:
         paths = self.settings.get("paths", {})
         review_queue_path = self.root_dir / paths.get("review_queue_excel", "data/review_queue.xlsx")
         review_queue_path.parent.mkdir(parents=True, exist_ok=True)
+        migrate_pending_review_reasons(review_queue_path)
 
         try:
             queue = pd.read_excel(review_queue_path, dtype=str).fillna("") if review_queue_path.exists() else pd.DataFrame()
@@ -222,7 +246,11 @@ class ReviewQueueMixin:
         sequence = reagent.get("\u5e8f\u53f7", "")
         specification = reagent.get("\u89c4\u683c", "")
         unit = reagent.get("\u89c4\u683c\u5355\u4f4d", "")
-        reason = str(reason or "Manual review is required before writing this reagent to ERP.")
+        raw_reason = str(reason or "Manual review is required before writing this reagent to ERP.")
+        reason = manual_review_reason_cn(
+            raw_reason,
+            evidence_source_type=str((search_result or {}).get("evidence_source_type") or ""),
+        )
         evidence_fields = self._manual_review_evidence_fields(
             reagent=reagent,
             name_result=name_result,
@@ -231,6 +259,7 @@ class ReviewQueueMixin:
             classification=classification or {},
             reason=reason,
         )
+        evidence_fields["reason_raw"] = raw_reason if raw_reason != reason else ""
 
         existing_match = pd.Series(dtype=bool)
         if not queue.empty:
@@ -336,6 +365,8 @@ class ReviewQueueMixin:
                 if column not in queue.columns:
                     queue[column] = ""
                 value_text = str(value or "").strip()
+                if column == "reason_raw" and str(queue.at[index, column] or "").strip():
+                    continue
                 if value_text and str(queue.at[index, column] or "").strip() != value_text:
                     queue.at[index, column] = value_text
                     if "timestamp" in queue.columns:
@@ -357,8 +388,15 @@ class ReviewQueueMixin:
             suggested_category = ", ".join(str(item) for item in classification.get("matched_categories", []) or [])
         used_llm_rule = bool(search_result.get("used_llm_rule_fallback") or extracted.get("used_llm_rule_fallback"))
         used_llm = bool(search_result.get("used_llm_knowledge_fallback") or extracted.get("used_llm_knowledge_fallback"))
+        used_llm_advice = bool(
+            search_result.get("used_llm_manual_review_advice")
+            or search_result.get("llm_advisory_only")
+            or extracted.get("llm_advisory_only")
+        )
         source = str(search_result.get("source") or search_result.get("fallback_source") or "").strip()
-        if used_llm_rule:
+        if used_llm_advice:
+            evidence_source_type = "llm_manual_review_advice"
+        elif used_llm_rule:
             evidence_source_type = "llm_rule_fallback"
         elif used_llm:
             evidence_source_type = "llm_fallback"
@@ -376,35 +414,37 @@ class ReviewQueueMixin:
             evidence_text = str(evidence)
         property_parts = []
         for label, key in (
-            ("flash_point", "flash_point"),
-            ("boiling_point", "boiling_point"),
-            ("toxicity", "toxicity"),
-            ("corrosive", "corrosive"),
-            ("oxidizing", "oxidizing"),
-            ("flammable", "flammable"),
-            ("water_reactive", "water_reactive"),
-            ("explosive_risk", "explosive_risk"),
+            ("闪点", "flash_point"),
+            ("沸点", "boiling_point"),
+            ("毒性", "toxicity"),
+            ("腐蚀性", "corrosive"),
+            ("氧化性", "oxidizing"),
+            ("易燃性", "flammable"),
+            ("遇水反应", "water_reactive"),
+            ("爆炸风险", "explosive_risk"),
         ):
             value = extracted.get(key)
             if value not in ("", None, []):
-                property_parts.append(f"{label}={value}")
+                property_parts.append(f"{label}：{localize_review_detail_text(value)}")
         if evidence_text:
-            property_parts.append(f"evidence={evidence_text[:300]}")
+            property_parts.append(f"证据：{localize_review_detail_text(evidence_text[:300])}")
         if used_llm_rule:
             if search_result.get("llm_rule_reason"):
                 property_parts.append(f"llm_rule_reason={search_result.get('llm_rule_reason')}")
             if search_result.get("llm_rule_matched_rule"):
                 property_parts.append(f"llm_rule_matched_rule={search_result.get('llm_rule_matched_rule')}")
 
-        advice = "Manual review required; confirm the physicochemical category before writing to ERP."
-        if used_llm_rule:
-            advice = "LLM rule fallback is advisory only; manually confirm the category before writing to ERP."
+        advice = "需人工确认物化特性后再处理，系统不会自动写入 ERP。"
+        if used_llm_advice:
+            advice = "LLM 仅提供第二意见，需人工主动选择物化特性，系统不会自动预选或写入 ERP。"
+        elif used_llm_rule:
+            advice = "LLM 规则辅助意见仅供参考，需人工确认后再处理。"
         elif used_llm:
-            advice = "Website evidence is missing or insufficient; LLM fallback is advisory only and must be manually verified."
+            advice = "网页证据缺失或不足，LLM 辅助意见仅供参考，必须人工核验。"
         elif evidence_source_type == "trusted_web":
-            advice = "Trusted website evidence is available; verify the suggested category and source evidence."
+            advice = "已有可信网站资料，请人工核对建议类别和来源证据。"
         elif evidence_source_type == "web_fallback":
-            advice = "Fallback web evidence is available but may be incomplete; manually verify before confirming."
+            advice = "已有网页兜底资料，但内容可能不完整，请人工核验后确认。"
 
         llm_confidence = search_result.get("llm_confidence", "")
         if used_llm and llm_confidence == "":
@@ -429,6 +469,7 @@ class ReviewQueueMixin:
             "explosive_risk": extracted.get("explosive_risk", ""),
             "used_llm_knowledge_fallback": used_llm,
             "used_llm_rule_fallback": used_llm_rule,
+            "used_llm_manual_review_advice": used_llm_advice,
             "llm_rule_confidence": search_result.get("llm_rule_confidence")
             or extracted.get("llm_rule_confidence", ""),
             "llm_rule_reason": search_result.get("llm_rule_reason") or extracted.get("llm_rule_reason", ""),
@@ -437,6 +478,25 @@ class ReviewQueueMixin:
             "llm_rule_evidence_type": search_result.get("llm_rule_evidence_type") or "",
             "llm_rule_must_manual_review": search_result.get("llm_rule_must_manual_review")
             or extracted.get("llm_rule_must_manual_review", False),
+            "llm_advisory_category": search_result.get("llm_advisory_category")
+            or extracted.get("llm_advisory_category", ""),
+            "llm_advisory_summary_cn": search_result.get("llm_advisory_summary_cn")
+            or extracted.get("llm_advisory_summary_cn", ""),
+            "llm_advisory_reason_cn": search_result.get("llm_advisory_reason_cn")
+            or extracted.get("llm_advisory_reason_cn", ""),
+            "llm_advisory_rule_cn": search_result.get("llm_advisory_rule_cn")
+            or extracted.get("llm_advisory_rule_cn", ""),
+            "llm_advisory_uncertainties_cn": search_result.get("llm_advisory_uncertainties_cn")
+            or "；".join(extracted.get("llm_advisory_uncertainties_cn", []) or []),
+            "llm_advisory_confidence": search_result.get("llm_advisory_confidence")
+            or extracted.get("llm_advisory_confidence", ""),
+            "llm_advisory_evidence_basis": search_result.get("llm_advisory_evidence_basis", ""),
+            "llm_advisory_only": used_llm_advice,
+            "llm_advisory_high_risk": search_result.get("llm_advisory_high_risk", False),
+            "llm_model": search_result.get("llm_model", ""),
+            "llm_provider": search_result.get("llm_provider", ""),
+            "llm_generated_at": search_result.get("llm_generated_at", ""),
+            "llm_rules_fingerprint": search_result.get("llm_rules_fingerprint", ""),
             "review_advice": advice,
             "original_erp_cas": search_result.get("original_erp_cas") or name_result.get("original_erp_cas") or "",
             "corrected_cas": search_result.get("corrected_cas") or name_result.get("corrected_cas") or "",
@@ -513,13 +573,23 @@ def review_display_summary(
     trusted_web = source_type == "trusted_web" or source in {"Chemsrc", "ChemicalBook"}
     used_llm = source_type == "llm_fallback" or _truthy(evidence_fields.get("used_llm_knowledge_fallback"))
     used_llm_rule = source_type == "llm_rule_fallback" or _truthy(evidence_fields.get("used_llm_rule_fallback"))
+    used_llm_advice = source_type == "llm_manual_review_advice" or _truthy(
+        evidence_fields.get("llm_advisory_only")
+    )
+    advisory_category = str(evidence_fields.get("llm_advisory_category") or "").strip()
+    advisory_summary = str(evidence_fields.get("llm_advisory_summary_cn") or "").strip()
+    advisory_reason = str(evidence_fields.get("llm_advisory_reason_cn") or "").strip()
+    advisory_rule = str(evidence_fields.get("llm_advisory_rule_cn") or "").strip()
+    advisory_uncertainties = str(evidence_fields.get("llm_advisory_uncertainties_cn") or "").strip()
+    advisory_confidence = _float(evidence_fields.get("llm_advisory_confidence"), 0.0)
+    advisory_basis = str(evidence_fields.get("llm_advisory_evidence_basis") or "证据不足").strip()
     llm_rule_confidence = _float(evidence_fields.get("llm_rule_confidence"), 0.0)
-    llm_rule_must_manual = _truthy(evidence_fields.get("llm_rule_must_manual_review"))
     llm_rule_reason = str(evidence_fields.get("llm_rule_reason") or "").strip()
     llm_rule_matched_rule = str(evidence_fields.get("llm_rule_matched_rule") or "").strip()
     cas_correction_applied = _truthy(evidence_fields.get("cas_correction_applied"))
     original_erp_cas = str(evidence_fields.get("original_erp_cas") or "").strip()
     corrected_cas = str(evidence_fields.get("corrected_cas") or "").strip()
+    acid_suggestion = suggested in {"常规酸", "特殊酸"} or advisory_category in {"常规酸", "特殊酸"}
 
     detail_parts = []
     if evidence_fields.get("property_summary"):
@@ -549,6 +619,30 @@ def review_display_summary(
             "allow_suggestion_preselect": bool(suggested),
         }
 
+    if salt_like and acid_suggestion and not trusted_web:
+        return {
+            "display_suggestion": "暂无可靠建议",
+            "display_reason": "名称包含酸盐/有机酸盐结构，不能直接按对应无机酸判定；需人工核对物化特性。",
+            "evidence_status": "证据不足",
+            "detail_summary": detail_summary,
+            "allow_suggestion_preselect": False,
+        }
+
+    if used_llm_advice:
+        confidence_text = f"{advisory_confidence:.2f}" if advisory_confidence else "未知"
+        advisory_details = [
+            f"物性意见：{advisory_summary}" if advisory_summary else "",
+            f"规则依据：{advisory_rule}" if advisory_rule else "",
+            f"不确定项：{advisory_uncertainties}" if advisory_uncertainties else "",
+        ]
+        return {
+            "display_suggestion": f"LLM第二意见：{advisory_category or '暂无可靠建议'}",
+            "display_reason": advisory_reason or "LLM 未形成可靠建议，请人工核对物化特性。",
+            "evidence_status": f"LLM第二意见，{advisory_basis}，置信度 {confidence_text}，仅供复核",
+            "detail_summary": " | ".join([detail_summary, *advisory_details]).strip(" |"),
+            "allow_suggestion_preselect": False,
+        }
+
     if used_llm_rule:
         confidence_text = f"{llm_rule_confidence:.2f}" if llm_rule_confidence else "未知"
         rule_detail = []
@@ -556,26 +650,11 @@ def review_display_summary(
             rule_detail.append(f"依据：{llm_rule_reason}")
         if llm_rule_matched_rule:
             rule_detail.append(f"匹配规则：{llm_rule_matched_rule}")
-        allow_preselect = bool(
-            suggested
-            and llm_rule_confidence >= 0.7
-            and not llm_rule_must_manual
-            and suggested not in HIGH_RISK_LLM_RULE_CATEGORIES
-        )
         return {
             "display_suggestion": f"LLM按规则辅助建议：{suggested or '暂无可靠建议'}",
             "display_reason": llm_rule_reason or "没有足够可信网页证据，LLM 仅按规则给出辅助判断，需人工确认。",
             "evidence_status": f"LLM规则辅助，置信度 {confidence_text}，需人工确认",
             "detail_summary": " | ".join([detail_summary, *rule_detail]).strip(" |"),
-            "allow_suggestion_preselect": allow_preselect,
-        }
-
-    if salt_like and not trusted_web:
-        return {
-            "display_suggestion": "暂无可靠建议",
-            "display_reason": "名称包含盐酸盐/无机酸盐结构，不能直接按对应无机酸判定；需人工核对物化特性。",
-            "evidence_status": "证据不足",
-            "detail_summary": detail_summary,
             "allow_suggestion_preselect": False,
         }
 
@@ -609,7 +688,7 @@ def review_display_summary(
             "display_reason": "未查到可信网站资料，LLM仅给出辅助判断，需人工核验。",
             "evidence_status": evidence_status,
             "detail_summary": detail_summary,
-            "allow_suggestion_preselect": True,
+            "allow_suggestion_preselect": False,
         }
 
     if suggested:
@@ -668,16 +747,38 @@ def review_display_summary_from_row(row: Any, reason: str = "") -> dict[str, Any
 
 def _looks_like_acid_salt(text: str) -> bool:
     normalized = str(text or "").lower().replace(" ", "")
-    return any(
-        token in normalized
-        for token in (
-            "盐酸盐",
-            "盐酸苯肼",
-            "hydrochloride",
-            "nitratesalt",
-            "sulfatesalt",
-            "sulphatesalt",
-        )
+    salt_terms = (
+        "盐酸盐",
+        "硝酸盐",
+        "硫酸盐",
+        "磷酸盐",
+        "磺酸盐",
+        "羧酸盐",
+        "钠盐",
+        "钾盐",
+        "铵盐",
+        "酚钠盐",
+        "酚钠",
+        "hydrochloride",
+        "nitrate",
+        "sulfate",
+        "sulphate",
+        "sulfonate",
+        "sulphonate",
+        "carboxylate",
+        "phenolate",
+        "urate",
+        "acidsalt",
+        "ammoniumsalt",
+        "sodiumsalt",
+        "potassiumsalt",
+    )
+    if any(token in normalized for token in salt_terms):
+        return True
+    return bool(
+        re.search(r"酸(钠|钾|铵|銨|氨)", normalized)
+        or re.search(r"(盐酸|硝酸|硫酸|磷酸|磺酸|羧酸|酚).{0,12}(钠|钾|铵|銨|氨)", normalized)
+        or re.search(r"(钠|钾|铵|銨|氨).{0,12}(盐酸|硝酸|硫酸|磷酸|磺酸|羧酸|酚)", normalized)
     )
 
 
@@ -773,7 +874,124 @@ def localize_review_detail_text(text: Any) -> str:
             parts.append(f"{label}：{localize_value(value)}")
         else:
             parts.append(localize_value(part))
-    return "；".join(parts)
+    result = "；".join(parts)
+    language_check = re.sub(
+        r"https?://\S+|\b(?:LLM|API|Key|ERP|CAS|SDS|MSDS|Chemsrc|ChemicalBook)\b|\b[A-Z][A-Za-z0-9()+\-]{0,12}\b",
+        "",
+        result,
+        flags=re.I,
+    )
+    cjk_count = len(re.findall(r"[\u3400-\u9fff]", language_check))
+    latin_words = len(re.findall(r"[A-Za-z]{3,}", language_check))
+    if latin_words >= 4 and cjk_count < 6:
+        return "原始资料包含较多英文内容，请结合来源链接或原始审计信息人工核对。"
+    return result
+
+
+def manual_review_reason_cn(text: Any, evidence_source_type: str = "") -> str:
+    """Return a concise Chinese user-facing reason while preserving raw text elsewhere."""
+    raw = " ".join(str(text or "").split())
+    if not raw:
+        return "缺少足够可信的物性证据，需要人工确认物化特性。"
+    localized = localize_review_detail_text(raw)
+    replacements = [
+        ("Manual review is required before writing this reagent to ERP.", "写入 ERP 前需要人工确认物化特性。"),
+        ("Rule classification, name normalization, or source evidence requires manual review.", "规则判定、名称标准化或来源证据存在不确定性，需要人工复核。"),
+        ("pending manual review", "存在待处理的人工复核项"),
+        ("needs manual review", "需要人工复核"),
+        ("manual review", "人工复核"),
+        ("No trusted web evidence was found", "未找到可信网页证据"),
+        ("no trusted web evidence", "未找到可信网页证据"),
+        ("Website evidence is missing or insufficient", "网页证据缺失或不足"),
+        ("insufficient website evidence", "网页证据不足"),
+        ("low confidence", "置信度较低"),
+        ("uncertain evidence", "证据存在不确定性"),
+        ("LLM/classification failed", "LLM 提取或规则判定失败"),
+        ("LLM extraction failed", "LLM 物性提取失败"),
+        ("candidate category matched", "命中候选类别"),
+        ("trusted evidence", "已有可信证据"),
+        ("could not select", "无法选择"),
+        ("could not open", "无法打开"),
+        ("could not verify", "无法验证"),
+        ("write failed", "写入失败"),
+    ]
+    for source, target in replacements:
+        localized = localized.replace(source, target)
+    language_check = re.sub(
+        r"https?://\S+|\b(?:LLM|API|Key|ERP|CAS|SDS|MSDS|Chemsrc|ChemicalBook)\b",
+        "",
+        localized,
+        flags=re.I,
+    )
+    cjk_count = len(re.findall(r"[\u3400-\u9fff]", language_check))
+    latin_words = len(re.findall(r"[A-Za-z]{3,}", language_check))
+    if (cjk_count >= 6 and latin_words <= 2) or latin_words == 0:
+        return localized
+    source_type = str(evidence_source_type or "").strip()
+    if source_type in {"llm_fallback", "llm_rule_fallback", "llm_manual_review_advice"} or "llm" in raw.lower():
+        return "LLM 辅助信息仅供参考，现有依据不足以自动判定，请人工核对物化特性。"
+    if source_type == "trusted_web":
+        return "已有可信网页资料，但规则判定仍存在不确定性，需要人工核对物化特性。"
+    if source_type == "web_fallback":
+        return "网页兜底资料可能不完整，需要人工核对试剂身份和物化特性。"
+    return "试剂名称、来源证据或规则判定存在不确定性，需要人工核对物化特性。"
+
+
+def migrate_pending_review_reasons(path: Path) -> bool:
+    """Localize pending review reasons once, preserving original audit text."""
+    path = Path(path)
+    if not path.exists():
+        return False
+    cache_key = str(path.resolve())
+    try:
+        signature = path.stat().st_mtime_ns
+    except OSError:
+        return False
+    if _MIGRATED_REVIEW_SIGNATURES.get(cache_key) == signature:
+        return False
+    try:
+        frame = pd.read_excel(path, dtype=str).fillna("")
+    except Exception:
+        return False
+    if frame.empty or "reason" not in frame.columns:
+        _MIGRATED_REVIEW_SIGNATURES[cache_key] = signature
+        return False
+    status_column = next((column for column in ("status", "状态", "处理状态") if column in frame.columns), "")
+    if status_column:
+        pending = frame[status_column].astype(str).str.strip().str.lower().isin(BLOCKING_REVIEW_STATUSES)
+    else:
+        pending = pd.Series(True, index=frame.index)
+    changed = False
+    if "reason_raw" not in frame.columns:
+        frame["reason_raw"] = ""
+    source_column = "evidence_source_type" if "evidence_source_type" in frame.columns else ""
+    for index in frame[pending].index:
+        old_reason = str(frame.at[index, "reason"] or "").strip()
+        if not old_reason:
+            continue
+        source_type = str(frame.at[index, source_column] or "") if source_column else ""
+        localized = manual_review_reason_cn(old_reason, evidence_source_type=source_type)
+        if localized == old_reason:
+            continue
+        if not str(frame.at[index, "reason_raw"] or "").strip():
+            frame.at[index, "reason_raw"] = old_reason
+        frame.at[index, "reason"] = localized
+        changed = True
+    if not changed:
+        _MIGRATED_REVIEW_SIGNATURES[cache_key] = signature
+        return False
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    backup = path.with_name(f"{path.stem}.before_chinese_remarks.{timestamp}{path.suffix}")
+    try:
+        shutil.copy2(path, backup)
+        frame.to_excel(path, index=False)
+    except Exception:
+        return False
+    try:
+        _MIGRATED_REVIEW_SIGNATURES[cache_key] = path.stat().st_mtime_ns
+    except OSError:
+        pass
+    return True
 
 
 def _truthy(value: Any) -> bool:

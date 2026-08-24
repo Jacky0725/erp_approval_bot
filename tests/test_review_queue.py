@@ -87,6 +87,24 @@ class ReviewQueueTest(unittest.TestCase):
             self.assertEqual(remaining["试剂清单号"].tolist(), ["SJ2"])
             self.assertEqual(remaining["试剂名称"].tolist(), ["C"])
 
+    def test_clear_manual_review_items_for_list_keeps_confirmed_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            pd.DataFrame(
+                [
+                    {"试剂清单号": "SJ1", "试剂名称": "A", "status": "pending"},
+                    {"试剂清单号": "SJ1", "试剂名称": "B", "status": "confirmed", "manual_result": "易燃类"},
+                    {"试剂清单号": "SJ2", "试剂名称": "C", "status": "pending"},
+                ]
+            ).to_excel(root / "review_queue.xlsx", index=False)
+
+            ReviewQueueBot(root).clear_manual_review_items_for_list("SJ1")
+
+            remaining = pd.read_excel(root / "review_queue.xlsx", dtype=str).fillna("")
+            self.assertEqual(remaining["试剂清单号"].tolist(), ["SJ1", "SJ2"])
+            self.assertEqual(remaining["试剂名称"].tolist(), ["B", "C"])
+            self.assertEqual(remaining.loc[0, "status"], "confirmed")
+
     def test_manual_review_dedup_keeps_same_name_with_different_cas(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

@@ -44,7 +44,7 @@ from category_mapper import (
 from app_info import app_version
 from memory_sync import MemorySyncError, MemorySyncService, memory_sync_config
 from reagent_memory import ReagentMemory
-from review_queue import review_display_summary_from_row
+from review_queue import migrate_pending_review_reasons, review_display_summary_from_row
 from runtime_paths import ensure_runtime_layout, runtime_root, source_root
 from scheduler import scheduler_config
 
@@ -280,15 +280,39 @@ class AutomationJobManager:
             "message": "Current automation task stopped." if stopped else "Stop requested; waiting for task cleanup.",
         }
 
-    def status(self) -> dict[str, Any]:
+    def status(self, *, light: bool = False) -> dict[str, Any]:
         with self._lock:
             if not self.running and not self.action:
-                return self._status_from_persisted_state()
+                return self._status_from_persisted_state(light=light)
             log_tail = self.lines[-160:]
-            summary_lines = current_run_lines(self._run_log_path, fallback=self.lines)
             running = self.running
             success = self.success
             error = self.error
+            if light:
+                health = run_health(log_tail, success, error)
+                return {
+                    "running": running,
+                    "action": self.action,
+                    "action_label": action_label(self.action),
+                    "started_at": self.started_at,
+                    "finished_at": self.finished_at,
+                    "success": success,
+                    "error": error,
+                    "result_label": result_label(running, success, error, health, action=self.action),
+                    "result_health": health,
+                    "run_log_path": self._run_log_path,
+                    "summary": light_run_summary(
+                        log_tail,
+                        action=self.action,
+                        options=self._last_options,
+                        running=running,
+                        success=success,
+                        error=error,
+                    ),
+                    "log_tail": log_tail,
+                    "workflow": workflow_summary(log_tail, running=running, success=success, error=error),
+                }
+            summary_lines = current_run_lines(self._run_log_path, fallback=self.lines)
             health = run_health(summary_lines, success, error)
             summary = run_summary(
                 summary_lines,
@@ -410,7 +434,7 @@ class AutomationJobManager:
             yaml.safe_dump(payload, allow_unicode=True, sort_keys=False),
         )
 
-    def _status_from_persisted_state(self) -> dict[str, Any]:
+    def _status_from_persisted_state(self, *, light: bool = False) -> dict[str, Any]:
         if not WEB_RUN_STATE_PATH.exists():
             return {
                 "running": False,
@@ -433,11 +457,35 @@ class AutomationJobManager:
             payload = {}
         log_tail = [repair_display_text(line) for line in (payload.get("log_tail") or [])]
         run_log_path = str(payload.get("run_log_path") or "")
-        summary_lines = current_run_lines(run_log_path, fallback=log_tail)
         success = payload.get("success")
         error = repair_display_text(payload.get("error") or "")
-        health = run_health(summary_lines, success, error)
         action = str(payload.get("action") or "")
+        if light:
+            health = run_health(log_tail, success, error)
+            return {
+                "running": False,
+                "action": action,
+                "action_label": action_label(action),
+                "started_at": str(payload.get("started_at") or ""),
+                "finished_at": str(payload.get("finished_at") or ""),
+                "success": success,
+                "error": error,
+                "result_label": result_label(False, success, error, health, action=action),
+                "result_health": health,
+                "run_log_path": run_log_path,
+                "summary": light_run_summary(
+                    log_tail,
+                    action=action,
+                    options=payload.get("options") or {},
+                    running=False,
+                    success=success,
+                    error=error,
+                ),
+                "log_tail": log_tail,
+                "workflow": workflow_summary(log_tail, running=False, success=success, error=error),
+            }
+        summary_lines = current_run_lines(run_log_path, fallback=log_tail)
+        health = run_health(summary_lines, success, error)
         summary = run_summary(
             summary_lines,
             action=action,
@@ -819,6 +867,73 @@ def run_summary(
     }
 
 
+def light_run_summary(
+    lines: list[str],
+    *,
+    action: str,
+    options: dict[str, Any] | None,
+    running: bool,
+    success: bool | None,
+    error: str,
+) -> dict[str, Any]:
+    options = options or {}
+    target_lists = parse_target_list_numbers(str(options.get("TARGET_LIST_NUMBERS") or options.get("target_list_numbers") or ""))
+    suggestion_metrics = aggregate_suggestion_summaries(lines)
+    write_success = sum(
+        1
+        for line in lines
+        if "save verified for sequence" in line.lower() or "save result for sequence" in line.lower()
+    )
+    write_failed = sum(
+        1
+        for line in lines
+        if "could not select" in line.lower()
+        or "failed save operation" in line.lower()
+        or "save verification failed" in line.lower()
+    )
+    if running:
+        outcome = "运行中"
+    elif success is True and action == "todo_export":
+        outcome = "待办清单刷新成功"
+    elif success is True and action == "suggestions":
+        outcome = "审批流程完成"
+    elif success is True:
+        outcome = f"{action_label(action)}成功"
+    elif success is False:
+        outcome = repair_display_text(error) or "执行失败"
+    else:
+        outcome = "未运行"
+    return {
+        "action": action,
+        "action_label": action_label(action),
+        "outcome": outcome,
+        "target_list_numbers": target_lists,
+        "todo_count": 0,
+        "suggestion_count": int(suggestion_metrics.get("suggestion_total") or 0),
+        "manual_review_count": int(suggestion_metrics.get("manual_review_candidate_count") or 0),
+        "processed_pages": 0,
+        "write_success_count": write_success,
+        "write_failure_count": write_failed,
+        "deferred_write_count": sum(1 for line in lines if "deferred pending write candidate" in line.lower()),
+        "not_found_after_reread_count": sum(1 for line in lines if "not found after re-read" in line.lower()),
+        "dropdown_failure_count": write_failed,
+        "dropdown_failures": [],
+        "page_suggestion_count": int(suggestion_metrics.get("suggestion_total") or 0),
+        "writable_candidate_count": int(suggestion_metrics.get("writable_candidate_count") or 0),
+        "manual_review_candidate_count": int(suggestion_metrics.get("manual_review_candidate_count") or 0),
+        "low_confidence_count": int(suggestion_metrics.get("low_confidence_count") or 0),
+        "search_failure_count": int(suggestion_metrics.get("search_failure_count") or 0),
+        "memory_hit_count": int(suggestion_metrics.get("memory_hit_count") or 0),
+        "llm_knowledge_fallback_count": int(suggestion_metrics.get("llm_knowledge_fallback_count") or 0),
+        "llm_batch_count": 0,
+        "llm_seconds": 0.0,
+        "skipped_candidate_count": int(suggestion_metrics.get("skipped_candidate_count") or 0),
+        "skip_reasons": suggestion_metrics.get("skip_reasons") or {},
+        "has_traceback": any("traceback" in line.lower() for line in lines),
+        "has_write_warning": write_failed > 0,
+    }
+
+
 def extract_after(line: str, marker: str) -> str:
     if marker not in line:
         return ""
@@ -1157,34 +1272,7 @@ def todo_tasks_summary(root_dir: Path = ROOT_DIR) -> dict[str, Any]:
     json_path = root_dir / "data" / "logs" / "todo_tasks.json"
     if json_path.exists():
         try:
-            rows = json.loads(json_path.read_text(encoding="utf-8"))
-            if isinstance(rows, dict):
-                rows = rows.get("tasks", [])
-            tasks = []
-            for row in rows if isinstance(rows, list) else []:
-                if not isinstance(row, dict):
-                    continue
-                list_number = first_dict_value(row, ["试剂清单号", "清单号", "list_number"])
-                if not list_number:
-                    continue
-                tasks.append(
-                    {
-                        "list_number": list_number,
-                        "customer_id": first_dict_value(row, ["客户编号", "customer_id"]),
-                        "customer_name": first_dict_value(row, ["客户名称", "customer_name"]),
-                        "progress": first_dict_value(row, ["技术审批进度", "progress"]),
-                        "status": first_dict_value(row, ["技术审批状态", "状态", "status"]),
-                        "salesman": first_dict_value(row, ["业务员", "salesman"]),
-                        "applicant": first_dict_value(row, ["申请人", "applicant"]),
-                        "contact": first_dict_value(row, ["联系人", "contact"]),
-                    }
-                )
-            return {
-                "exists": True,
-                "rows": int(len(tasks)),
-                "tasks": tasks,
-                "modified": datetime.fromtimestamp(json_path.stat().st_mtime).isoformat(timespec="seconds"),
-            }
+            return cached_file_payload("todo_tasks_json", json_path, lambda: build_todo_tasks_json_payload(json_path))
         except Exception:
             pass
 
@@ -1193,9 +1281,44 @@ def todo_tasks_summary(root_dir: Path = ROOT_DIR) -> dict[str, Any]:
         return {"exists": False, "rows": 0, "tasks": [], "modified": ""}
 
     try:
-        frame = pd.read_excel(path, dtype=str).fillna("")
+        return cached_file_payload("todo_tasks_xlsx", path, lambda: build_todo_tasks_excel_payload(path))
     except Exception as exc:  # noqa: BLE001
         return {"exists": True, "error": str(exc), "rows": 0, "tasks": [], "modified": ""}
+
+
+def build_todo_tasks_json_payload(json_path: Path) -> dict[str, Any]:
+    rows = json.loads(json_path.read_text(encoding="utf-8"))
+    if isinstance(rows, dict):
+        rows = rows.get("tasks", [])
+    tasks = []
+    for row in rows if isinstance(rows, list) else []:
+        if not isinstance(row, dict):
+            continue
+        list_number = first_dict_value(row, ["试剂清单号", "清单号", "list_number"])
+        if not list_number:
+            continue
+        tasks.append(
+            {
+                "list_number": list_number,
+                "customer_id": first_dict_value(row, ["客户编号", "customer_id"]),
+                "customer_name": first_dict_value(row, ["客户名称", "customer_name"]),
+                "progress": first_dict_value(row, ["技术审批进度", "progress"]),
+                "status": first_dict_value(row, ["技术审批状态", "状态", "status"]),
+                "salesman": first_dict_value(row, ["业务员", "salesman"]),
+                "applicant": first_dict_value(row, ["申请人", "applicant"]),
+                "contact": first_dict_value(row, ["联系人", "contact"]),
+            }
+        )
+    return {
+        "exists": True,
+        "rows": int(len(tasks)),
+        "tasks": tasks,
+        "modified": datetime.fromtimestamp(json_path.stat().st_mtime).isoformat(timespec="seconds"),
+    }
+
+
+def build_todo_tasks_excel_payload(path: Path) -> dict[str, Any]:
+    frame = pd.read_excel(path, dtype=str).fillna("")
 
     def first_existing(row: pd.Series, columns: list[str]) -> str:
         for column in columns:
@@ -1263,6 +1386,7 @@ def review_queue_summary(
         return {"exists": False, "rows": 0, "pending": 0, "preview": [], "list_numbers": []}
 
     try:
+        migrate_pending_review_reasons(path)
         payload = cached_file_payload("review_queue", path, lambda: build_review_queue_payload(path))
     except Exception as exc:  # noqa: BLE001
         return {"exists": True, "error": str(exc), "rows": 0, "pending": 0, "preview": [], "list_numbers": []}
@@ -1437,11 +1561,25 @@ def build_review_queue_payload(path: Path) -> dict[str, Any]:
                 "explosive_risk": first_existing(row, ["explosive_risk"]),
                 "used_llm_knowledge_fallback": first_existing(row, ["used_llm_knowledge_fallback"]),
                 "used_llm_rule_fallback": first_existing(row, ["used_llm_rule_fallback"]),
+                "used_llm_manual_review_advice": first_existing(row, ["used_llm_manual_review_advice"]),
                 "llm_rule_confidence": first_existing(row, ["llm_rule_confidence"]),
                 "llm_rule_reason": first_existing(row, ["llm_rule_reason"]),
                 "llm_rule_matched_rule": first_existing(row, ["llm_rule_matched_rule"]),
                 "llm_rule_evidence_type": first_existing(row, ["llm_rule_evidence_type"]),
                 "llm_rule_must_manual_review": first_existing(row, ["llm_rule_must_manual_review"]),
+                "llm_advisory_category": first_existing(row, ["llm_advisory_category"]),
+                "llm_advisory_summary_cn": first_existing(row, ["llm_advisory_summary_cn"]),
+                "llm_advisory_reason_cn": first_existing(row, ["llm_advisory_reason_cn"]),
+                "llm_advisory_rule_cn": first_existing(row, ["llm_advisory_rule_cn"]),
+                "llm_advisory_uncertainties_cn": first_existing(row, ["llm_advisory_uncertainties_cn"]),
+                "llm_advisory_confidence": first_existing(row, ["llm_advisory_confidence"]),
+                "llm_advisory_evidence_basis": first_existing(row, ["llm_advisory_evidence_basis"]),
+                "llm_advisory_only": first_existing(row, ["llm_advisory_only"]),
+                "llm_advisory_high_risk": first_existing(row, ["llm_advisory_high_risk"]),
+                "llm_model": first_existing(row, ["llm_model"]),
+                "llm_provider": first_existing(row, ["llm_provider"]),
+                "llm_generated_at": first_existing(row, ["llm_generated_at"]),
+                "llm_rules_fingerprint": first_existing(row, ["llm_rules_fingerprint"]),
                 "review_advice": first_existing(row, ["review_advice"]),
                 "original_erp_cas": first_existing(row, ["original_erp_cas"]),
                 "corrected_cas": first_existing(row, ["corrected_cas"]),

@@ -93,6 +93,58 @@ class ReagentMemoryTest(unittest.TestCase):
             )
             self.assertIsNone(memory.lookup(raw_name="same"))
 
+    def test_web_write_failure_and_llm_fallback_are_never_reused(self) -> None:
+        tmp, memory = self.make_memory()
+        with tmp:
+            self.assertFalse(
+                memory.add_record(
+                    raw_name="failed write",
+                    final_category="未知类",
+                    confidence=1.0,
+                    reason="网页写入失败：could not select 未知类",
+                    source="manual_review_web_ui",
+                    manual_verified=True,
+                )
+            )
+            self.assertIsNone(memory.lookup(raw_name="failed write"))
+
+            self.assertFalse(
+                memory.add_record(
+                    raw_name="llm only",
+                    final_category="普通类",
+                    confidence=0.95,
+                    reason="LLM知识托底，低置信，仅供复核。",
+                    source="LLM knowledge fallback",
+                )
+            )
+            self.assertIsNone(memory.lookup(raw_name="llm only"))
+
+    def test_lookup_skips_legacy_reusable_write_failure_record(self) -> None:
+        tmp, memory = self.make_memory()
+        with tmp:
+            memory.add_record(
+                raw_name="legacy failed write",
+                final_category="未知类",
+                confidence=1.0,
+                reason="人工确认未知类",
+                source="manual_review_web_ui",
+                manual_verified=True,
+            )
+            row = memory.find_any(raw_name="legacy failed write")
+            assert row is not None
+            memory.update_record(
+                row["id"],
+                {
+                    "reason": "网页写入失败：could not select 未知类",
+                    "reusable": True,
+                    "conflict": False,
+                    "need_manual_review": False,
+                    "manual_verified": True,
+                },
+            )
+
+            self.assertIsNone(memory.lookup(raw_name="legacy failed write"))
+
     def test_placeholder_cas_does_not_match_unrelated_memory(self) -> None:
         tmp, memory = self.make_memory()
         with tmp:

@@ -25,6 +25,7 @@ def summarize_approval_suggestions(
         "unmapped_category": 0,
         "search_failure": 0,
         "memory_hit": 0,
+        "local_basic_rule": 0,
         "llm_knowledge_fallback": 0,
         "skipped": 0,
         "skip_reasons": {},
@@ -53,6 +54,8 @@ def summarize_approval_suggestions(
             summary["missing_category"] += 1
         if source == "reagent_memory":
             summary["memory_hit"] += 1
+        if source == "local_basic_reagent_rule":
+            summary["local_basic_rule"] += 1
         if _truthy(suggestion.get("是否使用LLM知识托底")) or "llm knowledge" in fallback_source.lower():
             summary["llm_knowledge_fallback"] += 1
         if _looks_like_search_failure(suggestion):
@@ -118,6 +121,7 @@ def aggregate_suggestion_summaries(lines: list[str]) -> dict[str, Any]:
         "low_confidence_count": 0,
         "search_failure_count": 0,
         "memory_hit_count": 0,
+        "local_basic_rule_count": 0,
         "llm_knowledge_fallback_count": 0,
         "skipped_candidate_count": 0,
         "skip_reasons": {},
@@ -136,6 +140,7 @@ def aggregate_suggestion_summaries(lines: list[str]) -> dict[str, Any]:
         aggregate["low_confidence_count"] += _int(summary.get("low_confidence"))
         aggregate["search_failure_count"] += _int(summary.get("search_failure"))
         aggregate["memory_hit_count"] += _int(summary.get("memory_hit"))
+        aggregate["local_basic_rule_count"] += _int(summary.get("local_basic_rule"))
         aggregate["llm_knowledge_fallback_count"] += _int(summary.get("llm_knowledge_fallback"))
         aggregate["skipped_candidate_count"] += _int(summary.get("skipped"))
         for reason, count in (summary.get("skip_reasons") or {}).items():

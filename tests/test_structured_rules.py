@@ -160,24 +160,48 @@ class StructuredRulesTest(unittest.TestCase):
         self.assertEqual(result["final_category"], "\u91cd\u91d1\u5c5e\u7c7b")
         self.assertFalse(result["need_manual_review"])
 
-    def test_business_normal_keywords_override_risk_classes(self) -> None:
+    def test_broad_business_normal_keywords_do_not_override_risk_classes(self) -> None:
+        cases = [
+            ("砷标准液", "高毒类"),
+            ("砷标准溶液", "高毒类"),
+            ("三氧化二砷试剂", "高毒类"),
+            ("亚砷酸钠标准品", "高毒类"),
+            ("铅ICP标准溶液", "不建议接收类"),
+            ("汞标准液", "不建议接收类"),
+            ("镉校准液", "重金属类"),
+            ("铬标准液", "重金属类"),
+            ("重铬酸钾标准液", "氧化剂"),
+            ("吲哚标准溶液", "异味"),
+            ("3-Bromo-6-nitroindole 试剂", "异味"),
+        ]
+        for name, expected in cases:
+            with self.subTest(name=name):
+                result = self.engine.classify(
+                    {
+                        "reagent_name": name,
+                        "standard_name": name,
+                        "english_name": name,
+                        "text": name,
+                        "allow_default_normal": True,
+                    }
+                )
+
+                self.assertEqual(result["final_category"], expected)
+                self.assertFalse(result["need_manual_review"])
+
+    def test_arsenic_reagent_alias_is_not_treated_as_arsenic_compound(self) -> None:
         names = [
-            "\u94c5ICP\u6807\u51c6\u6eb6\u6db2",
-            "\u94cdICP\u6807\u51c6\u6db2",
-            "\u6e05\u6d17\u6db2",
-            "\u94c5\u6807\u6db2",
-            "\u94cd\u6821\u51c6\u6db2",
-            "\u94c5\u6807\u51c6\u54c1",
-            "\u6c2f\u5316\u94cd\u6807\u5b9a\u6eb6\u6db2",
-            "\u5432\u54da\u6807\u51c6\u6eb6\u6db2",
-            "3-Bromo-6-nitroindole \u8bd5\u5242",
-            "\u78f7\u9178\u7f13\u51b2\u6db2",
-            "\u86cb\u767d\u514d\u75ab\u6297\u4f53\u8bd5\u5242",
-            "\u4e00\u6b21\u6027\u75c5\u6bd2\u91c7\u6837\u7ba1",
-            "\u75c5\u6bd2\u4fdd\u5b58\u6db2",
-            "\u82cf\u6728\u7d20\u67d3\u8272\u6db2",
-            "\u5361\u9a6c\u897f\u5e73\u836f\u7269\u5bf9\u7167\u54c1",
-            "\u76d0\u9178\u6587\u62c9\u6cd5\u8f9b",
+            "砷试剂",
+            "二乙基二硫代氨基甲酸银",
+            "二乙基二硫代氨基甲酸银盐",
+            "二乙氨基二硫代甲酸银",
+            "二乙基氨荒酸银",
+            "DDTC银盐",
+            "DETC银盐",
+            "AgDDC",
+            "Ag-DDC",
+            "AgDDTC",
+            "Silver diethyldithiocarbamate",
         ]
         for name in names:
             with self.subTest(name=name):
@@ -185,15 +209,40 @@ class StructuredRulesTest(unittest.TestCase):
                     {
                         "reagent_name": name,
                         "standard_name": name,
-                        "text": "\u8fd9\u91cc\u7684\u8bc1\u636e\u63d0\u5230\u542b\u94c5\u3001\u6eb4\u548c\u5432\u54da",
+                        "english_name": name,
+                        "text": name,
                         "allow_default_normal": True,
                     }
                 )
 
-                self.assertEqual(result["final_category"], "\u666e\u901a\u7c7b")
+                self.assertEqual(result["final_category"], "普通类")
+                self.assertNotIn("高毒类", result["matched_categories"])
                 self.assertFalse(result["need_manual_review"])
 
-    def test_unknown_keyword_overrides_business_normal_keywords(self) -> None:
+    def test_high_priority_business_normal_keywords_still_apply(self) -> None:
+        names = [
+            "蛋白免疫抗体试剂",
+            "一次性病毒采样管",
+            "病毒保存液",
+            "苏木素染色液",
+            "卡马西平药物对照品",
+            "盐酸文拉法辛",
+        ]
+        for name in names:
+            with self.subTest(name=name):
+                result = self.engine.classify(
+                    {
+                        "reagent_name": name,
+                        "standard_name": name,
+                        "text": "这里的证据提到含铅、溴和吲哚",
+                        "allow_default_normal": True,
+                    }
+                )
+
+                self.assertEqual(result["final_category"], "普通类")
+                self.assertFalse(result["need_manual_review"])
+
+    def test_unknown_keyword_overrides_business_normal_keywords_without_manual_review(self) -> None:
         for name in (
             "\u672a\u77e5\u7ec6\u80de\u57f9\u517b\u6db2",
             "\u8bd5\u5242\uff08\u672a\u77e5\uff09",
@@ -210,7 +259,7 @@ class StructuredRulesTest(unittest.TestCase):
                 )
 
                 self.assertEqual(result["final_category"], "\u672a\u77e5\u7c7b")
-                self.assertTrue(result["need_manual_review"])
+                self.assertFalse(result["need_manual_review"])
 
     def test_low_priority_business_normal_keywords_apply_without_other_matches(self) -> None:
         names = [

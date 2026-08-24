@@ -65,6 +65,22 @@ cas:
     - 六水合氯化锶
     - 氯化锶六水合物
     - Strontium chloride hexahydrate
+  1470-61-7:
+    standard_name: 二乙基二硫代氨基甲酸银
+    english_name: Silver diethyldithiocarbamate
+    source_url: https://m.chemicalbook.com/ProductChemicalPropertiesCB2108302.htm
+    aliases:
+    - 砷试剂
+    - 二乙基二硫代氨基甲酸银
+    - 二乙基二硫代氨基甲酸银盐
+    - 二乙氨基二硫代甲酸银
+    - 二乙基氨荒酸银
+    - DDTC银盐
+    - DETC银盐
+    - AgDDC
+    - Ag-DDC
+    - AgDDTC
+    - Silver diethyldithiocarbamate
 aliases:
   乙醇: 乙醇
   无水乙醇: 乙醇
@@ -87,6 +103,83 @@ aliases:
   水: 水
   H2O: 水
   water: 水
+  砷试剂:
+    standard_name: 二乙基二硫代氨基甲酸银
+    cas: 1470-61-7
+    english_name: Silver diethyldithiocarbamate
+    source_url: https://m.chemicalbook.com/ProductChemicalPropertiesCB2108302.htm
+    source: manual_verified
+    confidence: 1.0
+  二乙基二硫代氨基甲酸银:
+    standard_name: 二乙基二硫代氨基甲酸银
+    cas: 1470-61-7
+    english_name: Silver diethyldithiocarbamate
+    source_url: https://m.chemicalbook.com/ProductChemicalPropertiesCB2108302.htm
+    source: manual_verified
+    confidence: 1.0
+  二乙基二硫代氨基甲酸银盐:
+    standard_name: 二乙基二硫代氨基甲酸银
+    cas: 1470-61-7
+    english_name: Silver diethyldithiocarbamate
+    source_url: https://m.chemicalbook.com/ProductChemicalPropertiesCB2108302.htm
+    source: manual_verified
+    confidence: 1.0
+  二乙氨基二硫代甲酸银:
+    standard_name: 二乙基二硫代氨基甲酸银
+    cas: 1470-61-7
+    english_name: Silver diethyldithiocarbamate
+    source_url: https://m.chemicalbook.com/ProductChemicalPropertiesCB2108302.htm
+    source: manual_verified
+    confidence: 1.0
+  二乙基氨荒酸银:
+    standard_name: 二乙基二硫代氨基甲酸银
+    cas: 1470-61-7
+    english_name: Silver diethyldithiocarbamate
+    source_url: https://m.chemicalbook.com/ProductChemicalPropertiesCB2108302.htm
+    source: manual_verified
+    confidence: 1.0
+  DDTC银盐:
+    standard_name: 二乙基二硫代氨基甲酸银
+    cas: 1470-61-7
+    english_name: Silver diethyldithiocarbamate
+    source_url: https://m.chemicalbook.com/ProductChemicalPropertiesCB2108302.htm
+    source: manual_verified
+    confidence: 1.0
+  DETC银盐:
+    standard_name: 二乙基二硫代氨基甲酸银
+    cas: 1470-61-7
+    english_name: Silver diethyldithiocarbamate
+    source_url: https://m.chemicalbook.com/ProductChemicalPropertiesCB2108302.htm
+    source: manual_verified
+    confidence: 1.0
+  AgDDC:
+    standard_name: 二乙基二硫代氨基甲酸银
+    cas: 1470-61-7
+    english_name: Silver diethyldithiocarbamate
+    source_url: https://m.chemicalbook.com/ProductChemicalPropertiesCB2108302.htm
+    source: manual_verified
+    confidence: 1.0
+  Ag-DDC:
+    standard_name: 二乙基二硫代氨基甲酸银
+    cas: 1470-61-7
+    english_name: Silver diethyldithiocarbamate
+    source_url: https://m.chemicalbook.com/ProductChemicalPropertiesCB2108302.htm
+    source: manual_verified
+    confidence: 1.0
+  AgDDTC:
+    standard_name: 二乙基二硫代氨基甲酸银
+    cas: 1470-61-7
+    english_name: Silver diethyldithiocarbamate
+    source_url: https://m.chemicalbook.com/ProductChemicalPropertiesCB2108302.htm
+    source: manual_verified
+    confidence: 1.0
+  Silver diethyldithiocarbamate:
+    standard_name: 二乙基二硫代氨基甲酸银
+    cas: 1470-61-7
+    english_name: Silver diethyldithiocarbamate
+    source_url: https://m.chemicalbook.com/ProductChemicalPropertiesCB2108302.htm
+    source: manual_verified
+    confidence: 1.0
   ???????:
     standard_name: ??????
     cas: 10025-70-4

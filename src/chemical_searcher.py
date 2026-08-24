@@ -916,7 +916,13 @@ class ChemicalSearcher:
         ).strip().lower()
         if enabled in {"0", "false", "no", "off"}:
             return None
-        fallback = LlmExtractor(settings=self.settings).generate_knowledge_fallback(
+        extractor = LlmExtractor(settings=self.settings)
+        legacy_enabled = str(os.getenv("ENABLE_LEGACY_LLM_KNOWLEDGE_FALLBACK") or "").strip().lower()
+        if hasattr(extractor, "generate_manual_review_advice") and legacy_enabled not in {"1", "true", "yes", "on"}:
+            # The approval flow now generates one consolidated second opinion after
+            # deterministic classification. Avoid an earlier duplicate LLM call here.
+            return None
+        fallback = extractor.generate_knowledge_fallback(
             {
                 "raw_name": reagent_name,
                 "name": reagent_name,
@@ -1238,19 +1244,46 @@ class ChemicalSearcher:
         validation_names: list[str] | None = None,
     ) -> dict[str, Any]:
         normalized_text = self._normalize_for_similarity(raw_text)
-        if cas and cas.lower() in normalized_text:
+        names_for_validation = validation_names or [name]
+        normalized_cas = self._normalize_for_similarity(cas)
+        if normalized_cas and normalized_cas in normalized_text:
             site_name = self._clean_site_name(preferred_name)
+            primary_names = self._primary_names(raw_text)
+            candidates = self._candidate_names(raw_text)
+            if preferred_name:
+                candidates.insert(0, preferred_name)
+            candidates = [*primary_names, *candidates]
             if not site_name:
-                primary_names = self._primary_names(raw_text)
                 site_name = self._clean_site_name(primary_names[0] if primary_names else "")
+            best_name = site_name
+            best_score = 0.0
+            for validation_name in names_for_validation:
+                target = self._normalize_for_similarity(validation_name)
+                if not target:
+                    continue
+                for candidate in candidates:
+                    normalized_candidate = self._normalize_for_similarity(candidate)
+                    if not normalized_candidate or self._looks_like_cas(candidate):
+                        continue
+                    score = self._similarity(target, normalized_candidate)
+                    if score > best_score:
+                        best_name = self._clean_site_name(candidate) or candidate
+                        best_score = score
+                if len(target) >= 2 and target in normalized_text:
+                    best_name = best_name or validation_name
+                    best_score = max(best_score, 0.9)
+
+            name_is_non_informative = self._non_informative_name_text(name, *names_for_validation)
+            relevance_passed = bool(name_is_non_informative or best_score >= 0.82)
             return {
-                "relevance_passed": True,
-                "matched_site_name": site_name,
-                "name_similarity": 1.0,
-                "passed": True,
+                "relevance_passed": relevance_passed,
+                "matched_site_name": best_name,
+                "name_similarity": 1.0 if name_is_non_informative else round(best_score, 3),
+                "passed": relevance_passed,
+                "cas_matched": True,
+                "name_verification_required": not name_is_non_informative,
             }
 
-        names_for_validation = validation_names or [name]
         candidates = self._candidate_names(raw_text)
         if preferred_name:
             candidates.insert(0, preferred_name)

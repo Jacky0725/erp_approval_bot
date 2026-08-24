@@ -27,8 +27,8 @@ memory_sync:
   username_env: JIANGUOYUN_WEBDAV_USER
   password_env: JIANGUOYUN_WEBDAV_PASSWORD
   keep_versions: 10
-  auto_upload_after_memory_change: false
-  check_remote_on_startup: false
+  auto_upload_after_memory_change: true
+  check_remote_on_startup: true
 paths:
   rules_excel: config/rules.xlsx
   structured_rules_excel: config/rules_structured.xlsx
@@ -38,6 +38,7 @@ paths:
   audit_log_dir: data/logs
 approval:
   default_action: manual_review
+  enable_llm_manual_review_advice: true
   write_mode: multi_page
   write_min_confidence: 0.7
   write_batch_size: 5

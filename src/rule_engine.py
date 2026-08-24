@@ -190,9 +190,9 @@ class RuleEngine:
             return {
                 "final_category": UNKNOWN_CATEGORY,
                 "matched_categories": [UNKNOWN_CATEGORY],
-                "reason": "试剂名称或文本包含“未知”等关键词，按业务规则判定为未知类。",
+                "reason": "试剂名称或文本包含“未知/不明”等关键词，按业务规则判定为未知类。",
                 "confidence": 1.0,
-                "need_manual_review": True,
+                "need_manual_review": False,
             }
 
         if self._is_business_normal_name(reagent_info):
@@ -234,8 +234,11 @@ class RuleEngine:
 
             toxic_hits = self._toxic_threshold_hits(rule.category, text)
             if toxic_hits is not None:
-                explanation_hits = toxic_hits
-                if not toxic_hits:
+                protected_toxic_name_hits = (
+                    RuleEngine._high_toxic_name_hits(reagent_info) if rule.category == "\u9ad8\u6bd2\u7c7b" else []
+                )
+                explanation_hits = list(dict.fromkeys([*toxic_hits, *protected_toxic_name_hits]))
+                if not explanation_hits:
                     if rule.category == FLAMMABLE_CATEGORY:
                         example_hits = self._flammable_example_hits(rule.example_keywords, reagent_info)
                     else:
@@ -536,8 +539,14 @@ class RuleEngine:
         if category == "不建议接收类":
             hits.extend(RuleEngine._reject_metal_name_hits(reagent_info))
 
+        if category == "\u6c27\u5316\u5242":
+            hits.extend(RuleEngine._oxidizer_name_hits(reagent_info))
+
         if category == "\u91cd\u91d1\u5c5e\u7c7b":
             hits.extend(RuleEngine._heavy_metal_name_hits(reagent_info))
+
+        if category == "\u9ad8\u6bd2\u7c7b":
+            hits.extend(RuleEngine._high_toxic_name_hits(reagent_info))
 
         if category == "\u5f02\u5473":
             hits.extend(RuleEngine._odor_name_hits(reagent_info))
@@ -607,6 +616,69 @@ class RuleEngine:
         for token in ("\u9521", "\u954d", "\u94b4", "\u9511", "\u94ec", "\u9549", "\u94cb"):
             if token in name_text:
                 hits.append(f"\u542b{token}")
+        return list(dict.fromkeys(hits))
+
+    @staticmethod
+    def _high_toxic_name_hits(reagent_info: dict[str, Any]) -> list[str]:
+        if RuleEngine._is_known_arsenic_reagent_alias(reagent_info):
+            return []
+
+        parts = []
+        for key in ("name", "reagent_name", "chemical_name", "standard_name", "cleaned_name", "english_name"):
+            value = reagent_info.get(key)
+            if value:
+                parts.append(str(value))
+        name_text = "".join(parts).lower()
+        hits = []
+        for token, label in (("砷", "含砷"), ("arsenic", "arsenic")):
+            if token in name_text:
+                hits.append(label)
+        return list(dict.fromkeys(hits))
+
+    @staticmethod
+    def _is_known_arsenic_reagent_alias(reagent_info: dict[str, Any]) -> bool:
+        name_values = RuleEngine._normalized_name_values(reagent_info)
+        if not name_values:
+            return False
+        aliases = {
+            "砷试剂",
+            "二乙基二硫代氨基甲酸银",
+            "二乙基二硫代氨基甲酸银盐",
+            "二乙氨基二硫代甲酸银",
+            "二乙基氨荒酸银",
+            "ddtc银盐",
+            "detc银盐",
+            "agddc",
+            "ag-ddc",
+            "agddtc",
+            "ag-ddtc",
+            "silverdiethyldithiocarbamate",
+        }
+        normalized_aliases = {RuleEngine._normalize_text(alias) for alias in aliases}
+        has_known_alias = any(value in normalized_aliases for value in name_values)
+        has_conflicting_arsenic_name = any(
+            ("砷" in value or "arsenic" in value) and value not in normalized_aliases
+            for value in name_values
+        )
+        return has_known_alias and not has_conflicting_arsenic_name
+
+    @staticmethod
+    def _oxidizer_name_hits(reagent_info: dict[str, Any]) -> list[str]:
+        parts = []
+        for key in ("name", "reagent_name", "chemical_name", "standard_name", "cleaned_name", "english_name"):
+            value = reagent_info.get(key)
+            if value:
+                parts.append(str(value))
+        name_text = "".join(parts).lower()
+        hits = []
+        for token, label in (
+            ("重铬酸", "重铬酸盐"),
+            ("高锰酸", "高锰酸盐"),
+            ("dichromate", "dichromate"),
+            ("permanganate", "permanganate"),
+        ):
+            if token in name_text:
+                hits.append(label)
         return list(dict.fromkeys(hits))
 
     @staticmethod
@@ -951,23 +1023,15 @@ class RuleEngine:
         )
         if any(token in name_text for token in ("\u65e0\u6807\u7b7e", "\u6a21\u62df\u8bd5\u5242", "\u5b8c\u5168\u4e0d\u5b58\u5728")):
             return False
+        if RuleEngine._is_known_arsenic_reagent_alias(reagent_info):
+            return True
         tokens = (
-            "\u6e05\u6d17\u6db2",
-            "\u6807\u51c6",
-            "\u6807\u51c6\u6db2",
-            "\u6807\u51c6\u6eb6\u6db2",
-            "icp",
-            "\u8bd5\u5242",
-            "\u7f13\u51b2\u6db2",
             "\u86cb\u767d",
             "\u7ec6\u80de",
             "\u75c5\u6bd2",
             "\u514d\u75ab",
             "\u6297\u4f53",
             "\u67d3\u8272",
-            "\u6807\u6db2",
-            "\u6807\u5b9a",
-            "\u6821\u51c6",
             "\u836f\u7269",
             "\u4e00\u6b21\u6027",
             "\u5361\u9a6c\u897f\u5e73",
@@ -997,6 +1061,16 @@ class RuleEngine:
             )
         )
         tokens = (
+            "\u6e05\u6d17\u6db2",
+            "\u6807\u51c6",
+            "\u6807\u51c6\u6db2",
+            "\u6807\u51c6\u6eb6\u6db2",
+            "icp",
+            "\u8bd5\u5242",
+            "\u7f13\u51b2\u6db2",
+            "\u6807\u6db2",
+            "\u6807\u5b9a",
+            "\u6821\u51c6",
             "\u7eb3\u7c73",
             "\u5355\u4f53",
             "\u62c5\u4f53",
@@ -1023,38 +1097,74 @@ class RuleEngine:
         if not name_values:
             return False
 
-        english_salt_tokens = ("hydrochloride", "nitrate", "sulfate", "sulphate")
+        return any(RuleEngine._looks_like_acid_salt_text(name_text) for name_text in name_values)
+
+    @staticmethod
+    def _looks_like_acid_salt_text(name_text: str) -> bool:
+        if not name_text:
+            return False
+
+        english_salt_tokens = (
+            "hydrochloride",
+            "nitrate",
+            "sulfate",
+            "sulphate",
+            "sulfonate",
+            "sulphonate",
+            "carboxylate",
+            "phenolate",
+            "ammoniumsalt",
+            "sodiumsalt",
+            "potassiumsalt",
+        )
+        chinese_salt_tokens = (
+            "盐酸盐",
+            "硝酸盐",
+            "硫酸盐",
+            "磷酸盐",
+            "磺酸盐",
+            "羧酸盐",
+            "钠盐",
+            "钾盐",
+            "铵盐",
+            "酚钠盐",
+            "酚钠",
+        )
+        if any(token in name_text for token in english_salt_tokens):
+            return True
+        if any(token in name_text for token in chinese_salt_tokens):
+            return True
+        if re.search(r"酸(钠|钾|铵|銨|氨)", name_text):
+            return True
+        if re.search(r"(盐酸|硝酸|硫酸|磷酸|磺酸|羧酸|酚).{0,12}(钠|钾|铵|銨)", name_text):
+            return True
+        if re.search(r"(钠|钾|铵|銨|氨).{0,12}(盐酸|硝酸|硫酸|磷酸|磺酸|羧酸|酚)", name_text):
+            return True
 
         acid_solution_forms = (
-            "\u76d0\u9178\u6eb6\u6db2",
-            "\u785d\u9178\u6eb6\u6db2",
-            "\u786b\u9178\u6eb6\u6db2",
-            "\u6d53\u76d0\u9178",
-            "\u6d53\u785d\u9178",
-            "\u6d53\u786b\u9178",
-            "\u7a00\u76d0\u9178",
-            "\u7a00\u785d\u9178",
-            "\u7a00\u786b\u9178",
-            "\u53d1\u70df\u76d0\u9178",
-            "\u53d1\u70df\u785d\u9178",
-            "\u53d1\u70df\u786b\u9178",
+            "盐酸溶液",
+            "硝酸溶液",
+            "硫酸溶液",
+            "浓盐酸",
+            "浓硝酸",
+            "浓硫酸",
+            "稀盐酸",
+            "稀硝酸",
+            "稀硫酸",
+            "发烟盐酸",
+            "发烟硝酸",
+            "发烟硫酸",
         )
+        if any(form in name_text for form in acid_solution_forms):
+            return False
 
-        for name_text in name_values:
-            if any(token in name_text for token in english_salt_tokens):
-                return True
-            if "\u76d0\u9178\u76d0" in name_text or "\u785d\u9178\u76d0" in name_text or "\u786b\u9178\u76d0" in name_text:
-                return True
-            if any(form in name_text for form in acid_solution_forms):
-                continue
-
-            for acid in ("\u76d0\u9178", "\u785d\u9178", "\u786b\u9178"):
-                index = name_text.find(acid)
-                while index != -1:
-                    after = name_text[index + len(acid) :]
-                    if after and not after.startswith(("\u6eb6\u6db2", "\u6c34\u6eb6\u6db2")):
-                        return True
-                    index = name_text.find(acid, index + 1)
+        for acid in ("盐酸", "硝酸", "硫酸"):
+            index = name_text.find(acid)
+            while index != -1:
+                after = name_text[index + len(acid) :]
+                if after and not after.startswith(("溶液", "水溶液", "或", "或者", "/", "／", "和", "及", "、")):
+                    return True
+                index = name_text.find(acid, index + 1)
         return False
 
     @staticmethod
@@ -1260,7 +1370,7 @@ class RuleEngine:
 
     @staticmethod
     def _looks_unknown(text: str) -> bool:
-        return any(keyword in text for keyword in ("未知", "无标签", "无msds", "无法辨识", "标签腐烂"))
+        return any(keyword in text for keyword in ("未知", "不明", "无标签", "无msds", "无法辨识", "标签腐烂"))
 
     @staticmethod
     def _clean_text(value: Any) -> str:

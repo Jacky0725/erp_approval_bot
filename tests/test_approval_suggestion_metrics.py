@@ -24,6 +24,7 @@ def test_summarize_approval_suggestions_counts_writable_and_skips() -> None:
             "最终建议类别": "易燃类",
             "置信度": 0.72,
             "需人工复核": False,
+            "查询来源": "local_basic_reagent_rule",
         },
         {
             "最终建议类别": "未知类",
@@ -47,6 +48,7 @@ def test_summarize_approval_suggestions_counts_writable_and_skips() -> None:
     assert summary["total"] == 4
     assert summary["writable"] == 1
     assert summary["memory_hit"] == 1
+    assert summary["local_basic_rule"] == 1
     assert summary["manual_review"] == 1
     assert summary["low_confidence"] == 1
     assert summary["missing_category"] == 1
@@ -67,6 +69,7 @@ def test_aggregate_suggestion_summaries_from_log_lines() -> None:
                 "置信度": 0.91,
                 "需人工复核": True,
                 "是否使用LLM知识托底": True,
+                "查询来源": "local_basic_reagent_rule",
             },
         ],
         min_confidence=0.8,
@@ -79,5 +82,6 @@ def test_aggregate_suggestion_summaries_from_log_lines() -> None:
     assert aggregate["suggestion_total"] == 2
     assert aggregate["writable_candidate_count"] == 1
     assert aggregate["manual_review_candidate_count"] == 1
+    assert aggregate["local_basic_rule_count"] == 1
     assert aggregate["llm_knowledge_fallback_count"] == 1
     assert aggregate["skipped_candidate_count"] == 1

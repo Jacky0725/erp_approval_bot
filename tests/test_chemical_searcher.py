@@ -550,6 +550,32 @@ abbreviations: {}
         self.assertFalse(relevance["passed"])
         self.assertEqual(relevance["name_similarity"], 0.0)
 
+    def test_cas_match_requires_name_evidence_for_informative_name(self) -> None:
+        searcher = ChemicalSearcher(root_dir=ROOT_DIR)
+        relevance = searcher._result_relevance(
+            "CAS Number: 64-17-5 | Molecular Formula: C2H6O | Molecular Weight: 46.07",
+            name="氢氧化钠",
+            cas="64-17-5",
+            validation_names=["氢氧化钠"],
+        )
+
+        self.assertFalse(relevance["passed"])
+        self.assertTrue(relevance["cas_matched"])
+        self.assertTrue(relevance["name_verification_required"])
+
+    def test_cas_match_can_pass_for_non_informative_name(self) -> None:
+        searcher = ChemicalSearcher(root_dir=ROOT_DIR)
+        relevance = searcher._result_relevance(
+            "CAS Number: 64-17-5 | Molecular Formula: C2H6O | Molecular Weight: 46.07",
+            name="没写",
+            cas="64-17-5",
+            validation_names=["没写"],
+        )
+
+        self.assertTrue(relevance["passed"])
+        self.assertTrue(relevance["cas_matched"])
+        self.assertFalse(relevance["name_verification_required"])
+
     def test_relevance_rejects_detail_when_primary_name_conflicts(self) -> None:
         searcher = ChemicalSearcher(root_dir=ROOT_DIR)
         relevance = searcher._result_relevance(

@@ -4,6 +4,7 @@ import json
 import os
 import re
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
 from openai import OpenAI
@@ -160,50 +161,87 @@ class LlmExtractor:
     def extract_reagent_fields(self, text: str) -> dict[str, Any]:
         return self.extract_properties(raw_text=text)
 
-    def generate_knowledge_fallback(self, reagent_info: dict[str, Any]) -> dict[str, Any]:
-        """Return low-confidence chemical knowledge when no web evidence exists."""
+    def generate_manual_review_advice(self, reagent_info: dict[str, Any]) -> dict[str, Any]:
+        """Generate a Chinese, advisory-only second opinion for manual review."""
+        rules = reagent_info.get("rule_summary") or []
+        allowed_categories = {
+            str(item).strip()
+            for item in (reagent_info.get("allowed_categories") or [])
+            if str(item).strip()
+        }
+        allowed_categories.update(
+            str(item.get("category") or "").strip()
+            for item in rules
+            if isinstance(item, dict) and str(item.get("category") or "").strip()
+        )
+        base = {
+            "candidate_category": "",
+            "physicochemical_summary_cn": "",
+            "reason_cn": "",
+            "matched_rule_summary_cn": "",
+            "uncertainties_cn": [],
+            "identity_confidence": 0.0,
+            "advisory_confidence": 0.0,
+            "evidence_basis": "证据不足",
+            "must_manual_review": True,
+            "advisory_only": True,
+            "used_llm": False,
+            "high_risk": False,
+            "model": str(self.model or ""),
+            "provider": str(self.provider or ""),
+            "generated_at": datetime.now().isoformat(timespec="seconds"),
+            "rules_fingerprint": str(reagent_info.get("rules_fingerprint") or ""),
+            "raw_diagnostic": "",
+        }
         if not self._has_api_key():
-            return {
-                "raw_text": "",
-                "reason": "LLM knowledge fallback skipped because no API key is configured.",
-                "confidence": 0.0,
-                "used_llm": False,
-            }
+            base.update(
+                {
+                    "reason_cn": "未配置 LLM API Key，无法生成大模型辅助意见，请人工核对物化特性。",
+                    "uncertainties_cn": ["缺少大模型辅助意见"],
+                    "raw_diagnostic": "LLM API key is not configured.",
+                }
+            )
+            return base
 
         prompt = f"""
-No trusted website evidence was found for this reagent. Use only conservative,
-general chemical knowledge to produce a low-confidence physical-property
-summary for later rule-based classification.
+请针对需要人工复核的试剂，结合当前判定规则、已有网页资料和你的通用化学知识，
+给出一份仅供人工复核参考的物化特性第二意见。不得决定审批结果，不得声称模型知识是网页证据。
 
-Return strict JSON only:
-
+只返回严格 JSON：
 {{
-  "raw_text": string,
-  "reason": string,
-  "confidence": number
+  "candidate_category": "候选类别或空字符串",
+  "physicochemical_summary_cn": "中文物化特性摘要",
+  "reason_cn": "中文判定理由",
+  "matched_rule_summary_cn": "中文规则依据",
+  "uncertainties_cn": ["中文不确定项"],
+  "identity_confidence": 0.0,
+  "advisory_confidence": 0.0,
+  "evidence_basis": "网页资料|模型知识|混合依据|证据不足"
 }}
 
-Requirements:
-- Do not claim that this is web evidence.
-- raw_text must clearly start with "LLM knowledge fallback; no web evidence:"
-- Include uncertainty where appropriate.
-- If the name is not a recognizable chemical, say that clearly.
-- Do not decide approval pass/fail.
-- Keep confidence <= 0.65.
+必须遵守：
+- 所有说明、理由和不确定项尽量使用中文，必要的 CAS、化学式、SDS/MSDS 和化学名称可保留原文。
+- candidate_category 只能来自 allowed_categories；无法可靠判断时返回空字符串。
+- 无可信网页证据时 advisory_confidence 不得超过 0.65。
+- 身份不明确、混合物组成不明，或规则依赖但缺少浓度/剂型时，不得给出候选类别。
+- 盐酸盐、硝酸盐、硫酸盐、磷酸盐、磺酸盐、羧酸盐等不得仅凭名称判为对应酸类。
+- 明确列出不确定项，不得省略人工复核要求。
+
+allowed_categories:
+{json.dumps(sorted(allowed_categories), ensure_ascii=False)}
 
 reagent_info:
 {json.dumps(reagent_info, ensure_ascii=False)}
 """.strip()
         try:
-            client = self._client()
-            response = client.chat.completions.create(
+            response = self._client().chat.completions.create(
                 model=self.model,
                 messages=[
                     {
                         "role": "system",
                         "content": (
-                            "You provide conservative chemical-knowledge fallback summaries as strict JSON. "
-                            "You do not browse the web and you do not make approval decisions."
+                            "你是保守的化学品人工复核助手。你只输出中文 JSON 第二意见，"
+                            "不执行 ERP 写入，不替代确定性规则引擎或人工确认。"
                         ),
                     },
                     {"role": "user", "content": prompt},
@@ -211,112 +249,123 @@ reagent_info:
                 response_format={"type": "json_object"},
                 temperature=0,
             )
-            parsed = json.loads(response.choices[0].message.content or "{}")
+            raw_content = response.choices[0].message.content or "{}"
+            parsed = json.loads(raw_content)
         except Exception as error:
-            return {
-                "raw_text": "",
-                "reason": f"LLM knowledge fallback failed: {error}",
-                "confidence": 0.0,
-                "used_llm": False,
-            }
+            base.update(self._manual_advice_failure(error))
+            return base
 
-        raw_text = str(parsed.get("raw_text") or "").strip()
-        if raw_text and not raw_text.lower().startswith("llm knowledge fallback; no web evidence:"):
-            raw_text = f"LLM knowledge fallback; no web evidence: {raw_text}"
-        confidence = min(self._normalize_confidence(parsed.get("confidence")), 0.65)
+        category = str(parsed.get("candidate_category") or "").strip()
+        if category not in allowed_categories:
+            category = ""
+        evidence_basis = str(parsed.get("evidence_basis") or "证据不足").strip()
+        evidence_basis = {
+            "web": "网页资料",
+            "llm_chemical_knowledge": "模型知识",
+            "model_knowledge": "模型知识",
+            "mixed": "混合依据",
+            "insufficient": "证据不足",
+        }.get(evidence_basis.lower(), evidence_basis)
+        if evidence_basis not in {"网页资料", "模型知识", "混合依据", "证据不足"}:
+            evidence_basis = "证据不足"
+
+        has_trusted_web = bool(reagent_info.get("has_trusted_web_evidence"))
+        confidence = self._normalize_confidence(parsed.get("advisory_confidence"))
+        if not has_trusted_web:
+            confidence = min(confidence, 0.65)
+        reason_cn = self._prefer_chinese_text(
+            parsed.get("reason_cn"),
+            "大模型未能形成可靠的中文判定理由，请人工核对物化特性。",
+        )
+        summary_cn = self._prefer_chinese_text(
+            parsed.get("physicochemical_summary_cn"),
+            "现有信息不足，无法形成可靠的物化特性摘要。",
+        )
+        rule_cn = self._prefer_chinese_text(parsed.get("matched_rule_summary_cn"), "")
+        uncertainties = [
+            self._prefer_chinese_text(item, "存在未明确的不确定项")
+            for item in self._normalize_string_list(parsed.get("uncertainties_cn"))
+        ]
+        if not uncertainties:
+            uncertainties = ["该意见来自大模型辅助判断，仍需人工核验"]
+        base.update(
+            {
+                "candidate_category": category,
+                "physicochemical_summary_cn": summary_cn,
+                "reason_cn": reason_cn,
+                "matched_rule_summary_cn": rule_cn,
+                "uncertainties_cn": uncertainties,
+                "identity_confidence": self._normalize_confidence(parsed.get("identity_confidence")),
+                "advisory_confidence": confidence,
+                "evidence_basis": evidence_basis,
+                "used_llm": True,
+                "high_risk": category in {"高毒类", "易爆类", "发烟类", "特殊酸"},
+            }
+        )
+        return base
+
+    @staticmethod
+    def _prefer_chinese_text(value: Any, fallback: str) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return fallback
+        cjk_count = len(re.findall(r"[\u3400-\u9fff]", text))
+        latin_words = len(re.findall(r"[A-Za-z]{3,}", text))
+        if not cjk_count and latin_words >= 3:
+            return fallback
+        return text
+
+    @staticmethod
+    def _manual_advice_failure(error: Exception) -> dict[str, Any]:
+        raw = str(error or "").strip()
+        lowered = raw.lower()
+        if "402" in lowered or "balance" in lowered or "insufficient" in lowered:
+            reason = "LLM 账户余额不足，无法生成辅助意见，请人工核对物化特性。"
+        elif "api key" in lowered or "unauthorized" in lowered or "401" in lowered:
+            reason = "LLM API Key 无效或未配置，无法生成辅助意见，请人工核对物化特性。"
+        elif "timeout" in lowered or "timed out" in lowered:
+            reason = "LLM 调用超时，未生成辅助意见，请人工核对物化特性。"
+        elif isinstance(error, (json.JSONDecodeError, TypeError, ValueError)):
+            reason = "LLM 返回格式不符合要求，未采用该辅助意见，请人工核对物化特性。"
+        else:
+            reason = "LLM 辅助调用失败，未生成可靠意见，请人工核对物化特性。"
+        return {
+            "reason_cn": reason,
+            "uncertainties_cn": ["缺少可靠的大模型辅助意见"],
+            "raw_diagnostic": raw[:1000],
+        }
+
+    def generate_knowledge_fallback(self, reagent_info: dict[str, Any]) -> dict[str, Any]:
+        """Compatibility wrapper for callers that still expect a raw-text fallback."""
+        info = dict(reagent_info)
+        info.setdefault("has_trusted_web_evidence", False)
+        advice = self.generate_manual_review_advice(info)
+        summary = str(advice.get("physicochemical_summary_cn") or "").strip()
+        raw_text = f"LLM 知识辅助（无可信网页证据）：{summary}" if advice.get("used_llm") and summary else ""
         return {
             "raw_text": raw_text,
-            "reason": str(parsed.get("reason") or "Generated low-confidence LLM knowledge fallback.").strip(),
-            "confidence": confidence,
-            "used_llm": bool(raw_text),
+            "reason": advice.get("reason_cn", ""),
+            "confidence": min(self._normalize_confidence(advice.get("advisory_confidence")), 0.65),
+            "used_llm": bool(advice.get("used_llm") and raw_text),
         }
 
     def classify_by_rules_fallback(self, reagent_info: dict[str, Any]) -> dict[str, Any]:
-        """Return an advisory category candidate based on configured rules when web evidence is weak."""
-        if not self._has_api_key():
-            return {
-                "candidate_category": "",
-                "confidence": 0.0,
-                "reason": "LLM rule fallback skipped because no API key is configured.",
-                "matched_rule_summary": "",
-                "evidence_type": "insufficient",
-                "must_manual_review": True,
-                "used_llm": False,
-            }
-
-        prompt = f"""
-No trusted website evidence was found for this reagent. Review the configured
-physicochemical classification rules and provide an advisory candidate category
-for manual review.
-
-Return strict JSON only:
-
-{{
-  "candidate_category": string,
-  "confidence": number,
-  "reason": string,
-  "matched_rule_summary": string,
-  "evidence_type": "name_based" | "llm_chemical_knowledge" | "insufficient",
-  "must_manual_review": boolean
-}}
-
-Requirements:
-- Do not claim that this is website evidence.
-- Do not decide ERP approval or write eligibility.
-- If the reagent identity is unclear, set candidate_category to "" and confidence below 0.7.
-- If the category is uncertain or depends on unavailable SDS/property data, set must_manual_review=true.
-- A hydrochloride salt is not hydrochloric acid. Do not infer regular/special acid only from hydrochloride/盐酸盐.
-- Nitrate and sulfate/sulphate salts are not nitric acid or sulfuric acid. Do not infer regular acid only from nitrate/sulfate salts.
-- Keep the reason concise and in Chinese.
-- candidate_category must be one of the configured rule/ERP categories when possible.
-
-reagent_info:
-{json.dumps(reagent_info, ensure_ascii=False)}
-""".strip()
-        try:
-            client = self._client()
-            response = client.chat.completions.create(
-                model=self.model,
-                messages=[
-                    {
-                        "role": "system",
-                        "content": (
-                            "You are an advisory chemical rule reviewer. "
-                            "You use configured rules and conservative chemical knowledge only. "
-                            "You never claim web verification and never make ERP approval decisions."
-                        ),
-                    },
-                    {"role": "user", "content": prompt},
-                ],
-                response_format={"type": "json_object"},
-                temperature=0,
-            )
-            parsed = json.loads(response.choices[0].message.content or "{}")
-        except Exception as error:
-            return {
-                "candidate_category": "",
-                "confidence": 0.0,
-                "reason": f"LLM rule fallback failed: {error}",
-                "matched_rule_summary": "",
-                "evidence_type": "insufficient",
-                "must_manual_review": True,
-                "used_llm": False,
-            }
-
-        evidence_type = str(parsed.get("evidence_type") or "insufficient").strip()
-        if evidence_type not in {"name_based", "llm_chemical_knowledge", "insufficient"}:
-            evidence_type = "insufficient"
-        confidence = self._normalize_confidence(parsed.get("confidence"))
-        if evidence_type == "insufficient":
-            confidence = min(confidence, 0.69)
+        """Compatibility wrapper for the unified manual-review advice API."""
+        advice = self.generate_manual_review_advice(dict(reagent_info))
+        basis = str(advice.get("evidence_basis") or "证据不足")
+        evidence_type = {
+            "网页资料": "name_based",
+            "模型知识": "llm_chemical_knowledge",
+            "混合依据": "llm_chemical_knowledge",
+        }.get(basis, "insufficient")
         return {
-            "candidate_category": str(parsed.get("candidate_category") or "").strip(),
-            "confidence": confidence,
-            "reason": str(parsed.get("reason") or "").strip(),
-            "matched_rule_summary": str(parsed.get("matched_rule_summary") or "").strip(),
+            "candidate_category": advice.get("candidate_category", ""),
+            "confidence": advice.get("advisory_confidence", 0.0),
+            "reason": advice.get("reason_cn", ""),
+            "matched_rule_summary": advice.get("matched_rule_summary_cn", ""),
             "evidence_type": evidence_type,
-            "must_manual_review": self._truthy(parsed.get("must_manual_review")),
-            "used_llm": True,
+            "must_manual_review": True,
+            "used_llm": advice.get("used_llm", False),
         }
 
     def generate_search_candidates(self, reagent_info: dict[str, Any]) -> dict[str, Any]:
@@ -500,16 +549,7 @@ raw_text:
     def _ordinary_mineral_acid_label(text: str) -> str:
         normalized = text.lower()
         compact = re.sub(r"\s+", "", normalized)
-        salt_terms = (
-            "hydrochloride",
-            "nitrate",
-            "sulfate",
-            "sulphate",
-            "\u76d0\u9178\u76d0",
-            "\u785d\u9178\u76d0",
-            "\u786b\u9178\u76d0",
-        )
-        if any(term in compact for term in salt_terms):
+        if LlmExtractor._looks_like_acid_salt_text(compact):
             return ""
 
         acid_terms = (
@@ -521,6 +561,42 @@ raw_text:
             if any(term in normalized for term in terms):
                 return label
         return ""
+
+    @staticmethod
+    def _looks_like_acid_salt_text(compact_text: str) -> bool:
+        salt_terms = (
+            "hydrochloride",
+            "nitrate",
+            "sulfate",
+            "sulphate",
+            "sulfonate",
+            "sulphonate",
+            "carboxylate",
+            "phenolate",
+            "urate",
+            "acidsalt",
+            "ammoniumsalt",
+            "sodiumsalt",
+            "potassiumsalt",
+            "盐酸盐",
+            "硝酸盐",
+            "硫酸盐",
+            "磷酸盐",
+            "磺酸盐",
+            "羧酸盐",
+            "钠盐",
+            "钾盐",
+            "铵盐",
+            "酚钠盐",
+            "酚钠",
+        )
+        if any(term in compact_text for term in salt_terms):
+            return True
+        return bool(
+            re.search(r"酸(钠|钾|铵|銨|氨)", compact_text)
+            or re.search(r"(盐酸|硝酸|硫酸|磷酸|磺酸|羧酸|酚).{0,12}(钠|钾|铵|銨|氨)", compact_text)
+            or re.search(r"(钠|钾|铵|銨|氨).{0,12}(盐酸|硝酸|硫酸|磷酸|磺酸|羧酸|酚)", compact_text)
+        )
 
     @staticmethod
     def _suppress_incompatibility_only_oxidizing(result: dict[str, Any], raw_text: str) -> dict[str, Any]:

@@ -232,7 +232,7 @@ def api_status() -> JSONResponse:
     return JSONResponse(
         {
             "runtime": runtime_config_snapshot(),
-            "status": manager.status(),
+            "status": manager.status(light=True),
             "todo_tasks": todo_tasks_summary(),
             "scheduler": scheduler.status(),
             "dingtalk_stream": dingtalk_stream_bot.status(),

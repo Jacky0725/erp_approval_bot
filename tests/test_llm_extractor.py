@@ -26,10 +26,12 @@ class LlmExtractorFallbackTest(unittest.TestCase):
     def test_classify_by_rules_fallback_parses_structured_json(self) -> None:
         class FakeMessage:
             content = (
-                '{"candidate_category":"强反应性","confidence":0.92,'
-                '"reason":"名称提示可能按强反应性规则处理。",'
-                '"matched_rule_summary":"硼酸类需按强反应性复核",'
-                '"evidence_type":"name_based","must_manual_review":false}'
+                '{"candidate_category":"强反应性","advisory_confidence":0.92,'
+                '"identity_confidence":0.95,'
+                '"physicochemical_summary_cn":"名称提示可能具有较强反应性。",'
+                '"reason_cn":"名称提示可能按强反应性规则处理。",'
+                '"matched_rule_summary_cn":"硼酸类需按强反应性复核",'
+                '"uncertainties_cn":["仍需核对SDS"],"evidence_basis":"网页资料"}'
             )
 
         class FakeChoice:
@@ -61,6 +63,7 @@ class LlmExtractorFallbackTest(unittest.TestCase):
         result = OnlineExtractor().classify_by_rules_fallback(
             {
                 "raw_name": "4-乙氧基-2-甲基苯基硼酸",
+                "has_trusted_web_evidence": True,
                 "rule_summary": [{"category": "强反应性", "rule_keywords": "硼酸", "example_names": ""}],
             }
         )
@@ -69,7 +72,7 @@ class LlmExtractorFallbackTest(unittest.TestCase):
         self.assertEqual(result["candidate_category"], "强反应性")
         self.assertEqual(result["confidence"], 0.92)
         self.assertEqual(result["evidence_type"], "name_based")
-        self.assertFalse(result["must_manual_review"])
+        self.assertTrue(result["must_manual_review"])
 
     def test_classify_by_rules_fallback_caps_insufficient_confidence(self) -> None:
         class FakeMessage:

@@ -117,11 +117,19 @@ class RuleEngineTest(unittest.TestCase):
         self.assertEqual(result["final_category"], "剧毒品")
         self.assertIn("剧毒品", result["matched_categories"])
 
-    def test_unknown_reagent_needs_manual_review(self) -> None:
-        result = self.engine.classify({"reagent_name": "无标签历史遗留试剂"})
+    def test_unknown_reagent_keywords_do_not_need_manual_review(self) -> None:
+        for name in (
+            "无标签历史遗留试剂",
+            "未知试剂",
+            "不明成分试剂",
+            "无法辨识试剂",
+            "无MSDS试剂",
+        ):
+            with self.subTest(name=name):
+                result = self.engine.classify({"reagent_name": name})
 
-        self.assertEqual(result["final_category"], "未知类")
-        self.assertTrue(result["need_manual_review"])
+                self.assertEqual(result["final_category"], "未知类")
+                self.assertFalse(result["need_manual_review"])
 
     def test_unmatched_reagent_needs_manual_review(self) -> None:
         result = self.engine.classify({"reagent_name": "完全不存在的样品XYZ"})

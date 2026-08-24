@@ -145,6 +145,141 @@ class ApprovalWriterDropdownBindingTest(unittest.TestCase):
 
         self.assertTrue(ApprovalWriter._scroll_bound_dropdown_to_option(self.page, "强反应", options, row))
 
+    def test_bound_dropdown_scroll_jumps_to_late_virtual_option(self) -> None:
+        self.page.set_content(
+            """
+            <style>
+              tr, .ant-select, input { display: block; width: 160px; height: 32px; }
+              .ant-select-dropdown { position: fixed; top: 80px; left: 20px; width: 180px; height: 160px; }
+              .rc-virtual-list-holder { height: 128px; overflow: auto; }
+              .scroll-pad { height: 512px; position: relative; }
+              .ant-select-item-option { height: 32px; }
+            </style>
+            <table><tbody>
+              <tr class="ant-table-row" data-row-key="row-1">
+                <td><div class="ant-select ant-select-open"><input id="input-1" role="combobox" aria-controls="list-1"></div></td>
+              </tr>
+            </tbody></table>
+            <div id="list-1" class="ant-select-dropdown">
+              <div class="rc-virtual-list-holder">
+                <div class="scroll-pad"></div>
+              </div>
+            </div>
+            <script>
+              const names = [
+                "普通类", "重金属类", "溴碘类", "常规酸", "常规碱", "特殊酸",
+                "异味", "发烟类", "高毒类", "氧化剂", "强反应", "刺激性",
+                "易燃类", "易爆类", "拒收类", "未知类"
+              ];
+              const holder = document.querySelector(".rc-virtual-list-holder");
+              const pad = document.querySelector(".scroll-pad");
+              function render() {
+                const start = Math.max(0, Math.floor(holder.scrollTop / 32) - 1);
+                const end = Math.min(names.length, start + 6);
+                pad.innerHTML = "";
+                for (let i = start; i < end; i += 1) {
+                  const item = document.createElement("div");
+                  item.className = "ant-select-item-option";
+                  item.style.position = "absolute";
+                  item.style.top = `${i * 32}px`;
+                  item.innerHTML = `<span class="ant-select-item-option-content">${names[i]}</span>`;
+                  pad.appendChild(item);
+                }
+              }
+              holder.addEventListener("scroll", render);
+              holder.addEventListener("wheel", render);
+              render();
+              document.getElementById("input-1").focus();
+            </script>
+            """
+        )
+        row = self.page.locator("tr[data-row-key='row-1']")
+        options = [
+            "普通类", "重金属类", "溴碘类", "常规酸", "常规碱", "特殊酸",
+            "异味", "发烟类", "高毒类", "氧化剂", "强反应", "刺激性",
+            "易燃类", "易爆类", "拒收类", "未知类",
+        ]
+
+        self.assertTrue(ApprovalWriter._scroll_bound_dropdown_to_option(self.page, "未知类", options, row))
+        state = ApprovalWriter._bound_dropdown_state(self.page, "未知类", options, row)
+        self.assertTrue(state["found"])
+
+    def test_row_mode_does_not_click_unbound_global_dropdown(self) -> None:
+        self.page.set_content(
+            """
+            <style>
+              tr, .ant-select, input, .ant-select-dropdown, .ant-select-item-option {
+                display: block;
+                width: 160px;
+                height: 32px;
+              }
+              .ant-select-dropdown { position: fixed; top: 100px; left: 10px; }
+              #list-2 { left: 260px; }
+            </style>
+            <table><tbody>
+              <tr class="ant-table-row" data-row-key="row-1">
+                <td><div class="ant-select ant-select-open"><input id="row-1-input" role="combobox" aria-controls="list-1"></div></td>
+              </tr>
+              <tr class="ant-table-row" data-row-key="row-2">
+                <td><div class="ant-select"><input id="row-2-input" role="combobox" aria-controls="list-2"></div></td>
+              </tr>
+            </tbody></table>
+            <div id="list-1" class="ant-select-dropdown">
+              <div class="ant-select-item-option"><span class="ant-select-item-option-content">普通类</span></div>
+            </div>
+            <div id="list-2" class="ant-select-dropdown">
+              <div class="ant-select-item-option"><span class="ant-select-item-option-content">未知类</span></div>
+            </div>
+            <script>
+              window.clickedDropdown = "";
+              for (const dropdown of document.querySelectorAll(".ant-select-dropdown")) {
+                dropdown.addEventListener("click", () => { window.clickedDropdown = dropdown.id; });
+              }
+              document.getElementById("row-1-input").focus();
+            </script>
+            """
+        )
+        writer = ApprovalWriter(settings={"reagent": {"physicochemical_property_options": ["普通类", "未知类"]}})
+        row = self.page.locator("tr[data-row-key='row-1']")
+
+        self.assertFalse(writer._select_property_option(self.page, "未知类", row))
+        self.assertEqual(self.page.evaluate("window.clickedDropdown"), "")
+
+    def test_bound_search_requires_current_row_commit_when_dropdown_closes(self) -> None:
+        self.page.set_content(
+            """
+            <style>
+              tr, .ant-select, input, .ant-select-dropdown, .ant-select-item-option {
+                display: block;
+                width: 160px;
+                height: 32px;
+              }
+              .ant-select-dropdown { position: fixed; top: 100px; left: 10px; }
+              .ant-select-dropdown-hidden { display: none; }
+            </style>
+            <table><tbody>
+              <tr class="ant-table-row" data-row-key="row-1">
+                <td><div class="ant-select ant-select-open"><input id="row-input" role="combobox" aria-controls="list-1"></div></td>
+              </tr>
+            </tbody></table>
+            <div id="list-1" class="ant-select-dropdown">
+              <div class="ant-select-item-option"><span class="ant-select-item-option-content">普通类</span></div>
+            </div>
+            <script>
+              const input = document.getElementById("row-input");
+              input.addEventListener("keydown", (event) => {
+                if (event.key === "Enter") {
+                  document.getElementById("list-1").classList.add("ant-select-dropdown-hidden");
+                }
+              });
+              input.focus();
+            </script>
+            """
+        )
+        row = self.page.locator("tr[data-row-key='row-1']")
+
+        self.assertFalse(ApprovalWriter._search_and_select_bound_property_option(self.page, "未知类", row))
+
     def test_focus_row_property_combobox_uses_property_column_not_first_select(self) -> None:
         self.page.set_content(
             """

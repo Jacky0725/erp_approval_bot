@@ -766,6 +766,7 @@
 
     function reviewEvidenceLabel(row) {
       const type = row.evidence_source_type || "";
+      if (type === "llm_manual_review_advice") return "LLM第二意见";
       if (type === "llm_rule_fallback") return "LLM规则辅助";
       if (type === "llm_fallback") return "LLM辅助";
       if (type === "trusted_web") return "可信网站";
@@ -774,6 +775,7 @@
     }
 
     function reviewAllowsSuggestionPreselect(row) {
+      if (String(row.llm_advisory_only || "").toLowerCase() === "true") return false;
       return String(row.allow_suggestion_preselect || "").toLowerCase() === "true";
     }
 
@@ -796,7 +798,7 @@
         ? `<a href="${escapeHtml(row.source_url)}" target="_blank" rel="noreferrer">来源链接</a>`
         : "";
       return `
-        <div class="review-evidence ${row.evidence_source_type === "llm_fallback" || row.evidence_source_type === "llm_rule_fallback" ? "llm-evidence" : ""}">
+        <div class="review-evidence ${["llm_fallback", "llm_rule_fallback", "llm_manual_review_advice"].includes(row.evidence_source_type) ? "llm-evidence" : ""}">
           <div class="review-evidence-head">
             <span>${escapeHtml(evidenceStatus)}</span>
             ${sourceLink}

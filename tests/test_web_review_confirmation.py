@@ -73,7 +73,7 @@ class WebReviewConfirmationTest(unittest.TestCase):
         self.assertEqual(row["review_advice"], "LLM fallback is advisory only.")
         self.assertEqual(row["display_suggestion"], "LLM辅助建议：腐蚀性")
         self.assertEqual(row["evidence_status"], "LLM辅助，置信度 0.65")
-        self.assertEqual(row["allow_suggestion_preselect"], "True")
+        self.assertEqual(row["allow_suggestion_preselect"], "False")
 
     def test_review_queue_summary_paginates_pending_rows_server_side(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -336,7 +336,7 @@ class WebReviewConfirmationTest(unittest.TestCase):
 
         row = summary["preview"][0]
         self.assertEqual(row["suggested_category"], "未配置类别")
-        self.assertEqual(row["allow_suggestion_preselect"], "True")
+        self.assertEqual(row["allow_suggestion_preselect"], "False")
         self.assertEqual(row["display_suggestion"], "LLM按规则辅助建议：未配置类别")
 
     def test_review_queue_summary_does_not_preselect_high_risk_llm_rule_candidate(self) -> None:

@@ -71,12 +71,16 @@ class ReagentMemory:
               AND conflict = 0
               AND ({' OR '.join(clauses)})
             ORDER BY manual_verified DESC, confidence DESC, updated_at DESC, id DESC
-            LIMIT 1
+            LIMIT 20
         """
         with closing(self._connect()) as conn:
             with conn:
-                row = conn.execute(sql, params).fetchone()
-                if not row:
+                row = None
+                for candidate in conn.execute(sql, params).fetchall():
+                    if not self.is_unsafe_reusable_evidence(candidate):
+                        row = candidate
+                        break
+                if row is None:
                     return None
                 conn.execute(
                     """
@@ -164,6 +168,10 @@ class ReagentMemory:
         confidence = self._float(suggestion.get(CONFIDENCE_KEY), 0.0)
         if confidence < self.min_confidence:
             return False
+        source = str(suggestion.get(SOURCE_KEY) or "").strip() or "approval_flow"
+        reason = str(suggestion.get(RULE_REASON_KEY) or "").strip()
+        if self.is_unsafe_reusable_evidence({"source": source, "reason": reason}):
+            return False
 
         return self.add_record(
             raw_name=str(suggestion.get(RAW_NAME_KEY) or "").strip(),
@@ -172,8 +180,8 @@ class ReagentMemory:
             cas=str(suggestion.get(CAS_KEY) or "").strip(),
             final_category=final_category,
             confidence=confidence,
-            reason=str(suggestion.get(RULE_REASON_KEY) or "").strip(),
-            source=str(suggestion.get(SOURCE_KEY) or "").strip() or "approval_flow",
+            reason=reason,
+            source=source,
             url=str(suggestion.get(URL_KEY) or "").strip(),
             specification=str(suggestion.get(SPECIFICATION_KEY) or "").strip(),
             unit=str(suggestion.get(UNIT_KEY) or "").strip(),
@@ -527,6 +535,7 @@ class ReagentMemory:
                     and not need_manual_review
                     and not conflict
                     and confidence >= self.min_confidence
+                    and not self.is_unsafe_reusable_evidence({"source": source, "reason": reason})
                 )
                 existing = next(
                     (
@@ -695,7 +704,12 @@ class ReagentMemory:
             "need_manual_review": int(bool(need_manual_review)),
             "manual_verified": int(bool(manual_verified) or bool(existing.get("manual_verified"))),
             "conflict": int(bool(conflict)),
-            "reusable": int(bool(reusable)),
+            "reusable": int(
+                bool(reusable)
+                and not self.is_unsafe_reusable_evidence(
+                    {"source": source or existing.get("source"), "reason": merged_reason}
+                )
+            ),
         }
         assignments = ", ".join(f"{column} = ?" for column in merged)
         conn.execute(
@@ -737,6 +751,27 @@ class ReagentMemory:
             f"UPDATE reagent_memory SET conflict = 1, reusable = 0, updated_at = ? WHERE {column} = ?",
             [self._now(), value],
         )
+
+    @staticmethod
+    def is_unsafe_reusable_evidence(row: dict[str, Any] | sqlite3.Row) -> bool:
+        reason = str(row.get("reason") or "").strip() if hasattr(row, "get") else str(row["reason"] or "").strip()
+        source = str(row.get("source") or "").strip() if hasattr(row, "get") else str(row["source"] or "").strip()
+        text = f"{source}\n{reason}".lower()
+        unsafe_tokens = (
+            "网页写入失败",
+            "could not select",
+            "row still shows",
+            "selected 易燃类, but",
+            "selected unknown, but",
+            "write failure",
+            "write_failed",
+            "llm knowledge fallback",
+            "llm_knowledge",
+            "llm知识托底",
+            "低置信",
+            "仅供复核",
+        )
+        return any(token.lower() in text for token in unsafe_tokens)
 
     def _ensure_schema(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
