@@ -69,6 +69,12 @@ SUPPLEMENTAL_EXAMPLES = [
     ("\u4e0d\u5efa\u8bae\u63a5\u6536\u7c7b", "\u4e59\u9178\u4e9a\u94ca", "exact", "\u542b\u94c5\u3001\u6c5e\u3001\u94ca\u3001\u94cd\u7b49\u62d2\u6536\u7c7b\u4e3e\u4f8b"),
     ("\u4e0d\u5efa\u8bae\u63a5\u6536\u7c7b", "\u4e19\u4e8c\u9178\u94ca", "exact", "\u542b\u94c5\u3001\u6c5e\u3001\u94ca\u3001\u94cd\u7b49\u62d2\u6536\u7c7b\u4e3e\u4f8b"),
     ("\u4e0d\u5efa\u8bae\u63a5\u6536\u7c7b", "\u94cd\u7c7b", "contains", "\u542b\u94c5\u3001\u6c5e\u3001\u94ca\u3001\u94cd\u7b49\u62d2\u6536\u7c7b\u4e3e\u4f8b"),
+    ("\u6c27\u5316\u5242", "\u9ad8\u9530\u9178\u94be", "contains", "\u6807\u51c6\u5316\u6c27\u5316\u5242\u793a\u4f8b\uff1a\u9ad8\u9530\u9178\u76d0"),
+    ("\u6c27\u5316\u5242", "\u9ad8\u9530\u9178\u94a0", "contains", "\u6807\u51c6\u5316\u6c27\u5316\u5242\u793a\u4f8b\uff1a\u9ad8\u9530\u9178\u76d0"),
+    ("\u6c27\u5316\u5242", "\u9ad8\u9530\u9178\u76d0", "contains", "\u6807\u51c6\u5316\u6c27\u5316\u5242\u793a\u4f8b\uff1a\u9ad8\u9530\u9178\u76d0"),
+    ("\u6c27\u5316\u5242", "\u91cd\u94ec\u9178\u94be", "contains", "\u6807\u51c6\u5316\u6c27\u5316\u5242\u793a\u4f8b\uff1a\u91cd\u94ec\u9178\u76d0"),
+    ("\u6c27\u5316\u5242", "\u91cd\u94ec\u9178\u94a0", "contains", "\u6807\u51c6\u5316\u6c27\u5316\u5242\u793a\u4f8b\uff1a\u91cd\u94ec\u9178\u76d0"),
+    ("\u6c27\u5316\u5242", "\u91cd\u94ec\u9178\u76d0", "contains", "\u6807\u51c6\u5316\u6c27\u5316\u5242\u793a\u4f8b\uff1a\u91cd\u94ec\u9178\u76d0"),
 ]
 
 SUPPLEMENTAL_NOTES = [
@@ -297,6 +303,11 @@ def _examples_sheet(legacy: LegacyRules, priority: list[str]) -> pd.DataFrame:
     for category, example, match_mode, notes in SUPPLEMENTAL_EXAMPLES:
         key = (category, example)
         if key in seen:
+            for row in rows:
+                if row["category"] == category and row["example_name"] == example:
+                    row["match_mode"] = match_mode
+                    row["notes"] = notes
+                    break
             continue
         seen.add(key)
         rows.append(

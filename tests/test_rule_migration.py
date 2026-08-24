@@ -15,6 +15,15 @@ from rule_migration import migrate_rules, read_legacy_rules  # noqa: E402
 
 
 class RuleMigrationTest(unittest.TestCase):
+    OXIDIZER_EXAMPLES = {
+        "高锰酸钾",
+        "高锰酸钠",
+        "高锰酸盐",
+        "重铬酸钾",
+        "重铬酸钠",
+        "重铬酸盐",
+    }
+
     def test_migrates_all_legacy_categories_with_rules_and_examples(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
             output_path = Path(tempdir) / "rules_structured.xlsx"
@@ -49,6 +58,27 @@ class RuleMigrationTest(unittest.TestCase):
                     checked_in_df = pd.read_excel(checked_in, sheet_name=sheet_name, engine="openpyxl").fillna("")
                     self.assertEqual(list(generated_df.columns), list(checked_in_df.columns))
                     self.assertEqual(len(generated_df), len(checked_in_df))
+
+    def test_oxidizer_examples_are_standardized_in_migration_and_checked_in_rules(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            generated = Path(tempdir) / "rules_structured.xlsx"
+            migrate_rules(ROOT_DIR / "config" / "rules.xlsx", generated)
+            checked_in = ROOT_DIR / "config" / "rules_structured.xlsx"
+
+            for rules_path in (generated, checked_in):
+                with self.subTest(rules_path=rules_path.name):
+                    examples = pd.read_excel(rules_path, sheet_name="examples", engine="openpyxl").fillna("")
+                    oxidizers = examples[examples["category"].astype(str).str.strip() == "氧化剂"]
+                    example_names = set(oxidizers["example_name"].astype(str).str.strip())
+                    match_modes = {
+                        row["example_name"]: row["match_mode"]
+                        for _, row in oxidizers.iterrows()
+                        if row["example_name"] in self.OXIDIZER_EXAMPLES
+                    }
+
+                    self.assertTrue(self.OXIDIZER_EXAMPLES.issubset(example_names))
+                    self.assertEqual(set(match_modes), self.OXIDIZER_EXAMPLES)
+                    self.assertTrue(all(mode == "contains" for mode in match_modes.values()))
 
 
 if __name__ == "__main__":
