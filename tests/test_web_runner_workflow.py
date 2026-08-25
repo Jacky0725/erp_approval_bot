@@ -15,6 +15,7 @@ from web_runner import (
     normalize_web_write_mode,
     parse_target_list_numbers,
     repair_display_text,
+    light_run_summary,
     run_summary,
     run_health,
     todo_tasks_summary,
@@ -150,6 +151,27 @@ class WorkflowSummaryTest(unittest.TestCase):
             self.assertEqual(summary["page_suggestion_count"], 20)
             self.assertEqual(summary["deferred_write_count"], 2)
             self.assertEqual(summary["not_found_after_reread_count"], 1)
+
+    def test_light_run_summary_includes_dropdown_failure_details(self) -> None:
+        lines = [
+            "Save verified for sequence 35: True (clicked_save=True)",
+            "Could not select physicochemical property 未知类 for sequence: 36",
+        ]
+
+        summary = light_run_summary(
+            lines,
+            action="suggestions",
+            options={"TARGET_LIST_NUMBERS": "SJ202608180001"},
+            running=True,
+            success=None,
+            error="",
+        )
+
+        self.assertEqual(summary["write_success_count"], 1)
+        self.assertEqual(summary["write_failure_count"], 1)
+        self.assertEqual(summary["dropdown_failure_count"], 1)
+        self.assertEqual(summary["dropdown_failures"][0]["sequence"], "36")
+        self.assertIn("未知类", summary["dropdown_failures"][0]["category"])
 
     def test_current_run_lines_reads_complete_log_file(self) -> None:
         with TemporaryDirectory() as tmp:

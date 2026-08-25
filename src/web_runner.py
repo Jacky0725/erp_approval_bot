@@ -783,18 +783,7 @@ def run_summary(
         or "not found after re-read" in line.lower()
         or "pending write candidate(s) not found" in line.lower()
     )
-    dropdown_failures = []
-    for line in lines:
-        lower = line.lower()
-        if "could not select physicochemical property" not in lower:
-            continue
-        dropdown_failures.append(
-            {
-                "line": repair_display_text(line),
-                "sequence": extract_after(line, "sequence:"),
-                "category": extract_between(line, "property", "for sequence:"),
-            }
-        )
+    dropdown_failures = dropdown_failure_details(lines)
     llm_seconds = 0.0
     llm_batches = 0
     for line in lines:
@@ -891,6 +880,7 @@ def light_run_summary(
         or "failed save operation" in line.lower()
         or "save verification failed" in line.lower()
     )
+    dropdown_failures = dropdown_failure_details(lines)
     if running:
         outcome = "运行中"
     elif success is True and action == "todo_export":
@@ -916,8 +906,8 @@ def light_run_summary(
         "write_failure_count": write_failed,
         "deferred_write_count": sum(1 for line in lines if "deferred pending write candidate" in line.lower()),
         "not_found_after_reread_count": sum(1 for line in lines if "not found after re-read" in line.lower()),
-        "dropdown_failure_count": write_failed,
-        "dropdown_failures": [],
+        "dropdown_failure_count": len(dropdown_failures),
+        "dropdown_failures": dropdown_failures[:12],
         "page_suggestion_count": int(suggestion_metrics.get("suggestion_total") or 0),
         "writable_candidate_count": int(suggestion_metrics.get("writable_candidate_count") or 0),
         "manual_review_candidate_count": int(suggestion_metrics.get("manual_review_candidate_count") or 0),
@@ -946,6 +936,22 @@ def extract_between(line: str, start_marker: str, end_marker: str) -> str:
         return ""
     value = line.split(start_marker, 1)[1].split(end_marker, 1)[0].strip()
     return repair_display_text(value)
+
+
+def dropdown_failure_details(lines: list[str]) -> list[dict[str, str]]:
+    failures = []
+    for line in lines:
+        lower = line.lower()
+        if "could not select physicochemical property" not in lower:
+            continue
+        failures.append(
+            {
+                "line": repair_display_text(line),
+                "sequence": extract_after(line, "sequence:"),
+                "category": extract_between(line, "property", "for sequence:"),
+            }
+        )
+    return failures
 
 
 def extract_number_before(line: str, marker: str) -> float | None:
