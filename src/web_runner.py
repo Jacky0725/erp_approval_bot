@@ -44,7 +44,11 @@ from category_mapper import (
 from app_info import app_version
 from memory_sync import MemorySyncError, MemorySyncService, memory_sync_config
 from reagent_memory import ReagentMemory
-from review_queue import migrate_pending_review_reasons, review_display_summary_from_row
+from review_queue import (
+    canonicalize_review_queue_columns,
+    migrate_pending_review_reasons,
+    review_display_summary_from_row,
+)
 from runtime_paths import ensure_runtime_layout, runtime_root, source_root
 from scheduler import scheduler_config
 
@@ -145,6 +149,13 @@ MOJIBAKE_MARKERS = (
     "\ufffd",
     "\u00c2",
     "\u00c3",
+    "鐕冩",
+    "枡鍙",
+    "婃补",
+    "鍝",
+    "鐗",
+    "鍒",
+    "绫",
     "\u93b4",
     "\u6fb6",
     "\u9427",
@@ -164,12 +175,16 @@ def repair_display_text(value: Any) -> str:
         try:
             candidates.append(text.encode(encoding).decode("utf-8"))
         except UnicodeError:
-            continue
+            pass
+        try:
+            candidates.append(text.encode(encoding, errors="replace").decode("utf-8", errors="replace"))
+        except UnicodeError:
+            pass
     return min(candidates, key=mojibake_score)
 
 
 def mojibake_score(text: str) -> int:
-    return sum(text.count(marker) for marker in MOJIBAKE_MARKERS)
+    return sum(text.count(marker) for marker in MOJIBAKE_MARKERS) + text.count("?")
 
 
 class LineBufferWriter(io.TextIOBase):
@@ -1329,7 +1344,7 @@ def build_todo_tasks_excel_payload(path: Path) -> dict[str, Any]:
     def first_existing(row: pd.Series, columns: list[str]) -> str:
         for column in columns:
             if column in row.index:
-                value = str(row.get(column, "")).strip()
+                value = repair_display_text(row.get(column, "")).strip()
                 if value:
                     return value
         return ""
@@ -1440,7 +1455,7 @@ class DateSortKey:
 
 
 def build_review_queue_payload(path: Path) -> dict[str, Any]:
-    frame = pd.read_excel(path, dtype=str).fillna("")
+    frame = canonicalize_review_queue_columns(pd.read_excel(path, dtype=str).fillna(""))
     settings = load_settings()
 
     def first_existing(row: pd.Series, columns: list[str]) -> str:
@@ -1617,7 +1632,7 @@ def confirm_review_item(payload: dict[str, Any], root_dir: Path = ROOT_DIR) -> d
     if not path.exists():
         return {"confirmed": False, "message": "review_queue.xlsx does not exist."}
 
-    frame = pd.read_excel(path, dtype=str).fillna("")
+    frame = canonicalize_review_queue_columns(pd.read_excel(path, dtype=str).fillna(""))
     if frame.empty:
         return {"confirmed": False, "message": "review_queue.xlsx is empty."}
 
@@ -1670,19 +1685,16 @@ def confirm_review_item(payload: dict[str, Any], root_dir: Path = ROOT_DIR) -> d
     row = frame.loc[matched_index]
     memory = ReagentMemory.from_settings(settings, root_dir)
     memory_added = memory.add_record(
-        raw_name=first_existing_value(row, ["试剂名称", "chemical_name", "reagent_name"])
-        or str(payload.get("reagent_name") or ""),
-        cleaned_name=first_existing_value(row, ["cleaned_name", "清洗后名称"])
-        or str(payload.get("cleaned_name") or ""),
-        standard_name=first_existing_value(row, ["standard_name", "标准化名称"])
-        or str(payload.get("standard_name") or ""),
-        cas=first_existing_value(row, ["cas", "CAS号"]) or str(payload.get("cas") or ""),
+        raw_name=best_review_text(row, ["试剂名称", "chemical_name", "reagent_name"], payload, "reagent_name"),
+        cleaned_name=best_review_text(row, ["cleaned_name", "清洗后名称"], payload, "cleaned_name"),
+        standard_name=best_review_text(row, ["standard_name", "标准化名称"], payload, "standard_name"),
+        cas=best_review_text(row, ["cas", "CAS号"], payload, "cas"),
         final_category=final_category,
         confidence=0.0 if non_writable_decision else 1.0,
-        reason=str(payload.get("reason") or "人工复核确认后加入高可信试剂记忆库。"),
+        reason=repair_display_text(payload.get("reason") or "人工复核确认后加入高可信试剂记忆库。"),
         source="manual_review_web_ui",
-        specification=first_existing_value(row, ["specification", "规格"]) or str(payload.get("specification") or ""),
-        unit=first_existing_value(row, ["unit", "规格单位"]) or str(payload.get("unit") or ""),
+        specification=best_review_text(row, ["specification", "规格"], payload, "specification"),
+        unit=best_review_text(row, ["unit", "规格单位"], payload, "unit"),
         need_manual_review=False,
         manual_verified=True,
         track_conflicts=not non_writable_decision,
@@ -1731,7 +1743,7 @@ def delete_review_item(payload: dict[str, Any], root_dir: Path = ROOT_DIR) -> di
     if not path.exists():
         return {"deleted": False, "message": "review_queue.xlsx does not exist."}
 
-    frame = pd.read_excel(path, dtype=str).fillna("")
+    frame = canonicalize_review_queue_columns(pd.read_excel(path, dtype=str).fillna(""))
     if frame.empty:
         return {"deleted": False, "message": "review_queue.xlsx is empty."}
 
@@ -1762,6 +1774,17 @@ def match_review_item_by_fields(frame: pd.DataFrame, payload: dict[str, Any]) ->
     reagent_name = str(payload.get("reagent_name") or "").strip()
     cas = str(payload.get("cas") or "").strip()
     sequence = str(payload.get("sequence") or "").strip()
+    if list_number and sequence:
+        sequence_matches: list[int] = []
+        for index, row in frame.iterrows():
+            if first_existing_value(row, ["试剂清单号", "当前清单号", "清单号", "list_number"]) != list_number:
+                continue
+            if first_existing_value(row, ["序号", "sequence", "index"]) != sequence:
+                continue
+            sequence_matches.append(index)
+        if sequence_matches:
+            return sequence_matches[-1]
+
     matches: list[int] = []
     for index, row in frame.iterrows():
         if list_number and first_existing_value(row, ["试剂清单号", "当前清单号", "清单号", "list_number"]) != list_number:
@@ -1790,10 +1813,23 @@ def review_queue_row_key(row: pd.Series) -> str:
 def first_existing_value(row: pd.Series, columns: list[str]) -> str:
     for column in columns:
         if column in row.index:
-            value = str(row.get(column, "")).strip()
+            value = repair_display_text(row.get(column, "")).strip()
             if value:
                 return value
     return ""
+
+
+def best_review_text(
+    row: pd.Series,
+    columns: list[str],
+    payload: dict[str, Any],
+    payload_key: str,
+) -> str:
+    row_value = first_existing_value(row, columns)
+    payload_value = repair_display_text(payload.get(payload_key) or "").strip()
+    if payload_value and mojibake_score(payload_value) < mojibake_score(row_value):
+        return payload_value
+    return row_value or payload_value
 
 
 def memory_summary(

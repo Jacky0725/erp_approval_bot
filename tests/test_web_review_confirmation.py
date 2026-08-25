@@ -576,6 +576,55 @@ class WebReviewConfirmationTest(unittest.TestCase):
             self.assertEqual(rows[0]["final_category"], "拒收类")
             self.assertEqual(rows[0]["reusable"], 1)
 
+    def test_confirm_review_item_uses_clean_payload_when_legacy_queue_columns_are_garbled(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            data_dir = root / "data"
+            data_dir.mkdir(parents=True)
+            queue_path = data_dir / "review_queue.xlsx"
+            pd.DataFrame(
+                [
+                    {
+                        "timestamp": "2026-08-19T14:15:31",
+                        "�Լ��嵥��": "SJ202608180001",
+                        "���": "27",
+                        "chemical_name": "鐕冩枡鍙婃补鍝�",
+                        "�Լ�����": "鐕冩枡鍙婃补鍝�",
+                        "cas": "-",
+                        "standard_name": "鐕冩枡鍙婃补鍝�",
+                        "cleaned_name": "鐕冩枡鍙婃补鍝�",
+                        "reason": "LLM fallback evidence is advisory only and requires manual review.",
+                        "status": "pending",
+                    }
+                ]
+            ).to_excel(queue_path, index=False)
+
+            result = confirm_review_item(
+                {
+                    "list_number": "SJ202608180001",
+                    "sequence": "27",
+                    "reagent_name": "燃料及油品",
+                    "cleaned_name": "燃料及油品",
+                    "standard_name": "燃料及油品",
+                    "cas": "-",
+                    "final_category": "易燃类",
+                    "reason": "人工确认燃料及油品按易燃类处理。",
+                },
+                root,
+            )
+
+            self.assertTrue(result["confirmed"])
+            self.assertTrue(result["memory_added"])
+            self.assertEqual(review_queue_summary(root)["pending"], 0)
+
+            memory = ReagentMemory.from_settings({}, root)
+            match = memory.lookup(raw_name="燃料及油品")
+            self.assertIsNotNone(match)
+            assert match is not None
+            self.assertEqual(match["raw_name"], "燃料及油品")
+            self.assertEqual(match["final_category"], "易燃类")
+            self.assertEqual(match["reusable"], 1)
+
     def test_memory_summary_and_update_record(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

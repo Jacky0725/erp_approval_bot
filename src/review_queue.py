@@ -79,6 +79,37 @@ BLOCKING_REVIEW_STATUSES = {
 _MIGRATED_REVIEW_SIGNATURES: dict[str, int] = {}
 
 
+REVIEW_QUEUE_COLUMN_ALIASES = {
+    "�Լ��嵥��": "试剂清单号",
+    "�Լ�����": "试剂名称",
+    "���": "序号",
+    "CAS��": "CAS号",
+    "����": "规格",
+    "������λ": "规格单位",
+    "��׼����": "standard_name",
+    "��ϴ������": "cleaned_name",
+}
+
+
+def canonicalize_review_queue_columns(frame: pd.DataFrame) -> pd.DataFrame:
+    """Normalize legacy mojibake review-queue headers without dropping data."""
+    if frame.empty:
+        return frame
+    result = frame.copy()
+    for alias, canonical in REVIEW_QUEUE_COLUMN_ALIASES.items():
+        if alias not in result.columns:
+            continue
+        if canonical in result.columns:
+            result[canonical] = result[canonical].where(
+                result[canonical].astype(str).str.strip() != "",
+                result[alias],
+            )
+            result = result.drop(columns=[alias])
+        else:
+            result = result.rename(columns={alias: canonical})
+    return result
+
+
 class ReviewQueueMixin:
     def clear_manual_review_items_for_list(self, list_number: str) -> None:
         list_number = str(list_number or "").strip()
@@ -91,7 +122,7 @@ class ReviewQueueMixin:
             return
 
         try:
-            queue = pd.read_excel(review_queue_path, dtype=str).fillna("")
+            queue = canonicalize_review_queue_columns(pd.read_excel(review_queue_path, dtype=str).fillna(""))
         except Exception as error:
             print(f"Could not clear old manual review items for {list_number}: {error}")
             return
@@ -141,7 +172,7 @@ class ReviewQueueMixin:
             return False, ""
 
         try:
-            queue = pd.read_excel(review_queue_path, dtype=str).fillna("")
+            queue = canonicalize_review_queue_columns(pd.read_excel(review_queue_path, dtype=str).fillna(""))
         except Exception as error:
             return True, f"Could not read review queue: {error}"
 
@@ -230,7 +261,11 @@ class ReviewQueueMixin:
         migrate_pending_review_reasons(review_queue_path)
 
         try:
-            queue = pd.read_excel(review_queue_path, dtype=str).fillna("") if review_queue_path.exists() else pd.DataFrame()
+            queue = (
+                canonicalize_review_queue_columns(pd.read_excel(review_queue_path, dtype=str).fillna(""))
+                if review_queue_path.exists()
+                else pd.DataFrame()
+            )
         except Exception:
             queue = pd.DataFrame()
 
@@ -283,7 +318,13 @@ class ReviewQueueMixin:
 
             list_column = next((column for column in list_columns if column in queue.columns), "")
             name_column = next((column for column in name_columns if column in queue.columns), "")
-            if list_column and name_column:
+            sequence_column = next((column for column in sequence_columns if column in queue.columns), "")
+            if list_column and sequence_column and sequence:
+                existing_match = (
+                    (queue[list_column].astype(str).str.strip() == list_number)
+                    & (queue[sequence_column].astype(str).str.strip() == str(sequence or "").strip())
+                )
+            elif list_column and name_column:
                 existing_match = (
                     (queue[list_column].astype(str).str.strip() == list_number)
                     & (queue[name_column].astype(str).str.strip() == chemical_name)
@@ -950,7 +991,7 @@ def migrate_pending_review_reasons(path: Path) -> bool:
     if _MIGRATED_REVIEW_SIGNATURES.get(cache_key) == signature:
         return False
     try:
-        frame = pd.read_excel(path, dtype=str).fillna("")
+        frame = canonicalize_review_queue_columns(pd.read_excel(path, dtype=str).fillna(""))
     except Exception:
         return False
     if frame.empty or "reason" not in frame.columns:

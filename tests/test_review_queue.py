@@ -140,6 +140,41 @@ class ReviewQueueTest(unittest.TestCase):
         self.assertEqual(len(queue), 2)
         self.assertEqual(queue["cas"].tolist(), ["111-11-1", "222-22-2"])
 
+    def test_manual_review_dedup_matches_legacy_columns_by_list_and_sequence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            pd.DataFrame(
+                [
+                    {
+                        "�Լ��嵥��": "SJ1",
+                        "���": "27",
+                        "chemical_name": "鐕冩枡鍙婃补鍝�",
+                        "status": "confirmed",
+                        "manual_result": "易燃类",
+                    }
+                ]
+            ).to_excel(root / "review_queue.xlsx", index=False)
+
+            bot = ReviewQueueBot(root)
+            bot._current_detail_info = {"当前清单号": "SJ1", "申请人": "tester"}
+            bot.add_manual_review_item(
+                {
+                    "序号": "27",
+                    "试剂名称": "燃料及油品",
+                    "CAS号": "-",
+                    "规格": "1",
+                    "规格单位": "kg",
+                    "试剂数量": "1",
+                },
+                {"standard_name": "燃料及油品", "cleaned_name": "燃料及油品"},
+                reason="再次运行仍需要人工复核",
+            )
+
+            queue = pd.read_excel(root / "review_queue.xlsx", dtype=str).fillna("")
+
+        self.assertEqual(len(queue), 1)
+        self.assertEqual(queue.loc[0, "status"], "confirmed")
+
     def test_existing_manual_review_reason_is_updated(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

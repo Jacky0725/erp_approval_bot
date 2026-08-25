@@ -230,6 +230,11 @@ class WorkflowSummaryTest(unittest.TestCase):
 
         self.assertEqual(repair_display_text(mojibake), "成功")
 
+    def test_repair_display_text_handles_common_gbk_replacement_mojibake(self) -> None:
+        mojibake = "燃料及油品".encode("utf-8").decode("gbk", errors="replace")
+
+        self.assertIn("燃料及油", repair_display_text(mojibake))
+
     def test_run_health_warns_on_business_failures(self) -> None:
         health = run_health(["Failed save operation(s): reagent_save_1"], True, "")
 
