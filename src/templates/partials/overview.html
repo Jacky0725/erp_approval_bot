@@ -32,6 +32,23 @@
       <div class="step">网页写入</div>
     </section>
 
+    <section class="panel data-health-panel" id="dataHealthPanel">
+      <div class="panel-title">
+        <div>
+          <h2>数据健康</h2>
+          <p id="dataHealthStatus">等待检查</p>
+        </div>
+      </div>
+      <div class="status-list data-health-list">
+        <div><span>记忆库乱码</span><strong id="healthMemoryMojibake">-</strong></div>
+        <div><span>可复用乱码</span><strong id="healthReusableMojibake">-</strong></div>
+        <div><span>不可恢复复用</span><strong id="healthUnrecoverableReusable">-</strong></div>
+        <div><span>冲突记录</span><strong id="healthConflicts">-</strong></div>
+        <div><span>已确认未入库</span><strong id="healthConfirmedMissingMemory">-</strong></div>
+        <div><span>复核重复项</span><strong id="healthDuplicateReviews">-</strong></div>
+      </div>
+    </section>
+
     <section class="panel status-panel overview-status-panel">
       <div class="panel-title">
         <div>

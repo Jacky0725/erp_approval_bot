@@ -11,6 +11,7 @@ from playwright.sync_api import Error, Locator, Page
 
 import pandas as pd
 
+from approval_batch_state import MultiPageWriteState, normalize_write_result
 from approval_suggestion_metrics import format_suggestion_summary, summarize_approval_suggestions
 from approval_writer import ApprovalWriter
 from category_mapper import erp_property_options, to_erp_property
@@ -24,6 +25,7 @@ from rule_engine import RuleEngine
 from rule_maintainer import RuleMaintainer
 from stage_logger import StageLogger
 from ui_waits import wait_until_row_value, wait_until_spinner_hidden
+from write_failure_diagnostics import build_write_failure_debug_payload
 
 
 class ApprovalFlowMixin:
@@ -317,10 +319,7 @@ class ApprovalFlowMixin:
 
         all_suggestions: list[dict[str, Any]] = []
         all_suggestion_keys: set[str] = set()
-        handled_reagent_keys: set[str] = set()
-        pending_write_suggestions: dict[str, dict[str, Any]] = {}
-        not_found_after_reread_keys: set[str] = set()
-        write_attempts_by_key: dict[str, int] = {}
+        write_state = MultiPageWriteState(max_attempts=self.max_reagent_write_attempts())
         visited_steps = 0
         self.sort_property_column_until_unmatched_visible(page)
 
@@ -330,10 +329,7 @@ class ApprovalFlowMixin:
             current_page = self.current_reagent_page_number(page) or str(visited_steps)
             current_unmatched = self.current_page_unmatched_reagents(page)
             unhandled_unmatched = [
-                reagent
-                for reagent in current_unmatched
-                if self.reagent_work_key(reagent) not in handled_reagent_keys
-                and write_attempts_by_key.get(self.reagent_work_key(reagent), 0) < self.max_reagent_write_attempts()
+                reagent for reagent in write_state.unhandled_unmatched(current_unmatched, self.reagent_work_key)
             ]
             if current_unmatched and not unhandled_unmatched:
                 print(
@@ -343,14 +339,14 @@ class ApprovalFlowMixin:
                 moved_next, terminal_or_error = self.click_next_reagent_page(page)
                 if not moved_next:
                     if terminal_or_error:
-                        if pending_write_suggestions:
+                        if write_state.pending_write_suggestions:
                             self.record_not_found_pending_write_failures(
-                                pending_write_suggestions,
-                                not_found_after_reread_keys,
+                                write_state.pending_write_suggestions,
+                                write_state.not_found_after_reread_keys,
                             )
                             print(
                                 f"Multi-page mode reached the last reagent page with "
-                                f"{len(pending_write_suggestions)} pending write candidate(s) not found after re-read."
+                                f"{len(write_state.pending_write_suggestions)} pending write candidate(s) not found after re-read."
                             )
                         else:
                             print("Multi-page mode reached the last reagent page.")
@@ -362,10 +358,10 @@ class ApprovalFlowMixin:
                 continue
 
             if not current_unmatched:
-                if pending_write_suggestions:
+                if write_state.pending_write_suggestions:
                     print(
                         f"Current sorted reagent page has no '-' rows, but "
-                        f"{len(pending_write_suggestions)} pending write candidate(s) still lack a terminal status; "
+                        f"{len(write_state.pending_write_suggestions)} pending write candidate(s) still lack a terminal status; "
                         "scanning the next reagent page."
                     )
                 else:
@@ -373,14 +369,14 @@ class ApprovalFlowMixin:
                 moved_next, terminal_or_error = self.click_next_reagent_page(page)
                 if not moved_next:
                     if terminal_or_error:
-                        if pending_write_suggestions:
+                        if write_state.pending_write_suggestions:
                             self.record_not_found_pending_write_failures(
-                                pending_write_suggestions,
-                                not_found_after_reread_keys,
+                                write_state.pending_write_suggestions,
+                                write_state.not_found_after_reread_keys,
                             )
                             print(
                                 f"Multi-page mode reached the last reagent page with "
-                                f"{len(pending_write_suggestions)} pending write candidate(s) not found after re-read."
+                                f"{len(write_state.pending_write_suggestions)} pending write candidate(s) not found after re-read."
                             )
                         else:
                             print("Multi-page mode reached the last reagent page; no '-' rows remain.")
@@ -397,7 +393,7 @@ class ApprovalFlowMixin:
                 rule_maintainer,
                 seen_search_urls,
                 page_label=current_page,
-                skip_reagent_keys=handled_reagent_keys,
+                skip_reagent_keys=write_state.handled_keys,
             )
             for suggestion in page_suggestions:
                 key = self.suggestion_work_key(suggestion)
@@ -406,34 +402,21 @@ class ApprovalFlowMixin:
                     all_suggestion_keys.add(key)
             if page_suggestions:
                 self.write_partial_approval_suggestions(all_suggestions)
-                for suggestion in self.high_confidence_write_candidates(page_suggestions):
-                    key = self.suggestion_work_key(suggestion)
-                    if key not in handled_reagent_keys and write_attempts_by_key.get(key, 0) < self.max_reagent_write_attempts():
-                        pending_write_suggestions[key] = suggestion
+                write_state.register_writable_suggestions(
+                    self.high_confidence_write_candidates(page_suggestions),
+                    self.suggestion_work_key,
+                )
 
             if page_suggestions:
                 with self.stage_logger.stage("apply_approval_write_mode", f"page {current_page}"):
                     raw_write_result = self.apply_approval_write_mode(page, page_suggestions)
-                    write_result = raw_write_result or {
-                        "attempted": set(),
-                        "handled": {self.suggestion_work_key(suggestion) for suggestion in page_suggestions},
-                        "failed": set(),
-                    }
-                for key in write_result.get("attempted", set()):
-                    write_attempts_by_key[key] = write_attempts_by_key.get(key, 0) + 1
-                failed_keys = set(write_result.get("failed", set()))
-                saved_or_terminal_keys = set(write_result.get("handled", set())) - failed_keys
-                handled_reagent_keys.update(saved_or_terminal_keys)
-                for key in saved_or_terminal_keys:
-                    pending_write_suggestions.pop(key, None)
-                for key in failed_keys:
-                    if write_attempts_by_key.get(key, 0) >= self.max_reagent_write_attempts():
-                        handled_reagent_keys.add(key)
-                        pending_write_suggestions.pop(key, None)
-                        print(f"Write retry limit reached for reagent key: {key}")
-                for key in set(write_result.get("deferred", set())):
-                    if key in pending_write_suggestions:
-                        print(f"Deferred pending write candidate until a later page/read: {key}")
+                    write_result = normalize_write_result(raw_write_result, page_suggestions, self.suggestion_work_key)
+                state_delta = write_state.apply_write_result(write_result)
+                failed_keys = state_delta["failed"]
+                for key in state_delta["retry_limited"]:
+                    print(f"Write retry limit reached for reagent key: {key}")
+                for key in state_delta["deferred"]:
+                    print(f"Deferred pending write candidate until a later page/read: {key}")
 
                 if failed_keys:
                     print(
@@ -473,9 +456,7 @@ class ApprovalFlowMixin:
                 write_result = {"attempted": set(), "handled": set(), "failed": set()}
 
             if self.approval_write_mode() in {"disabled", "test_one"}:
-                handled_reagent_keys.update(self.reagent_work_key(reagent) for reagent in current_unmatched)
-                for reagent in current_unmatched:
-                    pending_write_suggestions.pop(self.reagent_work_key(reagent), None)
+                write_state.mark_reagents_handled(current_unmatched, self.reagent_work_key)
 
             moved_next, terminal_or_error = self.click_next_reagent_page(page)
             if not moved_next:
@@ -2648,19 +2629,19 @@ class ApprovalFlowMixin:
             print(f"Could not save write failure HTML for sequence {sequence}: {error}")
         try:
             debug_path = self._log_dir() / f"{prefix}.json"
-            debug_payload = {
-                "sequence": sequence,
-                "attempt": attempt,
-                "reason": reason,
-                "target_category": category,
-                "failure_stage": getattr(writer, "_last_property_failure_stage", "") if writer is not None else "",
-                "dropdown": ApprovalWriter.dropdown_debug_state(
+            debug_payload = build_write_failure_debug_payload(
+                sequence=sequence,
+                attempt=attempt,
+                reason=reason,
+                category=category,
+                failure_stage=getattr(writer, "_last_property_failure_stage", "") if writer is not None else "",
+                dropdown_state_loader=lambda: ApprovalWriter.dropdown_debug_state(
                     page,
                     row=row,
                     candidate_name=category,
                     option_names=erp_property_options(self.settings),
                 ),
-            }
+            )
             debug_path.write_text(json.dumps(debug_payload, ensure_ascii=False, indent=2), encoding="utf-8")
             print(f"Saved write failure debug JSON: {debug_path}")
         except Exception as error:

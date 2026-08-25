@@ -46,6 +46,7 @@ from web_runner import (
     upload_memory_sync,
     download_memory_sync,
 )
+from data_health import data_health_summary
 from runtime_paths import source_root
 
 
@@ -243,6 +244,11 @@ def api_status() -> JSONResponse:
 @app.get("/api/approval_summary")
 def api_approval_summary() -> JSONResponse:
     return JSONResponse(approval_summary())
+
+
+@app.get("/api/data_health")
+def api_data_health() -> JSONResponse:
+    return JSONResponse(data_health_summary(ROOT_DIR, settings=load_settings()))
 
 
 @app.get("/api/review_queue")
@@ -571,7 +577,7 @@ def api_run(
     approval_write_batch_size: Annotated[str, Form()] = "3",
     auto_pass: Annotated[str, Form()] = "false",
 ) -> JSONResponse:
-    allowed_actions = {"suggestions", "todo_export", "debug_capture", "judgement_capture"}
+    allowed_actions = {"suggestions", "todo_export", "debug_capture", "judgement_capture", "erp_smoke"}
     if action not in allowed_actions:
         raise HTTPException(status_code=400, detail=f"Unsupported action: {action}")
 

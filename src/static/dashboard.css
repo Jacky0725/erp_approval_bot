@@ -2008,7 +2008,19 @@ h1 {
   margin: 16px auto 0;
 }
 
+.data-health-panel {
+  width: min(1580px, 100%);
+  margin: 16px auto 0;
+}
+
 .overview-status-panel .panel-title {
+  align-items: center;
+  margin-bottom: 12px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid #e5e7eb;
+}
+
+.data-health-panel .panel-title {
   align-items: center;
   margin-bottom: 12px;
   padding-bottom: 12px;
@@ -2018,6 +2030,16 @@ h1 {
 .overview-status-list {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  background: #fff;
+  overflow: hidden;
+}
+
+.data-health-list {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
   gap: 0;
   border: 1px solid #e5e7eb;
   border-radius: 8px;
@@ -2035,11 +2057,28 @@ h1 {
   background: #fff;
 }
 
+.data-health-list div {
+  display: grid;
+  gap: 4px;
+  min-height: 72px;
+  padding: 12px 14px;
+  border-right: 1px solid #edf0f3;
+  background: #fff;
+}
+
 .overview-status-list div:nth-child(even) {
   background: #fff;
 }
 
+.data-health-list div:nth-child(even) {
+  background: #fff;
+}
+
 .overview-status-list div:nth-child(4n) {
+  border-right: 0;
+}
+
+.data-health-list div:nth-child(6n) {
   border-right: 0;
 }
 
@@ -2053,12 +2092,30 @@ h1 {
   font-weight: 650;
 }
 
+.data-health-list span {
+  color: #6b7280;
+  font-size: 12px;
+  font-weight: 650;
+}
+
 .overview-status-list strong {
   align-self: end;
   color: #111827;
   font-size: 13px;
   font-weight: 760;
   overflow-wrap: anywhere;
+}
+
+.data-health-list strong {
+  align-self: end;
+  color: #111827;
+  font-size: 16px;
+  font-weight: 760;
+  overflow-wrap: anywhere;
+}
+
+.data-health-list div:nth-child(n + 3) strong {
+  color: var(--amber);
 }
 
 .badge,

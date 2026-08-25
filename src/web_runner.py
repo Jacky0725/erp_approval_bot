@@ -69,6 +69,7 @@ ALLOWED_WEB_WRITE_MODES = {"disabled", "multi_page", "generate_library"}
 ACTION_LABELS = {
     "suggestions": "审批流程",
     "todo_export": "待办清单刷新",
+    "erp_smoke": "ERP 只读冒烟测试",
     "debug_capture": "首页采集",
     "judgement_capture": "试剂判定页采集",
 }

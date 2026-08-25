@@ -1601,6 +1601,26 @@
       renderArtifacts(payload.artifacts || []);
     }
 
+    async function refreshDataHealth(options = {}) {
+      if (!document.querySelector("#dataHealthPanel")) return;
+      if (refreshDataHealth.loaded && !options.force) return;
+      try {
+        const response = await fetch("/api/data_health");
+        const payload = await response.json();
+        refreshDataHealth.loaded = true;
+        setText("#dataHealthStatus", `最近检查：${safe(payload.last_checked_at)}`);
+        setText("#healthMemoryMojibake", safe(payload.memory_mojibake_records, "0"));
+        setText("#healthReusableMojibake", safe(payload.reusable_mojibake_records, "0"));
+        setText("#healthUnrecoverableReusable", safe(payload.unrecoverable_reusable_mojibake_records, "0"));
+        setText("#healthConflicts", safe(payload.conflicting_memory_records, "0"));
+        setText("#healthConfirmedMissingMemory", safe(payload.confirmed_review_missing_memory, "0"));
+        setText("#healthDuplicateReviews", safe(payload.duplicate_review_items, "0"));
+      } catch (error) {
+        setText("#dataHealthStatus", `检查失败：${error}`);
+      }
+    }
+    refreshDataHealth.loaded = false;
+
     async function refreshLogTail(options = {}) {
       if (logStateLoaded && !options.force) return;
       if (!document.querySelector("#logBox")) return;
@@ -1678,6 +1698,9 @@
       }
       if (activePage === "overview" || activePage === "review" || options.forceReview) {
         await refreshReviewQueue({force: options.forceReview || runJustFinished});
+      }
+      if (activePage === "overview") {
+        await refreshDataHealth({force: runJustFinished});
       }
       if (activePage === "artifacts") {
         await refreshArtifacts({force: runJustFinished});

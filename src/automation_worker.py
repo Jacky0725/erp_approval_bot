@@ -48,6 +48,8 @@ def run_action(action: str) -> None:
         bot.run_debug_capture()
     elif action == "judgement_capture":
         bot.run_reagent_judgement_capture()
+    elif action == "erp_smoke":
+        bot.run_todo_tasks_export()
     elif action == "todo_export":
         bot.run_todo_tasks_export()
     elif action == "suggestions":
@@ -59,7 +61,10 @@ def run_action(action: str) -> None:
 def main() -> None:
     configure_console_output()
     parser = argparse.ArgumentParser(description="Run one ERP approval automation action.")
-    parser.add_argument("action", choices=["suggestions", "todo_export", "debug_capture", "judgement_capture"])
+    parser.add_argument(
+        "action",
+        choices=["suggestions", "todo_export", "debug_capture", "judgement_capture", "erp_smoke"],
+    )
     args = parser.parse_args()
     run_action(args.action)
 

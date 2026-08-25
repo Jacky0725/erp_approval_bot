@@ -76,6 +76,20 @@ class WorkflowSummaryTest(unittest.TestCase):
             self.assertEqual(status["result_label"], "待办清单刷新成功")
             self.assertEqual(status["summary"]["outcome"], "待办清单刷新成功")
 
+    def test_erp_smoke_action_has_read_only_label(self) -> None:
+        with TemporaryDirectory() as tmp:
+            manager = AutomationJobManager(root_dir=Path(tmp))
+            manager.action = "erp_smoke"
+            manager.started_at = "2026-08-25T09:00:00"
+            manager.finished_at = "2026-08-25T09:00:20"
+            manager.success = True
+            manager.error = ""
+
+            status = manager.status()
+
+            self.assertEqual(status["action_label"], "ERP 只读冒烟测试")
+            self.assertEqual(status["summary"]["outcome"], "ERP 只读冒烟测试成功")
+
     def test_run_summary_counts_write_outcome_and_targets(self) -> None:
         with TemporaryDirectory() as tmp:
             lines = [
