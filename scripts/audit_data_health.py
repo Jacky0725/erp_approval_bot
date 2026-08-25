@@ -51,7 +51,8 @@ def main() -> int:
         f"reusable_mojibake={summary['reusable_mojibake_records']}, "
         f"unrecoverable_reusable={summary['unrecoverable_reusable_mojibake_records']}, "
         f"confirmed_missing_memory={summary['confirmed_review_missing_memory']}, "
-        f"duplicate_review_items={summary['duplicate_review_items']}"
+        f"duplicate_review_items={summary['duplicate_review_items']}, "
+        f"blocking_duplicate_review_items={summary['blocking_duplicate_review_items']}"
     )
     if not args.apply:
         print("Dry-run only. Re-run with --apply to repair recoverable issues after reviewing the audit.")

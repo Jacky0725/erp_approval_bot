@@ -11,7 +11,7 @@ from typing import Any
 import pandas as pd
 
 from reagent_memory import ReagentMemory
-from review_queue import canonicalize_review_queue_columns
+from review_queue import BLOCKING_REVIEW_STATUSES, canonicalize_review_queue_columns
 
 
 MOJIBAKE_MARKERS = (
@@ -47,6 +47,8 @@ REVIEW_LIST_COLUMNS = ("试剂清单号", "当前清单号", "清单号", "list_
 REVIEW_SEQUENCE_COLUMNS = ("序号", "sequence", "index")
 REVIEW_STATUS_COLUMNS = ("status", "状态", "处理状态")
 REVIEW_CATEGORY_COLUMNS = ("manual_result", "confirmed_category", "final_category", "suggested_category")
+CONFIRMED_DUPLICATE_STATUS = "confirmed_duplicate"
+DATA_HEALTH_MANUAL_REASON = "历史人工复核已确认，数据健康修复时补入试剂记忆库。"
 
 
 @dataclass(frozen=True)
@@ -113,6 +115,7 @@ def data_health_summary(root_dir: Path, settings: dict[str, Any] | None = None) 
         "conflicting_memory_records": summary["conflicting_memory_records"],
         "confirmed_review_missing_memory": summary["confirmed_review_missing_memory"],
         "duplicate_review_items": summary["duplicate_review_items"],
+        "blocking_duplicate_review_items": summary["blocking_duplicate_review_items"],
         "last_checked_at": summary["checked_at"],
     }
 
@@ -142,6 +145,7 @@ def audit_data_health(
         "confirmed_review_rows": 0,
         "confirmed_review_missing_memory": 0,
         "duplicate_review_items": 0,
+        "blocking_duplicate_review_items": 0,
         "suggestion_rows": 0,
         "suggestion_mojibake_records": 0,
     }
@@ -299,6 +303,7 @@ def _audit_review_queue(paths: DataHealthPaths, settings: dict[str, Any], includ
         "confirmed_review_rows": 0,
         "confirmed_review_missing_memory": 0,
         "duplicate_review_items": 0,
+        "blocking_duplicate_review_items": 0,
     }
     issues: list[dict[str, Any]] = []
     if not paths.review_queue_path.exists():
@@ -312,12 +317,19 @@ def _audit_review_queue(paths: DataHealthPaths, settings: dict[str, Any], includ
     confirmed_mask = statuses.eq("confirmed")
     summary["confirmed_review_rows"] = int(confirmed_mask.sum())
 
-    key_columns = [_first_present(frame, REVIEW_LIST_COLUMNS), _first_present(frame, REVIEW_SEQUENCE_COLUMNS)]
-    if all(key_columns):
+    key_columns = _review_key_columns(frame)
+    if key_columns:
         duplicate_count = int(frame.duplicated(key_columns, keep=False).sum())
         summary["duplicate_review_items"] = duplicate_count
+        blocking_duplicate_mask = _blocking_duplicate_review_mask(frame)
+        summary["blocking_duplicate_review_items"] = int(blocking_duplicate_mask.sum())
         if include_rows and duplicate_count:
             for index, row in frame[frame.duplicated(key_columns, keep=False)].iterrows():
+                action = (
+                    "mark_confirmed_duplicate"
+                    if bool(blocking_duplicate_mask.loc[index])
+                    else "manual_review_dedup_check"
+                )
                 issues.append(
                     _issue_row(
                         source="review_queue",
@@ -325,7 +337,7 @@ def _audit_review_queue(paths: DataHealthPaths, settings: dict[str, Any], includ
                         identifier=index,
                         field="+".join(key_columns),
                         value="|".join(str(row.get(column) or "") for column in key_columns),
-                        action="manual_review_dedup_check",
+                        action=action,
                         row=row.to_dict(),
                     )
                 )
@@ -363,11 +375,21 @@ def _audit_review_queue(paths: DataHealthPaths, settings: dict[str, Any], includ
         category = _first_value(row, REVIEW_CATEGORY_COLUMNS)
         if not category:
             continue
-        found = memory.find_any(
-            raw_name=_first_value(row, ("试剂名称", "chemical_name", "reagent_name")),
-            cleaned_name=_first_value(row, ("cleaned_name", "清洗后名称")),
-            standard_name=_first_value(row, ("standard_name", "标准化名称")),
-            cas=_first_value(row, ("cas", "CAS号")),
+        identity_values = (
+            _first_value(row, ("试剂名称", "chemical_name", "reagent_name")),
+            _first_value(row, ("cleaned_name", "清洗后名称")),
+            _first_value(row, ("standard_name", "标准化名称")),
+            _first_value(row, ("cas", "CAS号")),
+            category,
+        )
+        if any(looks_mojibake(value) for value in identity_values):
+            continue
+        found = _memory_has_reusable_category_match(
+            memory,
+            raw_name=identity_values[0],
+            cleaned_name=identity_values[1],
+            standard_name=identity_values[2],
+            cas=identity_values[3],
             final_category=category,
         )
         if found:
@@ -470,10 +492,10 @@ def _repair_memory(paths: DataHealthPaths, settings: dict[str, Any]) -> dict[str
 
 def _repair_review_queue(paths: DataHealthPaths, settings: dict[str, Any]) -> dict[str, int]:
     if not paths.review_queue_path.exists():
-        return {"repaired_fields": 0, "rebuilt_memory": 0}
+        return {"repaired_fields": 0, "rebuilt_memory": 0, "blocking_duplicates_resolved": 0}
     frame = canonicalize_review_queue_columns(pd.read_excel(paths.review_queue_path, dtype=str).fillna(""))
     if frame.empty:
-        return {"repaired_fields": 0, "rebuilt_memory": 0}
+        return {"repaired_fields": 0, "rebuilt_memory": 0, "blocking_duplicates_resolved": 0}
     repaired_fields = 0
     for column in list(frame.columns):
         repaired_column = repair_text(column)
@@ -485,8 +507,13 @@ def _repair_review_queue(paths: DataHealthPaths, settings: dict[str, Any]) -> di
         repaired_fields += int(changed.sum())
         frame.loc[changed, column] = repaired[changed]
     rebuilt = _rebuild_confirmed_review_memory(frame, settings, paths.root_dir)
+    duplicates_resolved = _mark_confirmed_duplicate_review_rows(frame)
     frame.to_excel(paths.review_queue_path, index=False)
-    return {"repaired_fields": repaired_fields, "rebuilt_memory": rebuilt}
+    return {
+        "repaired_fields": repaired_fields,
+        "rebuilt_memory": rebuilt,
+        "blocking_duplicates_resolved": duplicates_resolved,
+    }
 
 
 def _rebuild_confirmed_review_memory(frame: pd.DataFrame, settings: dict[str, Any], root_dir: Path) -> int:
@@ -503,7 +530,8 @@ def _rebuild_confirmed_review_memory(frame: pd.DataFrame, settings: dict[str, An
         cas = _first_value(row, ("cas", "CAS号"))
         if any(looks_mojibake(value) for value in (raw_name, cleaned_name, standard_name, cas)):
             continue
-        existing = memory.find_any(
+        existing = _memory_has_reusable_category_match(
+            memory,
             raw_name=raw_name,
             cleaned_name=cleaned_name,
             standard_name=standard_name,
@@ -512,6 +540,25 @@ def _rebuild_confirmed_review_memory(frame: pd.DataFrame, settings: dict[str, An
         )
         if existing:
             continue
+        promoted = _promote_existing_identity_category_records(
+            memory,
+            raw_name=raw_name,
+            cleaned_name=cleaned_name,
+            standard_name=standard_name,
+            cas=cas,
+            final_category=category,
+        )
+        if promoted:
+            rebuilt += 1
+            continue
+        _disable_conflicting_identity_records(
+            memory,
+            raw_name=raw_name,
+            cleaned_name=cleaned_name,
+            standard_name=standard_name,
+            cas=cas,
+            final_category=category,
+        )
         if memory.add_record(
             raw_name=raw_name,
             cleaned_name=cleaned_name,
@@ -519,15 +566,211 @@ def _rebuild_confirmed_review_memory(frame: pd.DataFrame, settings: dict[str, An
             cas=cas,
             final_category=category,
             confidence=1.0,
-            reason="历史人工复核已确认，数据健康修复时补入试剂记忆库。",
+            reason=DATA_HEALTH_MANUAL_REASON,
             source="data_health_repair",
             specification=_first_value(row, ("specification", "规格")),
             unit=_first_value(row, ("unit", "规格单位")),
             need_manual_review=False,
             manual_verified=True,
+            track_conflicts=False,
         ):
             rebuilt += 1
     return rebuilt
+
+
+def _mark_confirmed_duplicate_review_rows(frame: pd.DataFrame) -> int:
+    key_columns = _review_key_columns(frame)
+    if not key_columns:
+        return 0
+    status_column = _first_present(frame, REVIEW_STATUS_COLUMNS) or "status"
+    if status_column not in frame.columns:
+        frame[status_column] = ""
+    if "manual_result" not in frame.columns:
+        frame["manual_result"] = ""
+    if "confirmed_at" not in frame.columns:
+        frame["confirmed_at"] = ""
+    if "confirmed_by" not in frame.columns:
+        frame["confirmed_by"] = ""
+
+    changed = 0
+    now = datetime.now().isoformat(timespec="seconds")
+    for _, group in frame.groupby(key_columns, dropna=False, sort=False):
+        confirmed_rows = _confirmed_rows_with_category(group)
+        if confirmed_rows.empty:
+            continue
+        confirmed_row = confirmed_rows.iloc[-1]
+        category = _first_value(confirmed_row, REVIEW_CATEGORY_COLUMNS)
+        confirmed_at = str(confirmed_row.get("confirmed_at") or "").strip()
+        statuses = group[status_column].astype(str).str.strip().str.lower()
+        blocking_indexes = group.index[statuses.isin(BLOCKING_REVIEW_STATUSES)]
+        for row_index in blocking_indexes:
+            if str(frame.at[row_index, status_column]).strip().lower() == "confirmed":
+                continue
+            frame.at[row_index, status_column] = CONFIRMED_DUPLICATE_STATUS
+            if not str(frame.at[row_index, "manual_result"] or "").strip():
+                frame.at[row_index, "manual_result"] = category
+            if not str(frame.at[row_index, "confirmed_at"] or "").strip():
+                frame.at[row_index, "confirmed_at"] = confirmed_at or now
+            frame.at[row_index, "confirmed_by"] = "data_health_repair"
+            changed += 1
+    return changed
+
+
+def _memory_has_reusable_category_match(
+    memory: ReagentMemory,
+    *,
+    cas: str = "",
+    standard_name: str = "",
+    cleaned_name: str = "",
+    raw_name: str = "",
+    final_category: str = "",
+) -> bool:
+    memory._ensure_schema()  # noqa: SLF001 - data-health audit needs a read-only reusable lookup.
+    values = {
+        "cas": memory._norm_cas(cas),  # noqa: SLF001 - keep audit semantics aligned with lookup().
+        "standard_name": memory._norm(standard_name),  # noqa: SLF001
+        "cleaned_name": memory._norm(cleaned_name),  # noqa: SLF001
+        "raw_name": memory._norm(raw_name),  # noqa: SLF001
+    }
+    clauses = []
+    params: list[str] = []
+    for column, value in values.items():
+        if value:
+            clauses.append(f"{column}_key = ?")
+            params.append(value)
+    if not clauses or not final_category:
+        return False
+    sql = f"""
+        SELECT *
+        FROM reagent_memory
+        WHERE reusable = 1
+          AND need_manual_review = 0
+          AND conflict = 0
+          AND final_category = ?
+          AND ({' OR '.join(clauses)})
+        ORDER BY manual_verified DESC, confidence DESC, updated_at DESC, id DESC
+        LIMIT 20
+    """
+    with closing(memory._connect()) as conn:  # noqa: SLF001 - read-only audit query.
+        for candidate in conn.execute(sql, [final_category, *params]).fetchall():
+            if not memory.is_unsafe_reusable_evidence(candidate):
+                return True
+    return False
+
+
+def _disable_conflicting_identity_records(
+    memory: ReagentMemory,
+    *,
+    cas: str = "",
+    standard_name: str = "",
+    cleaned_name: str = "",
+    raw_name: str = "",
+    final_category: str = "",
+) -> int:
+    values = {
+        "cas": memory._norm_cas(cas),  # noqa: SLF001 - keep repair identity aligned with memory lookup.
+        "standard_name": memory._norm(standard_name),  # noqa: SLF001
+        "cleaned_name": memory._norm(cleaned_name),  # noqa: SLF001
+        "raw_name": memory._norm(raw_name),  # noqa: SLF001
+    }
+    clauses = []
+    params: list[str] = []
+    for column, value in values.items():
+        if value:
+            clauses.append(f"{column}_key = ?")
+            params.append(value)
+    if not clauses or not final_category:
+        return 0
+    sql = f"""
+        UPDATE reagent_memory
+        SET reusable = 0,
+            conflict = 1,
+            updated_at = ?
+        WHERE final_category != ?
+          AND ({' OR '.join(clauses)})
+    """
+    with closing(memory._connect()) as conn:  # noqa: SLF001 - repair uses project SQLite connection.
+        with conn:
+            cursor = conn.execute(sql, [datetime.now().isoformat(timespec="seconds"), final_category, *params])
+            return int(cursor.rowcount or 0)
+
+
+def _promote_existing_identity_category_records(
+    memory: ReagentMemory,
+    *,
+    cas: str = "",
+    standard_name: str = "",
+    cleaned_name: str = "",
+    raw_name: str = "",
+    final_category: str = "",
+) -> int:
+    values = {
+        "cas": memory._norm_cas(cas),  # noqa: SLF001
+        "standard_name": memory._norm(standard_name),  # noqa: SLF001
+        "cleaned_name": memory._norm(cleaned_name),  # noqa: SLF001
+        "raw_name": memory._norm(raw_name),  # noqa: SLF001
+    }
+    clauses = []
+    params: list[str] = []
+    for column, value in values.items():
+        if value:
+            clauses.append(f"{column}_key = ?")
+            params.append(value)
+    if not clauses or not final_category:
+        return 0
+    sql = f"""
+        UPDATE reagent_memory
+        SET reusable = 1,
+            conflict = 0,
+            need_manual_review = 0,
+            manual_verified = 1,
+            confidence = MAX(confidence, 1.0),
+            reason = ?,
+            source = ?,
+            updated_at = ?
+        WHERE final_category = ?
+          AND ({' OR '.join(clauses)})
+    """
+    with closing(memory._connect()) as conn:  # noqa: SLF001 - repair uses project SQLite connection.
+        with conn:
+            cursor = conn.execute(
+                sql,
+                [
+                    DATA_HEALTH_MANUAL_REASON,
+                    "data_health_repair",
+                    datetime.now().isoformat(timespec="seconds"),
+                    final_category,
+                    *params,
+                ],
+            )
+            return int(cursor.rowcount or 0)
+
+
+def _blocking_duplicate_review_mask(frame: pd.DataFrame) -> pd.Series:
+    result = pd.Series([False] * len(frame), index=frame.index, dtype=bool)
+    key_columns = _review_key_columns(frame)
+    if not key_columns:
+        return result
+    status_column = _first_present(frame, REVIEW_STATUS_COLUMNS)
+    if not status_column:
+        return result
+    for _, group in frame.groupby(key_columns, dropna=False, sort=False):
+        if len(group) < 2 or _confirmed_rows_with_category(group).empty:
+            continue
+        statuses = group[status_column].astype(str).str.strip().str.lower()
+        result.loc[group.index[statuses.isin(BLOCKING_REVIEW_STATUSES)]] = True
+    return result
+
+
+def _confirmed_rows_with_category(frame: pd.DataFrame) -> pd.DataFrame:
+    statuses = _series_first(frame, REVIEW_STATUS_COLUMNS).str.lower()
+    category_series = _series_first(frame, REVIEW_CATEGORY_COLUMNS)
+    return frame[statuses.eq("confirmed") & category_series.astype(str).str.strip().ne("")]
+
+
+def _review_key_columns(frame: pd.DataFrame) -> list[str]:
+    key_columns = [_first_present(frame, REVIEW_LIST_COLUMNS), _first_present(frame, REVIEW_SEQUENCE_COLUMNS)]
+    return key_columns if all(key_columns) else []
 
 
 def _series_first(frame: pd.DataFrame, columns: tuple[str, ...]) -> pd.Series:

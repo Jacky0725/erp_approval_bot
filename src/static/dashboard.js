@@ -1614,7 +1614,7 @@
         setText("#healthUnrecoverableReusable", safe(payload.unrecoverable_reusable_mojibake_records, "0"));
         setText("#healthConflicts", safe(payload.conflicting_memory_records, "0"));
         setText("#healthConfirmedMissingMemory", safe(payload.confirmed_review_missing_memory, "0"));
-        setText("#healthDuplicateReviews", safe(payload.duplicate_review_items, "0"));
+        setText("#healthDuplicateReviews", safe(payload.blocking_duplicate_review_items, "0"));
       } catch (error) {
         setText("#dataHealthStatus", `检查失败：${error}`);
       }
