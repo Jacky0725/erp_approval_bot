@@ -1,0 +1,951 @@
+{
+  "date": "2026-09-10",
+  "head": "567b2cf8d8cb7e05d404d41a1c3aa61451ea01b4",
+  "working_tree_status": [
+    " M config/settings.yaml",
+    " M src/approval_flow.py",
+    " M src/automation_worker.py",
+    " M src/chemical_search_cache.py",
+    " M src/chemical_searcher.py",
+    " M src/dingtalk_stream_bot.py",
+    " M src/erp_session.py",
+    " M src/llm_extractor.py",
+    " M src/reagent_memory.py",
+    " M src/review_queue.py",
+    " M src/rule_engine.py",
+    " M src/static/dashboard.css",
+    " M src/static/dashboard.js",
+    " M src/templates/layout.html",
+    " M src/templates/partials/overview.html",
+    " M src/templates/partials/run.html",
+    " M src/templates/partials/settings.html",
+    " M src/web_app.py",
+    " M src/web_researcher.py",
+    " M src/web_runner.py",
+    " M tests/test_approval_flow.py",
+    " M tests/test_chemical_searcher.py",
+    " M tests/test_dingtalk_stream_bot.py",
+    " M tests/test_reagent_memory.py",
+    " M tests/test_web_researcher.py",
+    " M tests/test_web_runner_workflow.py",
+    "?? deliverables/",
+    "?? src/chemical_sources/",
+    "?? src/chinese_alias_backfill.py",
+    "?? src/enrichment_benchmark.py",
+    "?? src/enrichment_metrics.py",
+    "?? src/enrichment_shadow_report.py",
+    "?? src/enrichment_v2.py",
+    "?? src/erp_api_client.py",
+    "?? src/erp_api_discovery.py",
+    "?? src/evidence_resolver.py",
+    "?? src/reagent_identity.py",
+    "?? src/rule_workbook_validator.py",
+    "?? tests/test_approval_flow_shadow_v2.py",
+    "?? tests/test_chinese_alias_backfill.py",
+    "?? tests/test_enrichment_metrics.py",
+    "?? tests/test_enrichment_shadow_report.py",
+    "?? tests/test_enrichment_v2.py",
+    "?? tests/test_enrichment_v2_batch.py",
+    "?? tests/test_erp_api_discovery.py",
+    "?? tests/test_evidence_resolver.py",
+    "?? tests/test_llm_missing_fields.py",
+    "?? tests/test_pubchem_adapter.py",
+    "?? tests/test_reagent_identity.py",
+    "?? tests/test_rule_engine_resolved_properties.py",
+    "?? tests/test_rule_workbook_validator.py",
+    "?? tests/test_supplementary_sources.py",
+    "?? tests/test_supplier_sds_adapter.py",
+    "?? tests/test_web_data_health.py",
+    "?? tests/test_web_enrichment_shadow.py"
+  ],
+  "notes": [
+    "Static source snapshot only; no credentials or business data included.",
+    "Template tokens may contain Jinja expressions; IDs in JavaScript are not covered.",
+    "Routes include source signatures, not response schemas; P0 must complete runtime contracts.",
+    "Working tree includes prior user changes; HEAD alone is not the baseline."
+  ],
+  "files": [
+    {
+      "path": "src/app_info.py",
+      "sha256": "0e82fe671b4da78c59b178f5de05762a878f89d78c4968e3b7f744ecf90b6e08",
+      "lines": 25
+    },
+    {
+      "path": "src/approval_batch_state.py",
+      "sha256": "34c7ab506db09ead62a55acf0ae98b786359de22d60afddca83c59bb3df0b948",
+      "lines": 88
+    },
+    {
+      "path": "src/approval_flow.py",
+      "sha256": "c21ac07364d27d682b97f61169631a307ae205f98b0eaea92c079fcba4c85590",
+      "lines": 3831
+    },
+    {
+      "path": "src/approval_suggestion_metrics.py",
+      "sha256": "44a3191cd953887da50e2f0c16da812fe340b1ead06da62696ea7bab19dd688a",
+      "lines": 197
+    },
+    {
+      "path": "src/approval_writer.py",
+      "sha256": "0bc48f530c80b13c70848bd055c20cc37f999c7e3066b45b3d805329d80ada49",
+      "lines": 2038
+    },
+    {
+      "path": "src/audit_logger.py",
+      "sha256": "87393ecc8bc1f16c08f2f4cdfb80aa80b88768009500fedc98828ffe96efdc5c",
+      "lines": 49
+    },
+    {
+      "path": "src/automation_worker.py",
+      "sha256": "51e96d246e6bb297f47c4b2fb7162b512658e3ae77ee32fe71eeb5e42c8cfbd2",
+      "lines": 75
+    },
+    {
+      "path": "src/browser_bot.py",
+      "sha256": "00d0f1b708c1c4afaf1723a2e873db2f337ed1bdbefb4ff3dbbfb0c0ed817452",
+      "lines": 27
+    },
+    {
+      "path": "src/category_mapper.py",
+      "sha256": "9f9a56b7af1f070844584e0afde168cbaea41d931567a864f1ec4e45ebfa1b91",
+      "lines": 190
+    },
+    {
+      "path": "src/chemical_search_cache.py",
+      "sha256": "cf3cd0d6596b77a0f6c3f0b26b1388c76d9f8fd5bf888b1cd50791fa8b600db9",
+      "lines": 211
+    },
+    {
+      "path": "src/chemical_searcher.py",
+      "sha256": "8286fbc4c03b05be534ec57d0031c85d435c3a19583fc9ef8be6088e7b72b8a8",
+      "lines": 2817
+    },
+    {
+      "path": "src/chemical_sources/__init__.py",
+      "sha256": "74568c0c193cf3c6980abb673ba1cf435e32f9f6eba96f04fd1bf03cc4f14a5a",
+      "lines": 7
+    },
+    {
+      "path": "src/chemical_sources/base.py",
+      "sha256": "0e82e339b5803563156c880338c81107cd9f19035d10f4d348bb951fcfefcf8c",
+      "lines": 35
+    },
+    {
+      "path": "src/chemical_sources/comptox.py",
+      "sha256": "11b1a34d6d40eece92b6e18c70e21968eb7541252de012b2fa4b2b9bd384dd97",
+      "lines": 33
+    },
+    {
+      "path": "src/chemical_sources/nist.py",
+      "sha256": "63cd284f27520f4c508666233d862cbc8980163acc6cfb7e3c5999da1285e820",
+      "lines": 61
+    },
+    {
+      "path": "src/chemical_sources/pubchem.py",
+      "sha256": "47bbeedd511796efcf5078fb92d7f6c00e09f0d983791ca72ec9ba6607991636",
+      "lines": 237
+    },
+    {
+      "path": "src/chemical_sources/supplier_sds.py",
+      "sha256": "fc69d77d7b9f1e6b06378649176a59fe54936eda5225cb77c077522d0fb82b86",
+      "lines": 78
+    },
+    {
+      "path": "src/chinese_alias_backfill.py",
+      "sha256": "b9cf661b7b75cee2550e93bab2aaeb97a7789efae9ae227cdcae70e81d9e8551",
+      "lines": 198
+    },
+    {
+      "path": "src/data_health.py",
+      "sha256": "f7205e9f5616fad5f13701d70bf1d1af370cd79b6444a9286520fda10a22b09e",
+      "lines": 834
+    },
+    {
+      "path": "src/dingtalk_notifier.py",
+      "sha256": "29f31e4e08fc21745cee30efd78408676c7a92b4b0969db9f37d08843f3dba0a",
+      "lines": 254
+    },
+    {
+      "path": "src/dingtalk_stream_bot.py",
+      "sha256": "8babda8c5d79b7539a6dd65f8bf1a619a163a7d60c9065af4f27d0b751f9fdb0",
+      "lines": 316
+    },
+    {
+      "path": "src/enrichment_benchmark.py",
+      "sha256": "0415fc750713669fd0c2045278fe47f820863ddc6258591b6da589e4dd2aca92",
+      "lines": 38
+    },
+    {
+      "path": "src/enrichment_metrics.py",
+      "sha256": "29940fad8742c7ffd1adc9c62cf383f9d27012af47a2304e6027e4d463e7c7a9",
+      "lines": 175
+    },
+    {
+      "path": "src/enrichment_shadow_report.py",
+      "sha256": "b64dcd2b2f1a4be09ba313fe8f43a0d28293ae8a6e5182bc70c1618f7a54e935",
+      "lines": 77
+    },
+    {
+      "path": "src/enrichment_v2.py",
+      "sha256": "4a088cc548357e4f31e8f0b57934ea4db7cde4b1d90edeb0bf72cb1a1fafaf6c",
+      "lines": 253
+    },
+    {
+      "path": "src/erp_api_client.py",
+      "sha256": "ccd4f47b2b398929d032c4bb5a1f0115123c7d7e26496854df43e43aa01ba3a0",
+      "lines": 478
+    },
+    {
+      "path": "src/erp_api_discovery.py",
+      "sha256": "1d40df914d4c0fe3db44127699413b45a532bd85d6fa757acaae19eb52b4ed58",
+      "lines": 620
+    },
+    {
+      "path": "src/erp_session.py",
+      "sha256": "b8d3542d199d07cd3a4f8d662791ee88d5b0c51a3e1f5c2cb0086857a7d4bdfb",
+      "lines": 581
+    },
+    {
+      "path": "src/evidence_resolver.py",
+      "sha256": "d8c68569c3353bb53aa47de94c0145b106deb99568ceec3a7dc0d4aea59e0a19",
+      "lines": 165
+    },
+    {
+      "path": "src/excel_exports.py",
+      "sha256": "faf6d1a887d33d12f55f89d0ba0a485c904a159f50bcce88b524cd84d2b25b52",
+      "lines": 29
+    },
+    {
+      "path": "src/llm_extractor.py",
+      "sha256": "8dd8bcddadc56801aa13d900c10c6620405df1cf9af0cb5032b6b281916ad6b1",
+      "lines": 763
+    },
+    {
+      "path": "src/llm_providers.py",
+      "sha256": "4721c3c8cd29df421dd2c17630a178588edf58b9476ebb05ba2b89334d1f3aa0",
+      "lines": 216
+    },
+    {
+      "path": "src/main.py",
+      "sha256": "2c8f7ff9ab19ce964753cc3aa337130a7bf4c776c8b7cfd60b2ff921fa1094cd",
+      "lines": 41
+    },
+    {
+      "path": "src/memory_sync.py",
+      "sha256": "be94d2a55afd89198902ffb1060180d1c2786afc07b7186781472633f3648cc8",
+      "lines": 491
+    },
+    {
+      "path": "src/name_normalizer.py",
+      "sha256": "e49110ef1eec9b745e3229ef769325e57597b9d2e16c6e7edd972bd8400d49fb",
+      "lines": 643
+    },
+    {
+      "path": "src/non_reagent_classifier.py",
+      "sha256": "2b4f9d36a105912a8f30e471c01ce39dbb14a2fa051893eed607e0f4b845fd72",
+      "lines": 115
+    },
+    {
+      "path": "src/reagent_identity.py",
+      "sha256": "c25ecb7d26235cd69a2fddc43ff813d4b22f93a92a6aa920063b532a447c84cb",
+      "lines": 165
+    },
+    {
+      "path": "src/reagent_memory.py",
+      "sha256": "8635171157e52b9d5ccd97a2221dfa4c87aaab2349f2e89d20fe40834a3ccdcb",
+      "lines": 877
+    },
+    {
+      "path": "src/reagent_name_rules.py",
+      "sha256": "30ba5d7a1fc0cba6782f1fcb29b104a38659a75fa0a68b7c07a7c15fced9d5db",
+      "lines": 114
+    },
+    {
+      "path": "src/reagent_page.py",
+      "sha256": "71c96d7a191beaec7bc69646befc6a4d66df3492d453cab86ad60e0fc29eb67b",
+      "lines": 1536
+    },
+    {
+      "path": "src/review_queue.py",
+      "sha256": "9ab346369403b8edd9c14bfedbdf5e672ce2bbeff16d17ad2a3da0ab71d719a9",
+      "lines": 1048
+    },
+    {
+      "path": "src/review_queue_mirror.py",
+      "sha256": "0e428cf417b88a134a52f1825634ac2c19f02389630957b4160222a7ef8032fd",
+      "lines": 144
+    },
+    {
+      "path": "src/rule_engine.py",
+      "sha256": "c282cb95cf675a0180b6d60fc3d58c13d2a6629e2656b2516cbf20be8a493261",
+      "lines": 1473
+    },
+    {
+      "path": "src/rule_maintainer.py",
+      "sha256": "b1638034d7b6044562e905960c9fcc1409a96ae1cc85475fd79f294193979d72",
+      "lines": 166
+    },
+    {
+      "path": "src/rule_migration.py",
+      "sha256": "a74f7f19ab58d19b6a6bb9bfd957bb50ed11a82695e84cc27114002beb42c803",
+      "lines": 438
+    },
+    {
+      "path": "src/rule_workbook_validator.py",
+      "sha256": "324ef68a0bba47c0f52642949f08c4731e033af76aff49050cae02d14a94d3c6",
+      "lines": 93
+    },
+    {
+      "path": "src/runtime_paths.py",
+      "sha256": "09ef0859d0f89c5ac81fe1cb2de37f90cfeaade929959a4a7f48659359547bab",
+      "lines": 39
+    },
+    {
+      "path": "src/scheduler.py",
+      "sha256": "3990dcce768cfeb416cd69cecbeba95c49d10e0d4e70b9987cda186d9b6dbc8b",
+      "lines": 294
+    },
+    {
+      "path": "src/stage_logger.py",
+      "sha256": "712d6e497cef6bb57e2da0c9345d59e5cbcacf025bb7d3c78c28c8d87685812d",
+      "lines": 70
+    },
+    {
+      "path": "src/static/dashboard.css",
+      "sha256": "02c561c1a842b9afa4324f0b91237ed2ec6bc4a4026971b20702aaa3524091ce",
+      "lines": 4398
+    },
+    {
+      "path": "src/static/dashboard.js",
+      "sha256": "2a9d76fffc98c69e9508c0e41b1d939e478ae96ba8907ff323819186457b4aca",
+      "lines": 1866
+    },
+    {
+      "path": "src/templates/dashboard.html",
+      "sha256": "0d44d82c32bfc1870bfdade2e33af96e65c292e49cb1d54362e1ca9bec7c25cc",
+      "lines": 20
+    },
+    {
+      "path": "src/templates/layout.html",
+      "sha256": "a260da4942a5f180d3fbd2ed22a6bbdbed678885791ca2110d73121289746aa4",
+      "lines": 60
+    },
+    {
+      "path": "src/templates/partials/artifacts.html",
+      "sha256": "e8d339b33e5d130810824beca4f685fdf82f6cc84661889cd2cfc7b66d612d81",
+      "lines": 16
+    },
+    {
+      "path": "src/templates/partials/logs.html",
+      "sha256": "51274dc0ad1e58e1207a1a93ebe5f2617f65fcab6be7006e433bca27c846b72a",
+      "lines": 21
+    },
+    {
+      "path": "src/templates/partials/memory.html",
+      "sha256": "d464eb98cc48449fbd8e5c8f964eb71df28e8e8977e5f6f1431450ffe86e1f6c",
+      "lines": 64
+    },
+    {
+      "path": "src/templates/partials/overview.html",
+      "sha256": "f1f18ef88bd5715a5940d3c39927882dc9ddd968e80ed449b6c1d98625bf13f4",
+      "lines": 121
+    },
+    {
+      "path": "src/templates/partials/review.html",
+      "sha256": "258fdca029922df124b044782eab780a97dc61ef06fc4b261d95101e5e022983",
+      "lines": 46
+    },
+    {
+      "path": "src/templates/partials/run.html",
+      "sha256": "882836f90197dd65427cf3d1b48bada86eeaea0f1ffe2a62f2c23585e8757e5e",
+      "lines": 109
+    },
+    {
+      "path": "src/templates/partials/settings.html",
+      "sha256": "7824a7f09ded9b54efe978aec9a4f9cebc4198d1a929919039090554af690cdc",
+      "lines": 239
+    },
+    {
+      "path": "src/templates/partials/suggestions.html",
+      "sha256": "99d5f9e774c08e4f44b5b014c4e58afc6b16b0657a66408c891ac23b668ad725",
+      "lines": 50
+    },
+    {
+      "path": "src/ui_waits.py",
+      "sha256": "5e664df3a5cdab278dc158d0a344754b74309b11d7b62020d786281f74c1a206",
+      "lines": 79
+    },
+    {
+      "path": "src/update_checker.py",
+      "sha256": "3dbfc920f9088e0233413f643efb716338754649dcf3bb751c13250ad27def3e",
+      "lines": 388
+    },
+    {
+      "path": "src/web_app.py",
+      "sha256": "b28bf3eeb6d514cc48b38afc3c377e43b124a8e1c59bd15bfb3efbe1f59f26c5",
+      "lines": 782
+    },
+    {
+      "path": "src/web_researcher.py",
+      "sha256": "bfe680ab2be6892260f2e3e9cf52223ae8e7946f344f22866f0b9e08a6bf4f3e",
+      "lines": 330
+    },
+    {
+      "path": "src/web_runner.py",
+      "sha256": "f4184137e96a5f315d2095522a800f5874d5642b44b8f4ef16f1d086c0ddbb00",
+      "lines": 2608
+    },
+    {
+      "path": "src/write_failure_diagnostics.py",
+      "sha256": "321cb8ca1bd57f2891b2d533f03ee95eca557011ef23a864e2e5490484cb1699",
+      "lines": 28
+    }
+  ],
+  "routes": [
+    {
+      "method": "GET",
+      "path": "/",
+      "handler": "dashboard",
+      "line": 204,
+      "signature": "request: Request"
+    },
+    {
+      "method": "GET",
+      "path": "/run",
+      "handler": "run_page",
+      "line": 209,
+      "signature": "request: Request"
+    },
+    {
+      "method": "GET",
+      "path": "/settings",
+      "handler": "settings_page",
+      "line": 214,
+      "signature": "request: Request"
+    },
+    {
+      "method": "GET",
+      "path": "/suggestions",
+      "handler": "suggestions_page",
+      "line": 219,
+      "signature": "request: Request"
+    },
+    {
+      "method": "GET",
+      "path": "/review",
+      "handler": "review_page",
+      "line": 224,
+      "signature": "request: Request"
+    },
+    {
+      "method": "GET",
+      "path": "/memory",
+      "handler": "memory_page",
+      "line": 229,
+      "signature": "request: Request"
+    },
+    {
+      "method": "GET",
+      "path": "/artifacts",
+      "handler": "artifacts_page",
+      "line": 234,
+      "signature": "request: Request"
+    },
+    {
+      "method": "GET",
+      "path": "/logs",
+      "handler": "logs_page",
+      "line": 239,
+      "signature": "request: Request"
+    },
+    {
+      "method": "GET",
+      "path": "/api/status",
+      "handler": "api_status",
+      "line": 244,
+      "signature": ""
+    },
+    {
+      "method": "GET",
+      "path": "/api/approval_summary",
+      "handler": "api_approval_summary",
+      "line": 257,
+      "signature": ""
+    },
+    {
+      "method": "GET",
+      "path": "/api/data_health",
+      "handler": "api_data_health",
+      "line": 262,
+      "signature": ""
+    },
+    {
+      "method": "GET",
+      "path": "/api/enrichment_shadow",
+      "handler": "api_enrichment_shadow",
+      "line": 267,
+      "signature": ""
+    },
+    {
+      "method": "POST",
+      "path": "/api/data_health/repair",
+      "handler": "api_data_health_repair",
+      "line": 272,
+      "signature": ""
+    },
+    {
+      "method": "GET",
+      "path": "/api/review_queue",
+      "handler": "api_review_queue",
+      "line": 277,
+      "signature": "page: int=1, per_page: int=20, list_number: str='', sort: str='desc'"
+    },
+    {
+      "method": "GET",
+      "path": "/api/artifacts",
+      "handler": "api_artifacts",
+      "line": 294,
+      "signature": ""
+    },
+    {
+      "method": "GET",
+      "path": "/api/log_tail",
+      "handler": "api_log_tail",
+      "line": 299,
+      "signature": ""
+    },
+    {
+      "method": "GET",
+      "path": "/CLodopfuncs.js",
+      "handler": "clodop_probe",
+      "line": 307,
+      "signature": ""
+    },
+    {
+      "method": "GET",
+      "path": "/api/update/check",
+      "handler": "api_update_check",
+      "line": 315,
+      "signature": ""
+    },
+    {
+      "method": "POST",
+      "path": "/api/update/install",
+      "handler": "api_update_install",
+      "line": 320,
+      "signature": ""
+    },
+    {
+      "method": "GET",
+      "path": "/api/memory",
+      "handler": "api_memory",
+      "line": 350,
+      "signature": "q: str='', category: str='', reusable: str='', conflict: str='', limit: int=20, page: int=1, per_page: int=20"
+    },
+    {
+      "method": "POST",
+      "path": "/api/memory/import_suggestions",
+      "handler": "api_memory_import_suggestions",
+      "line": 373,
+      "signature": ""
+    },
+    {
+      "method": "GET",
+      "path": "/api/memory/sync/status",
+      "handler": "api_memory_sync_status",
+      "line": 380,
+      "signature": "check_remote: bool=False"
+    },
+    {
+      "method": "POST",
+      "path": "/api/memory/sync/test",
+      "handler": "api_memory_sync_test",
+      "line": 385,
+      "signature": ""
+    },
+    {
+      "method": "POST",
+      "path": "/api/memory/sync/upload",
+      "handler": "api_memory_sync_upload",
+      "line": 393,
+      "signature": ""
+    },
+    {
+      "method": "POST",
+      "path": "/api/memory/sync/download",
+      "handler": "api_memory_sync_download",
+      "line": 403,
+      "signature": "force: Annotated[str, Form()]=''"
+    },
+    {
+      "method": "GET",
+      "path": "/api/memory/sync/versions",
+      "handler": "api_memory_sync_versions",
+      "line": 415,
+      "signature": ""
+    },
+    {
+      "method": "POST",
+      "path": "/api/memory/delete_conflicting",
+      "handler": "api_memory_delete_conflicting",
+      "line": 423,
+      "signature": ""
+    },
+    {
+      "method": "POST",
+      "path": "/api/memory/delete_conflicting_unverified",
+      "handler": "api_memory_delete_conflicting_unverified",
+      "line": 430,
+      "signature": ""
+    },
+    {
+      "method": "POST",
+      "path": "/api/memory/{record_id}",
+      "handler": "api_memory_update",
+      "line": 435,
+      "signature": "record_id: int, request: Request"
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/memory/{record_id}",
+      "handler": "api_memory_delete",
+      "line": 446,
+      "signature": "record_id: int"
+    },
+    {
+      "method": "GET",
+      "path": "/api/llm/providers",
+      "handler": "api_llm_providers",
+      "line": 456,
+      "signature": ""
+    },
+    {
+      "method": "POST",
+      "path": "/api/llm/models",
+      "handler": "api_llm_models",
+      "line": 461,
+      "signature": "request: Request"
+    },
+    {
+      "method": "POST",
+      "path": "/api/settings",
+      "handler": "api_settings",
+      "line": 473,
+      "signature": "erp_url: Annotated[str, Form()]='', erp_username: Annotated[str, Form()]='', erp_password: Annotated[str, Form()]='', target_list_numbers: Annotated[str, Form()]='', process_all_todos: Annotated[str, Form()]='', process_all_todos_max: Annotated[str, Form()]='50', app_dry_run: Annotated[str, Form()]='', approval_write_mode: Annotated[str, Form()]='disabled', approval_write_min_confidence: Annotated[str, Form()]='0.8', approval_write_batch_size: Annotated[str, Form()]='3', erp_write_backend: Annotated[str, Form()]='web_ui', approval_parallel_workers: Annotated[str, Form()]='3', auto_pass: Annotated[str, Form()]='', scheduler_enabled: Annotated[str, Form()]='', scheduler_mode: Annotated[str, Form()]='interval', scheduler_interval_hours: Annotated[str, Form()]='6', scheduler_daily_time: Annotated[str, Form()]='16:00', scheduler_use_default_run_policy: Annotated[str, Form()]='', scheduler_process_all_todos_max: Annotated[str, Form()]='50', scheduler_approval_write_mode: Annotated[str, Form()]='disabled', scheduler_approval_write_min_confidence: Annotated[str, Form()]='0.8', scheduler_auto_pass: Annotated[str, Form()]='', scheduler_skip_manual_review_lists: Annotated[str, Form()]='', dingtalk_notification_enabled: Annotated[str, Form()]='', dingtalk_at_all: Annotated[str, Form()]='', dingtalk_stream_enabled: Annotated[str, Form()]='', dingtalk_stream_corp_id: Annotated[str, Form()]='', dingtalk_stream_agent_id: Annotated[str, Form()]='', dingtalk_stream_robot_code: Annotated[str, Form()]='', dingtalk_stream_open_conversation_id: Annotated[str, Form()]='', dingtalk_stream_client_id: Annotated[str, Form()]='', dingtalk_stream_client_secret: Annotated[str, Form()]='', dingtalk_stream_api_token: Annotated[str, Form()]='', memory_sync_enabled: Annotated[str, Form()]='', memory_sync_base_url: Annotated[str, Form()]='', memory_sync_remote_dir: Annotated[str, Form()]='', memory_sync_username: Annotated[str, Form()]='', memory_sync_password: Annotated[str, Form()]='', memory_sync_keep_versions: Annotated[str, Form()]='10', memory_sync_auto_upload_after_memory_change: Annotated[str, Form()]='', memory_sync_check_remote_on_startup: Annotated[str, Form()]='', update_token: Annotated[str, Form()]='', llm_provider: Annotated[str, Form()]='siliconflow', llm_base_url: Annotated[str, Form()]='', llm_model: Annotated[str, Form()]='', llm_api_key: Annotated[str, Form()]='', siliconflow_api_key: Annotated[str, Form()]='', llm_timeout_seconds: Annotated[str, Form()]='45', llm_max_retries: Annotated[str, Form()]='1'"
+    },
+    {
+      "method": "POST",
+      "path": "/api/run",
+      "handler": "api_run",
+      "line": 594,
+      "signature": "action: Annotated[str, Form()], target_list_numbers: Annotated[str, Form()]='', process_all_todos: Annotated[str, Form()]='', process_all_todos_max: Annotated[str, Form()]='50', approval_write_mode: Annotated[str, Form()]='disabled', approval_write_min_confidence: Annotated[str, Form()]='0.8', approval_write_batch_size: Annotated[str, Form()]='3', erp_write_backend: Annotated[str, Form()]='web_ui', auto_pass: Annotated[str, Form()]='false'"
+    },
+    {
+      "method": "POST",
+      "path": "/api/stop",
+      "handler": "api_stop",
+      "line": 623,
+      "signature": ""
+    },
+    {
+      "method": "POST",
+      "path": "/api/restart",
+      "handler": "api_restart",
+      "line": 628,
+      "signature": ""
+    },
+    {
+      "method": "POST",
+      "path": "/api/review/confirm",
+      "handler": "api_review_confirm",
+      "line": 641,
+      "signature": "request: Request"
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/review",
+      "handler": "api_review_delete",
+      "line": 649,
+      "signature": "request: Request"
+    },
+    {
+      "method": "GET",
+      "path": "/artifacts/{filename}",
+      "handler": "download_artifact",
+      "line": 660,
+      "signature": "filename: str"
+    }
+  ],
+  "template_attributes": {
+    "src/templates/dashboard.html": {
+      "id": [],
+      "name": []
+    },
+    "src/templates/layout.html": {
+      "id": [
+        "autoPassText",
+        "checkUpdateButton",
+        "dashboard-data",
+        "dryRunPill",
+        "dryRunText",
+        "erpApiDiscoveryText",
+        "erpWriteBackendText",
+        "installUpdateButton",
+        "overview",
+        "processScopeText",
+        "releaseLink",
+        "runBadge",
+        "sidebarToggle",
+        "updatePill",
+        "updateStateText",
+        "writeModeText"
+      ],
+      "name": [
+        "viewport"
+      ]
+    },
+    "src/templates/partials/artifacts.html": {
+      "id": [
+        "artifactList",
+        "artifactMeta",
+        "artifactRefreshState",
+        "artifacts",
+        "refreshArtifactButton"
+      ],
+      "name": []
+    },
+    "src/templates/partials/logs.html": {
+      "id": [
+        "copyLogButton",
+        "logBox",
+        "logCopyState",
+        "logs",
+        "refreshLogButton"
+      ],
+      "name": []
+    },
+    "src/templates/partials/memory.html": {
+      "id": [
+        "deleteConflictMemoryButton",
+        "importMemoryButton",
+        "memory",
+        "memoryCategoryFilter",
+        "memoryConflictFilter",
+        "memoryDetailPanel",
+        "memoryMeta",
+        "memoryNextPage",
+        "memoryPageInfo",
+        "memoryPrevPage",
+        "memoryReusableFilter",
+        "memorySearch",
+        "memoryTable",
+        "refreshMemoryButton",
+        "saveReusableMemoryButton"
+      ],
+      "name": []
+    },
+    "src/templates/partials/overview.html": {
+      "id": [
+        "apiKey",
+        "currentAction",
+        "dataHealthPanel",
+        "dataHealthRepairState",
+        "dataHealthStatus",
+        "enrichmentProductionMode",
+        "enrichmentProviderCalls",
+        "enrichmentShadowComparisons",
+        "enrichmentShadowFailures",
+        "enrichmentShadowMatchRate",
+        "enrichmentShadowMode",
+        "enrichmentShadowPanel",
+        "enrichmentShadowStatus",
+        "erpPassword",
+        "erpUrl",
+        "erpUser",
+        "finishedAt",
+        "healthConfirmedMissingMemory",
+        "healthConflicts",
+        "healthDuplicateReviews",
+        "healthMemoryMojibake",
+        "healthReusableMojibake",
+        "healthUnrecoverableReusable",
+        "lastRunResult",
+        "llmModel",
+        "manualReview",
+        "repairDataHealthButton",
+        "runApiFallbackWebWrite",
+        "runApiReadDetail",
+        "runApiRecordResolve",
+        "runApiRecordResolveFailure",
+        "runApiVerifyFailure",
+        "runApiWriteAttempt",
+        "runApiWriteSuccess",
+        "runChemicalCacheHits",
+        "runChemicalConflicts",
+        "runChemicalFresh",
+        "runChemicalMixtures",
+        "runChemicalPublicRequests",
+        "runChemicalStale",
+        "runChemicalUnavailable",
+        "runDeferredWrites",
+        "runDuplicateLlmReuse",
+        "runDuplicateSearchReuse",
+        "runLlmBatches",
+        "runLlmSeconds",
+        "runLlmSkips",
+        "runLogPath",
+        "runManualReviewCandidates",
+        "runNotFoundAfterReread",
+        "runPageSuggestions",
+        "runPages",
+        "runPubChemResults",
+        "runSearchFailures",
+        "runTargetLists",
+        "runWritableCandidates",
+        "runWriteFailure",
+        "runWriteSuccess",
+        "safetyGate",
+        "startedAt",
+        "statusLine",
+        "suggestionRows",
+        "targetList",
+        "workflowSteps"
+      ],
+      "name": []
+    },
+    "src/templates/partials/review.html": {
+      "id": [
+        "review",
+        "reviewListFilter",
+        "reviewMeta",
+        "reviewNextPage",
+        "reviewPageInfo",
+        "reviewPrevPage",
+        "reviewSortIcon",
+        "reviewTable",
+        "reviewTimeSort",
+        "reviewVisibleCount"
+      ],
+      "name": []
+    },
+    "src/templates/partials/run.html": {
+      "id": [
+        "clearTodos",
+        "dryRunWarning",
+        "restartRunButton",
+        "run",
+        "runForm",
+        "selectAllTodos",
+        "stopRunButton",
+        "todoListPicker",
+        "todoMeta"
+      ],
+      "name": [
+        "approval_write_batch_size",
+        "approval_write_min_confidence",
+        "approval_write_mode",
+        "auto_pass",
+        "erp_write_backend",
+        "process_all_todos",
+        "process_all_todos_max",
+        "target_list_numbers"
+      ]
+    },
+    "src/templates/partials/settings.html": {
+      "id": [
+        "appModeText",
+        "checkUpdateButton",
+        "currentVersionText",
+        "downloadMemorySyncButton",
+        "forceDownloadMemorySyncButton",
+        "installUpdateButton",
+        "latestVersionText",
+        "llmBaseUrlInput",
+        "llmModelSelect",
+        "llmModelStatus",
+        "llmProviderSelect",
+        "memorySyncLastDownload",
+        "memorySyncLastUpload",
+        "memorySyncLocalRecords",
+        "memorySyncLocalUpdated",
+        "memorySyncMessage",
+        "memorySyncRemoteVersion",
+        "memorySyncStateText",
+        "refreshLlmModels",
+        "releaseLink",
+        "schedulerAdvancedPolicy",
+        "schedulerLastResult",
+        "schedulerLastRun",
+        "schedulerMode",
+        "schedulerNextRun",
+        "settings",
+        "settingsForm",
+        "settingsSaveState",
+        "testMemorySyncButton",
+        "updateMessage",
+        "updateStateText",
+        "uploadMemorySyncButton"
+      ],
+      "name": [
+        "app_dry_run",
+        "approval_parallel_workers",
+        "approval_write_batch_size",
+        "approval_write_min_confidence",
+        "approval_write_mode",
+        "auto_pass",
+        "dingtalk_at_all",
+        "dingtalk_notification_enabled",
+        "dingtalk_stream_agent_id",
+        "dingtalk_stream_api_token",
+        "dingtalk_stream_client_id",
+        "dingtalk_stream_client_secret",
+        "dingtalk_stream_corp_id",
+        "dingtalk_stream_enabled",
+        "dingtalk_stream_open_conversation_id",
+        "dingtalk_stream_robot_code",
+        "erp_password",
+        "erp_url",
+        "erp_username",
+        "erp_write_backend",
+        "llm_api_key",
+        "llm_base_url",
+        "llm_max_retries",
+        "llm_model",
+        "llm_provider",
+        "llm_timeout_seconds",
+        "memory_sync_auto_upload_after_memory_change",
+        "memory_sync_base_url",
+        "memory_sync_check_remote_on_startup",
+        "memory_sync_enabled",
+        "memory_sync_keep_versions",
+        "memory_sync_password",
+        "memory_sync_remote_dir",
+        "memory_sync_username",
+        "process_all_todos",
+        "process_all_todos_max",
+        "scheduler_approval_write_min_confidence",
+        "scheduler_approval_write_mode",
+        "scheduler_auto_pass",
+        "scheduler_daily_time",
+        "scheduler_enabled",
+        "scheduler_interval_hours",
+        "scheduler_mode",
+        "scheduler_process_all_todos_max",
+        "scheduler_skip_manual_review_lists",
+        "scheduler_use_default_run_policy",
+        "update_token"
+      ]
+    },
+    "src/templates/partials/suggestions.html": {
+      "id": [
+        "categoryTags",
+        "evidence",
+        "evidenceBox",
+        "suggestionMeta",
+        "suggestionTable",
+        "suggestions"
+      ],
+      "name": []
+    }
+  }
+}

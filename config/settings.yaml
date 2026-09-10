@@ -12,13 +12,109 @@ llm:
   timeout_seconds: 45
   max_retries: 1
 chemical_search:
-  per_source_concurrency: 2
-  failure_circuit_break_threshold: 5
+  query_priority:
+  - cleaned_name
+  - standard_name
+  - english_name
+  - aliases
+  - cas_verification
+  max_name_queries: 4
+  providers:
+  - pubchem
+  - comptox
+  - nist
+  requests_per_second: 2
+  per_source_concurrency: 1
+  max_attempts: 3
+  read_timeout_seconds: 15
+  lookup_budget_seconds: 30
+  batch_budget_seconds: 180
+  failure_circuit_break_threshold: 3
+  failure_circuit_cooldown_seconds: 300
+  stale_if_error_days: 180
+  chemsrc_enabled: false
+  chemicalbook_enabled: false
+  fallback_timeout_seconds: 8
+  fallback_max_queries: 4
+  fallback_research_budget_seconds: 35
   cache:
     enabled: true
     path: data/chemical_search_cache.sqlite
     success_ttl_days: 30
     failure_ttl_days: 1
+erp_api:
+  base_url: ''
+  enabled_for_write: false
+  web_verify_after_api_write: true
+  discovery:
+    enabled: true
+    mode: capture_normal_approval_write
+    required_write_samples: 2
+    min_confidence: 0.9
+    status: pending_capture
+    candidate_path: data/logs/erp_api_candidate.yaml
+    backup_dir: data/logs/erp_api_config_backups
+    canary_on_next_run: true
+  endpoints:
+    todo_tasks: ''
+    reagent_detail: ''
+    save_property: ''
+    verify_property: ''
+  pagination:
+    list_number_param: listNumber
+    page_param: pageNum
+    page_size_param: pageSize
+    page_size: 200
+    max_pages: 50
+  record_id_fields:
+  - id
+  - recordId
+  - detailId
+  - reagentId
+  property_fields:
+  - 物化特性
+  - physicochemicalProperty
+  - property
+  field_mapping:
+    清单号:
+    - listNumber
+    - approvalNo
+    序号:
+    - sequence
+    - seq
+    - index
+    试剂名称:
+    - reagentName
+    - name
+    CAS号:
+    - cas
+    - casNo
+    规格单位:
+    - unit
+    - specUnit
+    试剂数量:
+    - quantity
+    - amount
+    物化特性:
+    - physicochemicalProperty
+    - property
+    record_id:
+    - id
+    - recordId
+  save_payload_mapping:
+    record_id: id
+    property: physicochemicalProperty
+    list_number: listNumber
+    sequence: sequence
+    name: reagentName
+    cas: cas
+  success_indicators:
+  - field: success
+    value: true
+  - field: ok
+    value: true
+  - field: code
+    value: 0
 memory_sync:
   enabled: false
   provider: webdav
@@ -40,6 +136,7 @@ approval:
   default_action: manual_review
   enable_llm_manual_review_advice: true
   write_mode: multi_page
+  erp_write_backend: api_write_with_web_verify
   write_min_confidence: 0.7
   write_batch_size: 5
   write_max_attempts: 2
@@ -65,6 +162,33 @@ notification:
   dingtalk:
     enabled: true
     at_all: true
+enrichment_v2:
+  enabled: false
+  shadow_mode: true
+  providers:
+    pubchem:
+      read_timeout_seconds: 10
+      max_concurrency: 2
+      include_hazard_details: true
+    nist:
+      enabled: false
+      read_timeout_seconds: 8
+    comptox:
+      enabled: false
+      api_key_env: EPA_CTX_API_KEY
+  llm:
+    enabled: false
+    # When enabled, it can only fill missing decision fields from supplied evidence text.
+  chinese_alias_backfill:
+    enabled: false
+    sources:
+      - chemsrc
+      - chemicalbook
+    # Background candidate collection only; reviewer promotion is required.
+    auto_promote: false
+enrichment_metrics:
+  enabled: true
+  jsonl_path: data/logs/enrichment_metrics.jsonl
 dingtalk_stream:
   enabled: true
   corp_id: ding14dcf2d1e069a44635c2f4657eb6378f

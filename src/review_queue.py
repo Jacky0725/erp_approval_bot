@@ -441,7 +441,7 @@ class ReviewQueueMixin:
             evidence_source_type = "llm_rule_fallback"
         elif used_llm:
             evidence_source_type = "llm_fallback"
-        elif source in {"Chemsrc", "ChemicalBook"}:
+        elif source in {"PubChem", "EPA CompTox", "NIST", "Supplier SDS", "Chemsrc", "ChemicalBook"}:
             evidence_source_type = "trusted_web"
         elif source:
             evidence_source_type = "web_fallback"
@@ -611,7 +611,9 @@ def review_display_summary(
 
     llm_failed = _llm_failed(raw_reason)
     salt_like = _looks_like_acid_salt(text_for_salt_check)
-    trusted_web = source_type == "trusted_web" or source in {"Chemsrc", "ChemicalBook"}
+    trusted_web = source_type == "trusted_web" or source in {
+        "PubChem", "EPA CompTox", "NIST", "Supplier SDS", "Chemsrc", "ChemicalBook"
+    }
     used_llm = source_type == "llm_fallback" or _truthy(evidence_fields.get("used_llm_knowledge_fallback"))
     used_llm_rule = source_type == "llm_rule_fallback" or _truthy(evidence_fields.get("used_llm_rule_fallback"))
     used_llm_advice = source_type == "llm_manual_review_advice" or _truthy(
@@ -883,7 +885,7 @@ def localize_review_detail_text(text: Any) -> str:
         ("No specific acute toxicity data provided", "未提供明确的急性毒性数据"),
         ("LLM fallback evidence is advisory only and requires manual review.", "LLM 辅助证据仅供参考，需要人工复核。"),
         ("LLM fallback evidence is advisory only and requires manual review", "LLM 辅助证据仅供参考，需要人工复核"),
-        ("Chemsrc 和 ChemicalBook 均查询失败或无有效结果。", "Chemsrc 和 ChemicalBook 均查询失败或无有效结果。"),
+        ("官方化学数据源未找到可信结果。", "官方化学数据源未找到可信结果。"),
         ("No trusted web evidence was found, so low-confidence LLM knowledge fallback was used.", "未找到可信网页证据，因此使用低置信度的 LLM 知识兜底。"),
         ("No trusted web evidence was found", "未找到可信网页证据"),
         ("No web evidence found.", "未找到网页证据。"),

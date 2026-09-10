@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import copy
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import hashlib
 import json
 import os
 import re
+from pathlib import Path
 from typing import Any
 
 from playwright.sync_api import Error, Locator, Page
@@ -12,10 +14,14 @@ from playwright.sync_api import Error, Locator, Page
 import pandas as pd
 
 from approval_batch_state import MultiPageWriteState, normalize_write_result
-from approval_suggestion_metrics import format_suggestion_summary, summarize_approval_suggestions
+from approval_suggestion_metrics import format_suggestion_summary, summarize_approval_suggestions, write_skip_reason
 from approval_writer import ApprovalWriter
 from category_mapper import erp_property_options, to_erp_property
 from chemical_searcher import ChemicalSearcher
+from enrichment_metrics import EnrichmentMetrics
+from enrichment_v2 import EnrichmentV2
+from erp_api_client import ErpApiClient, normalize_erp_write_backend
+from erp_api_discovery import ApiDiscoveryAnalyzer, ApiDiscoveryRecorder, ErpApiConfigurator
 from llm_extractor import LlmExtractor
 from name_normalizer import NameNormalizer
 from non_reagent_classifier import NonReagentClassifier
@@ -29,6 +35,58 @@ from write_failure_diagnostics import build_write_failure_debug_payload
 
 
 class ApprovalFlowMixin:
+
+    def enrichment_metrics(self) -> EnrichmentMetrics:
+        metrics = getattr(self, "_enrichment_metrics", None)
+        if metrics is None:
+            root_dir = Path(getattr(self, "root_dir", Path(__file__).resolve().parents[1]))
+            metrics = EnrichmentMetrics.from_settings(getattr(self, "settings", {}), root_dir)
+            self._enrichment_metrics = metrics
+        return metrics
+
+    def enrichment_v2_shadow_enabled(self) -> bool:
+        config = (getattr(self, "settings", {}) or {}).get("enrichment_v2", {}) or {}
+        return self._truthy(config.get("shadow_mode"))
+
+    def run_enrichment_v2_shadow(
+        self,
+        reagent: dict[str, Any],
+        rule_engine: RuleEngine,
+        legacy_suggestion: dict[str, Any],
+    ) -> None:
+        """Evaluate V2 for comparison only; it never changes the suggestion."""
+        service = getattr(self, "_enrichment_v2", None)
+        if service is None:
+            service = EnrichmentV2(settings=self.settings, root_dir=self.root_dir)
+            self._enrichment_v2 = service
+        try:
+            evaluation = service.evaluate(reagent, rule_engine)
+            comparison = service.compare_legacy(legacy_suggestion, evaluation)
+            self.enrichment_metrics().record("shadow_comparison", **comparison)
+        except Exception as error:  # Shadow diagnostics must not block the legacy approval flow.
+            self.enrichment_metrics().record("shadow_failure", error_type=type(error).__name__)
+
+    def run_enrichment_v2_shadow_batch(
+        self,
+        items: list[dict[str, Any]],
+        rule_engine: RuleEngine,
+        suggestions_by_index: dict[int, dict[str, Any]],
+    ) -> None:
+        """Run one batched V2 shadow lookup for the current reagent page."""
+        if not items:
+            return
+        service = getattr(self, "_enrichment_v2", None)
+        if service is None:
+            service = EnrichmentV2(settings=self.settings, root_dir=self.root_dir)
+            self._enrichment_v2 = service
+        try:
+            evaluations = service.evaluate_many([item["reagent"] for item in items], rule_engine)
+            for item, evaluation in zip(items, evaluations):
+                legacy = suggestions_by_index.get(item["index"], {})
+                comparison = service.compare_legacy(legacy, evaluation)
+                self.enrichment_metrics().record("shadow_comparison", **comparison)
+        except Exception as error:  # Shadow diagnostics must not block the legacy approval flow.
+            self.enrichment_metrics().record("shadow_failure", error_type=type(error).__name__)
 
     def run_debug_capture(self) -> None:
         self.run_after_login_capture(
@@ -93,11 +151,65 @@ class ApprovalFlowMixin:
             after_login = self.generate_all_todo_approval_suggestions
         else:
             after_login = self.generate_approval_suggestions
+        def after_login_with_discovery(page: Page) -> None:
+            self.ensure_erp_api_discovery_recorder(page)
+            try:
+                after_login(page)
+            finally:
+                self.finalize_erp_api_discovery()
+
         self.run_after_login_capture(
             screenshot_name="after_auto_match.png",
             html_name="after_auto_match.html",
-            after_login=after_login,
+            after_login=after_login_with_discovery,
         )
+
+    def erp_api_discovery_settings(self) -> dict[str, Any]:
+        return ((getattr(self, "settings", {}).get("erp_api") or {}).get("discovery") or {})
+
+    def ensure_erp_api_discovery_recorder(self, page: Page) -> ApiDiscoveryRecorder | None:
+        discovery = self.erp_api_discovery_settings()
+        status = str(discovery.get("status") or "pending_capture")
+        if discovery.get("enabled") is not True or status in {"pending_canary", "active", "rejected"}:
+            return None
+        recorder = getattr(self, "_erp_api_discovery_recorder", None)
+        if recorder is not None:
+            return recorder
+        configurator = ErpApiConfigurator(self.root_dir)
+        recorder = ApiDiscoveryRecorder(self._log_dir(), max_events=1000)
+        recorder.events.extend(configurator.load_events()[-500:])
+        recorder.attach(page)
+        self._erp_api_discovery_recorder = recorder
+        self._erp_api_configurator = configurator
+        print(
+            "ERP API auto-discovery is listening to normal approval traffic; "
+            "credentials and sensitive headers will be redacted."
+        )
+        return recorder
+
+    def finalize_erp_api_discovery(self) -> None:
+        recorder = getattr(self, "_erp_api_discovery_recorder", None)
+        configurator = getattr(self, "_erp_api_configurator", None)
+        if recorder is None or configurator is None:
+            return
+        discovery = self.erp_api_discovery_settings()
+        try:
+            required = max(2, int(discovery.get("required_write_samples") or 2))
+        except (TypeError, ValueError):
+            required = 2
+        candidate = ApiDiscoveryAnalyzer().analyze(recorder.events, required_write_samples=required)
+        path = configurator.save_candidate(candidate, recorder.events[-1000:])
+        print(
+            f"ERP API discovery candidate: status={candidate.status} confidence={candidate.confidence:.2f} "
+            f"missing={candidate.missing or '-'} artifact={path}"
+        )
+        try:
+            min_confidence = float(discovery.get("min_confidence") or 0.9)
+        except (TypeError, ValueError):
+            min_confidence = 0.9
+        if candidate.status == "candidate" and candidate.confidence >= min_confidence:
+            if configurator.promote_pending(candidate):
+                print("ERP API candidate was written atomically; API writes remain disabled until next-run canary.")
 
     def selected_todo_list_numbers(self) -> list[str]:
         configured = getattr(self, "target_list_numbers", None)
@@ -587,6 +699,11 @@ class ApprovalFlowMixin:
         skip_reagent_keys: set[str] | None = None,
     ) -> list[dict[str, Any]]:
         stage_logger = getattr(self, "stage_logger", None) or StageLogger()
+        self.enrichment_metrics().record(
+            "batch_start",
+            stage="process_current_unmatched_reagent_page",
+            page=str(page_label or ""),
+        )
         property_key = "\u7269\u5316\u7279\u6027"
         name_key = "\u8bd5\u5242\u540d\u79f0"
         cas_key = "CAS\u53f7"
@@ -750,7 +867,11 @@ class ApprovalFlowMixin:
             pending_reagents.append({"index": index, "progress": progress, "reagent": reagent})
 
         if not pending_reagents:
-            return [suggestions_by_index[index] for index in sorted(suggestions_by_index)]
+            ordered_suggestions = [suggestions_by_index[index] for index in sorted(suggestions_by_index)]
+            ordered_suggestions = self.enforce_duplicate_suggestion_consistency(ordered_suggestions)
+            for suggestion in ordered_suggestions:
+                self.remember_erp_suggestion(memory, suggestion)
+            return ordered_suggestions
 
         with stage_logger.stage("chemical_search", f"parallel {len(pending_reagents)} reagent(s)"):
             search_results = self.search_reagents_parallel(pending_reagents)
@@ -812,9 +933,114 @@ class ApprovalFlowMixin:
                         classification,
                         suggestions_by_index[item["index"]],
                     )
-            self.remember_erp_suggestion(memory, suggestions_by_index[item["index"]])
 
-        return [suggestions_by_index[index] for index in sorted(suggestions_by_index)]
+        if self.enrichment_v2_shadow_enabled():
+            self.run_enrichment_v2_shadow_batch(prepared_items, rule_engine, suggestions_by_index)
+        ordered_suggestions = [suggestions_by_index[index] for index in sorted(suggestions_by_index)]
+        ordered_suggestions = self.enforce_duplicate_suggestion_consistency(ordered_suggestions)
+        for suggestion in ordered_suggestions:
+            self.remember_erp_suggestion(memory, suggestion)
+        return ordered_suggestions
+
+    def enforce_duplicate_suggestion_consistency(self, suggestions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        groups: dict[str, list[dict[str, Any]]] = {}
+        for suggestion in suggestions:
+            key = self.duplicate_reagent_identity_key(suggestion)
+            if key:
+                groups.setdefault(key, []).append(suggestion)
+
+        for key, group in groups.items():
+            categories = {
+                str(item.get("最终建议类别") or "").strip()
+                for item in group
+                if str(item.get("最终建议类别") or "").strip()
+            }
+            if len(group) < 2 or len(categories) <= 1:
+                continue
+            best = max(group, key=self._duplicate_consistency_score)
+            best_category = str(best.get("最终建议类别") or "").strip()
+            best_rule_category = str(best.get("规则判定类别") or best_category).strip()
+            best_reason = str(best.get("规则原因") or "").strip()
+            print(
+                "Duplicate reagent suggestions had conflicting categories; "
+                f"using the highest-priority category for identity {key}: {best_category}."
+            )
+            for item in group:
+                if item is best:
+                    continue
+                original_category = str(item.get("最终建议类别") or "").strip()
+                item["最终建议类别"] = best_category
+                item["规则判定类别"] = best_rule_category
+                item["命中类别"] = best.get("命中类别", best_category)
+                item["规则原因"] = (
+                    f"同一清单当前页中相同试剂出现不同判定，已统一采用最高风险优先级结果："
+                    f"{original_category or '<空>'} -> {best_category}。"
+                    f"{best_reason}"
+                ).strip()
+                item["置信度"] = best.get("置信度", item.get("置信度", 0.0))
+                item["需人工复核"] = best.get("需人工复核", item.get("需人工复核", False))
+                item["查询来源"] = best.get("查询来源", item.get("查询来源", ""))
+                item["查询URL"] = best.get("查询URL", item.get("查询URL", ""))
+                item["证据"] = best.get("证据", item.get("证据", ""))
+        return suggestions
+
+    def duplicate_reagent_identity_key(self, suggestion: dict[str, Any]) -> str:
+        cas = self.normalize_cas(str(suggestion.get("CAS号") or suggestion.get("原ERP CAS号") or ""))
+        if cas.lower() in {"", "-", "无", "n/a", "na", "none"}:
+            cas = ""
+        names = [
+            self._work_key_text(suggestion.get("标准化名称", "")),
+            self._work_key_text(suggestion.get("清洗后名称", "")),
+            self._work_key_text(suggestion.get("试剂名称", "")),
+        ]
+        name = next((item for item in names if item), "")
+        if cas and name:
+            return f"cas_name:{cas}|{name}"
+        if name:
+            return f"name:{name}"
+        if cas:
+            return f"cas:{cas}"
+        return ""
+
+    @classmethod
+    def _duplicate_consistency_score(cls, suggestion: dict[str, Any]) -> tuple[int, float, int]:
+        category = str(
+            suggestion.get("规则判定类别")
+            or suggestion.get("最终建议类别")
+            or ""
+        ).strip()
+        priority = cls._category_risk_priority(category)
+        confidence = cls._float_confidence(suggestion.get("置信度"))
+        non_manual = 0 if cls._truthy(suggestion.get("需人工复核")) else 1
+        return priority, confidence, non_manual
+
+    @staticmethod
+    def _category_risk_priority(category: str) -> int:
+        normalized = str(category or "").strip()
+        priorities = {
+            "拒收类": 100,
+            "不建议接收类": 100,
+            "不建议接受类": 100,
+            "剧毒品": 95,
+            "易爆类": 90,
+            "高毒类": 85,
+            "氧化剂": 80,
+            "强反应": 75,
+            "强反应性": 75,
+            "特殊酸": 70,
+            "重金属类": 65,
+            "易燃类": 60,
+            "易燃液体": 60,
+            "发烟类": 55,
+            "溴碘类": 50,
+            "刺激性": 40,
+            "异味": 30,
+            "常规酸": 20,
+            "常规碱": 20,
+            "未知类": 15,
+            "普通类": 0,
+        }
+        return priorities.get(normalized, 10)
 
     @classmethod
     def lookup_reusable_memory(
@@ -998,6 +1224,23 @@ class ApprovalFlowMixin:
         normalized = dict(suggestion)
         normalized["最终建议类别"] = erp_category
         return memory.remember_suggestion(normalized)
+
+    def remember_verified_approval_suggestion(self, suggestion: dict[str, Any], erp_category: str) -> bool:
+        if self._truthy(suggestion.get("需人工复核")):
+            return False
+        if self._truthy(suggestion.get("LLM辅助意见仅供复核")):
+            return False
+        memory = ReagentMemory.from_settings(self.settings, self.root_dir)
+        verified = dict(suggestion)
+        verified["最终建议类别"] = erp_category
+        verified["查询来源"] = str(verified.get("查询来源") or "").strip() or "verified_erp_write"
+        reason = str(verified.get("规则原因") or "").strip()
+        verified["规则原因"] = f"{reason}\n网页保存后已校验当前行物化特性为 {erp_category}。".strip()
+        try:
+            return memory.remember_suggestion(verified)
+        except Exception as error:  # noqa: BLE001 - memory failures must not break a verified ERP save.
+            print(f"Could not store verified approval result in reagent memory: {error}")
+            return False
 
     def memory_match_is_safe(
         self,
@@ -1228,21 +1471,44 @@ class ApprovalFlowMixin:
         )
 
     def search_reagents_parallel(self, items: list[dict[str, Any]]) -> dict[int, dict[str, Any]]:
-        worker_count = self.parallel_worker_count()
-        if worker_count <= 1 or len(items) <= 1:
-            return {item["index"]: self.search_reagent_worker(item) for item in items}
+        unique_items, index_groups = self.unique_work_items(
+            items,
+            key_func=self.reagent_work_cache_key,
+            reuse_label="search",
+        )
 
-        print(f"Searching chemical websites with {worker_count} worker(s) for {len(items)} reagent(s).")
-        results: dict[int, dict[str, Any]] = {}
-        with ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix="chemical-search") as executor:
-            futures = {executor.submit(self.search_reagent_worker, item): item for item in items}
-            for future in as_completed(futures):
-                item = futures[future]
-                try:
-                    results[item["index"]] = future.result()
-                except Exception as error:  # noqa: BLE001 - keep one failed lookup from stopping the page
-                    results[item["index"]] = self.search_failure_result(item["reagent"], str(error))
-        return results
+        def expand_results(unique_results: dict[int, dict[str, Any]]) -> dict[int, dict[str, Any]]:
+            expanded: dict[int, dict[str, Any]] = {}
+            for unique_item in unique_items:
+                result = unique_results.get(unique_item["index"])
+                if result is None:
+                    continue
+                key = self.reagent_work_cache_key(unique_item)
+                for index in index_groups.get(key, [unique_item["index"]]):
+                    expanded[index] = copy.deepcopy(result)
+            return expanded
+
+        print(
+            f"Searching official chemical sources as one deduplicated batch for {len(unique_items)} unique reagent(s) "
+            f"from {len(items)} candidate(s)."
+        )
+        if type(self).search_reagent_worker is not ApprovalFlowMixin.search_reagent_worker:
+            return expand_results({item["index"]: self.search_reagent_worker(item) for item in unique_items})
+        searcher = ChemicalSearcher(
+            settings=self.settings,
+            root_dir=getattr(self, "root_dir", None),
+            metrics=self.enrichment_metrics(),
+        )
+        try:
+            batch_results = searcher.search_many([item["reagent"] for item in unique_items])
+        except Exception as error:  # noqa: BLE001 - keep lookup failures from stopping the page
+            batch_results = [self.search_failure_result(item["reagent"], str(error)) for item in unique_items]
+        results = {
+            item["index"]: batch_results[position]
+            for position, item in enumerate(unique_items)
+            if position < len(batch_results)
+        }
+        return expand_results(results)
 
     def search_reagent_worker(self, item: dict[str, Any]) -> dict[str, Any]:
         reagent = item["reagent"]
@@ -1264,13 +1530,35 @@ class ApprovalFlowMixin:
         rule_engine: RuleEngine,
     ) -> dict[int, tuple[dict[str, Any], dict[str, Any]]]:
         worker_count = self.parallel_worker_count()
-        if worker_count <= 1 or len(items) <= 1:
-            return {item["index"]: self.extract_and_classify_worker(item, rule_engine) for item in items}
+        unique_items, index_groups = self.unique_work_items(
+            items,
+            key_func=self.reagent_llm_cache_key,
+            reuse_label="llm",
+        )
 
-        print(f"Extracting LLM properties with {worker_count} worker(s) for {len(items)} reagent(s).")
+        def expand_results(
+            unique_results: dict[int, tuple[dict[str, Any], dict[str, Any]]],
+        ) -> dict[int, tuple[dict[str, Any], dict[str, Any]]]:
+            expanded: dict[int, tuple[dict[str, Any], dict[str, Any]]] = {}
+            for unique_item in unique_items:
+                result = unique_results.get(unique_item["index"])
+                if result is None:
+                    continue
+                key = self.reagent_llm_cache_key(unique_item)
+                for index in index_groups.get(key, [unique_item["index"]]):
+                    expanded[index] = copy.deepcopy(result)
+            return expanded
+
+        if worker_count <= 1 or len(items) <= 1:
+            return expand_results({item["index"]: self.extract_and_classify_worker(item, rule_engine) for item in unique_items})
+
+        print(
+            f"Extracting LLM properties with {worker_count} worker(s) for {len(unique_items)} unique reagent(s) "
+            f"from {len(items)} candidate(s)."
+        )
         results: dict[int, tuple[dict[str, Any], dict[str, Any]]] = {}
         with ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix="llm-extract") as executor:
-            futures = {executor.submit(self.extract_and_classify_worker, item, rule_engine): item for item in items}
+            futures = {executor.submit(self.extract_and_classify_worker, item, rule_engine): item for item in unique_items}
             for future in as_completed(futures):
                 item = futures[future]
                 try:
@@ -1282,7 +1570,7 @@ class ApprovalFlowMixin:
                         rule_engine,
                         str(error),
                     )
-        return results
+        return expand_results(results)
 
     def extract_and_classify_worker(
         self,
@@ -1293,7 +1581,16 @@ class ApprovalFlowMixin:
         reagent_name = reagent.get("\u8bd5\u5242\u540d\u79f0", "").strip()
         search_result = item["search_result"]
         print(f"[parallel llm] START {item['progress']} {reagent_name}")
+        if self.search_result_should_skip_llm(search_result, item.get("name_result") or {}, reagent_name):
+            print(f"[parallel llm] SKIP {item['progress']} {reagent_name} -> manual_review_no_trusted_evidence")
+            return self.empty_extraction_and_classification(
+                reagent,
+                search_result,
+                rule_engine,
+                search_result.get("failure_reason") or "No trusted web evidence; LLM skipped for obvious product/mixture/manual-review item.",
+            )
         extractor = LlmExtractor(settings=self.settings)
+        extractor.metrics = self.enrichment_metrics()
         if not hasattr(extractor, "generate_manual_review_advice") and self._search_result_needs_llm_knowledge_fallback(search_result):
             rule_fallback: dict[str, Any] = {}
             if hasattr(extractor, "classify_by_rules_fallback"):
@@ -1389,7 +1686,31 @@ class ApprovalFlowMixin:
             extracted["llm_rule_reason"] = search_result.get("llm_rule_reason", "")
             extracted["llm_rule_matched_rule"] = search_result.get("llm_rule_matched_rule", "")
             extracted["llm_rule_must_manual_review"] = search_result.get("llm_rule_must_manual_review", True)
+        component_categories: list[str] = []
+        for component_result in search_result.get("component_results", []) or []:
+            component_info = {
+                "reagent_name": component_result.get("name", ""),
+                "name": component_result.get("name", ""),
+                "cas": component_result.get("cas", ""),
+                "text": component_result.get("raw_text", ""),
+                "allow_default_normal": False,
+            }
+            component_classification = rule_engine.classify(component_info)
+            component_result["classification"] = component_classification
+            for category in component_classification.get("matched_categories", []) or []:
+                category = str(category or "").strip()
+                if category and category not in {"普通类", "未知类"} and category not in component_categories:
+                    component_categories.append(category)
+        if component_categories:
+            search_result["component_categories"] = component_categories
+            search_result["mixture_risk_categories"] = list(component_categories)
         classification = rule_engine.classify(self._classification_input(reagent, search_result, extracted))
+        if search_result.get("is_mixture") and not search_result.get("composition_complete", False):
+            classification = dict(classification)
+            classification["need_manual_review"] = True
+            classification["reason"] = (
+                f"{classification.get('reason') or ''} 混合物组成不完整，已采用已知最高风险类别并转人工复核。"
+            ).strip()
         if search_result.get("used_llm_knowledge_fallback") or search_result.get("used_llm_rule_fallback"):
             classification = dict(classification)
             classification["need_manual_review"] = True
@@ -1459,9 +1780,10 @@ class ApprovalFlowMixin:
     @staticmethod
     def _search_has_trusted_web_evidence(search_result: dict[str, Any]) -> bool:
         return bool(
-            str(search_result.get("source") or "").strip() in {"Chemsrc", "ChemicalBook"}
+            ChemicalSearcher.is_trusted_source(str(search_result.get("source") or ""))
             and search_result.get("relevance_passed", False)
             and ApprovalFlowMixin._float_confidence(search_result.get("source_confidence")) >= 0.7
+            and str(search_result.get("retrieval_status") or "fresh").lower() != "stale"
         )
 
     def llm_manual_review_advice_enabled(self) -> bool:
@@ -1565,6 +1887,103 @@ class ApprovalFlowMixin:
         except (TypeError, ValueError):
             workers = 3
         return max(1, min(8, workers))
+
+    @classmethod
+    def unique_work_items(
+        cls,
+        items: list[dict[str, Any]],
+        *,
+        key_func: Any,
+        reuse_label: str,
+    ) -> tuple[list[dict[str, Any]], dict[str, list[int]]]:
+        unique_items: list[dict[str, Any]] = []
+        index_groups: dict[str, list[int]] = {}
+        for item in items:
+            key = key_func(item)
+            if key in index_groups:
+                index_groups[key].append(item["index"])
+                print(f"Reusing run {reuse_label} result for duplicate reagent: {item.get('progress', '')}")
+                continue
+            index_groups[key] = [item["index"]]
+            unique_items.append(item)
+        return unique_items, index_groups
+
+    @classmethod
+    def reagent_work_cache_key(cls, item: dict[str, Any]) -> str:
+        reagent = item.get("reagent", {}) or {}
+        parts = [
+            cls._work_key_text(reagent.get("\u8bd5\u5242\u540d\u79f0", "")),
+            cls.normalize_cas(str(reagent.get("CAS\u53f7", "") or "")),
+            cls._work_key_text(reagent.get("\u89c4\u683c", "")),
+            cls._work_key_text(reagent.get("\u89c4\u683c\u5355\u4f4d", "")),
+        ]
+        return "|".join(part.lower() for part in parts)
+
+    @classmethod
+    def reagent_llm_cache_key(cls, item: dict[str, Any]) -> str:
+        reagent = item.get("reagent", {}) or {}
+        search_result = item.get("search_result", {}) or {}
+        name_result = item.get("name_result", {}) or {}
+        parts = [
+            cls.reagent_work_cache_key({"reagent": reagent}),
+            cls._work_key_text(search_result.get("source", "")),
+            cls._work_key_text(search_result.get("url", "")),
+            cls._work_key_text(search_result.get("failure_reason", ""))[:200],
+            cls._work_key_text(name_result.get("standard_name", "")),
+            cls._work_key_text(name_result.get("cleaned_name", "")),
+        ]
+        return "|".join(part.lower() for part in parts)
+
+    @classmethod
+    def search_result_should_skip_llm(
+        cls,
+        search_result: dict[str, Any],
+        name_result: dict[str, Any],
+        reagent_name: str,
+    ) -> bool:
+        if not search_result.get("need_manual_review", False):
+            return False
+        if cls._search_has_extractable_evidence(search_result):
+            return False
+        text = " ".join(
+            str(value or "")
+            for value in (
+                reagent_name,
+                name_result.get("raw_name", ""),
+                name_result.get("cleaned_name", ""),
+                name_result.get("standard_name", ""),
+                search_result.get("failure_reason", ""),
+            )
+        )
+        return cls.manual_review_name_should_skip_llm(text)
+
+    @staticmethod
+    def manual_review_name_should_skip_llm(text: str) -> bool:
+        normalized = re.sub(r"[\s\-_()/\\\[\]{}（）]+", "", str(text or "").lower())
+        if not normalized:
+            return False
+        return any(
+            token in normalized
+            for token in (
+                "分散剂",
+                "润湿剂",
+                "润滑液",
+                "机油",
+                "油品",
+                "树脂",
+                "聚合物",
+                "共聚物",
+                "色浆",
+                "涂料",
+                "胶水",
+                "清洗剂",
+                "添加剂",
+                "助剂",
+                "耗材",
+                "roll",
+                "pvdf",
+            )
+        )
 
     @staticmethod
     def search_failure_result(reagent: dict[str, Any], reason: str) -> dict[str, Any]:
@@ -1996,6 +2415,7 @@ class ApprovalFlowMixin:
         candidates = self.high_confidence_write_candidates(suggestions)
         candidate_keys = {self.suggestion_work_key(suggestion) for suggestion in candidates}
         result["eligible"].update(candidate_keys)
+        self.queue_low_confidence_write_skips(suggestions, min_confidence=min_confidence)
         result["handled"].update(
             self.suggestion_work_key(suggestion)
             for suggestion in suggestions
@@ -2024,6 +2444,37 @@ class ApprovalFlowMixin:
             return result
 
         writer = ApprovalWriter(settings=self.settings)
+        write_backend = self.erp_write_backend()
+        discovery = self.erp_api_discovery_settings()
+        discovery_status = str(discovery.get("status") or "pending_capture")
+        canary_pending = (
+            discovery.get("enabled") is True
+            and discovery_status == "pending_canary"
+            and discovery.get("canary_on_next_run", True) is True
+        )
+        canary_attempted = False
+        api_configurator = ErpApiConfigurator(self.root_dir)
+        if discovery.get("enabled") is True and discovery_status == "pending_capture":
+            write_backend = "web_ui"
+            print("ERP API discovery is collecting verified normal saves; this task continues with webpage writes.")
+        api_client: ErpApiClient | None = None
+        api_detail_records: list[dict[str, Any]] | None = None
+        api_status_logged = False
+        if write_backend != "web_ui":
+            api_client = ErpApiClient(page, self.settings)
+            status = api_client.configuration_status()
+            missing = ", ".join(status.get("missing") or [])
+            if status.get("configured"):
+                print(
+                    f"ERP write backend is {write_backend}; API endpoints are configured; "
+                    "webpage writer remains available as fallback."
+                )
+            else:
+                print(
+                    f"ERP write backend is {write_backend}, but API is not fully configured "
+                    f"({missing or 'unknown missing fields'}); webpage writer remains available as fallback."
+                )
+            api_status_logged = True
         consecutive_failures = 0
         for row_index, suggestion in enumerate(candidates, start=1):
             sequence = str(suggestion.get("\u5e8f\u53f7") or "").strip()
@@ -2055,6 +2506,118 @@ class ApprovalFlowMixin:
             verified = False
             saved = False
             row = None
+
+            if write_backend in {"api_read_web_write", "api_write_with_web_verify"} and api_client is not None:
+                if not api_status_logged:
+                    status = api_client.configuration_status()
+                    print(f"ERP API configuration status: {status}")
+                    api_status_logged = True
+                try:
+                    if api_detail_records is None:
+                        list_number = self.current_detail_list_number()
+                        if not list_number:
+                            list_number = str(suggestion.get("试剂清单号") or suggestion.get("清单号") or "").strip()
+                        api_detail_records = api_client.fetch_reagent_detail(list_number)
+                        print(
+                            f"[api_read_detail] list={list_number or '<unknown>'} "
+                            f"records={len(api_detail_records)}"
+                        )
+                    record_id, _api_record = api_client.resolve_reagent_record_id(suggestion, api_detail_records)
+                    suggestion["_erp_record_id"] = record_id
+                    suggestion["_erp_record"] = _api_record
+                    print(f"[api_record_resolve] sequence={sequence} record_id={record_id}")
+                except Exception as error:
+                    print(f"[api_record_resolve] sequence={sequence} failed={error}")
+
+            if write_backend == "api_write_with_web_verify":
+                is_canary = canary_pending and not canary_attempted
+                api_result = (api_client or ErpApiClient(page, self.settings)).save_physicochemical_property(
+                    suggestion,
+                    category,
+                    allow_canary=is_canary,
+                )
+                canary_attempted = canary_attempted or is_canary
+                if api_result.attempted:
+                    print(
+                        f"[api_property_save] sequence={sequence} record_id={api_result.record_id or '-'} "
+                        f"saved={api_result.saved} verified={api_result.verified} detail={api_result.detail}"
+                    )
+                else:
+                    print(f"[api_property_save] sequence={sequence} skipped={api_result.detail}")
+                if api_result.saved and api_result.verified:
+                    saved = True
+                    verified = True
+                elif not api_result.fallback_to_web:
+                    last_failure_detail = api_result.detail or "ERP API write failed without webpage fallback"
+                    result["failed"].add(work_key)
+                    self.record_save_result(f"reagent_save_{sequence}", False, last_failure_detail)
+                    self.record_web_write_failure(suggestion, category, last_failure_detail)
+                    self.add_manual_review_item_from_write_failure(suggestion, last_failure_detail)
+                    continue
+                else:
+                    print(f"[api_fallback_web_write] sequence={sequence} reason={api_result.detail}")
+                    if is_canary:
+                        reason = f"API canary failed: {api_result.detail}"
+                        api_configurator.reject(reason)
+                        write_backend = "web_ui"
+                        api_client = None
+                        canary_pending = False
+                        print("ERP API candidate was rejected and rolled back; continuing with webpage writes.")
+
+            if verified:
+                if (
+                    write_backend == "api_write_with_web_verify"
+                    and api_client is not None
+                    and bool((self.settings.get("erp_api") or {}).get("web_verify_after_api_write", True))
+                ):
+                    if is_canary:
+                        try:
+                            page.reload(wait_until="domcontentloaded")
+                            wait_until_spinner_hidden(page, timeout_ms=5000)
+                        except Error as error:
+                            print(f"[api_canary_web_verify] sequence={sequence} reload_failed={error}")
+                    page_value = self.read_reagent_property_by_sequence(page, sequence)
+                    if is_canary and not self.property_value_matches(page_value, category, writer):
+                        last_failure_detail = (
+                            f"API canary read-back mismatch: webpage row shows {page_value or '<empty>'}"
+                        )
+                        api_configurator.reject(last_failure_detail)
+                        write_backend = "web_ui"
+                        api_client = None
+                        canary_pending = False
+                        saved = False
+                        verified = False
+                        print(
+                            f"[api_canary_web_verify] sequence={sequence} rejected={last_failure_detail}; "
+                            "continuing with an idempotent webpage save."
+                        )
+                    if page_value and not self.property_value_matches(page_value, category, writer):
+                        if verified:
+                            last_failure_detail = f"ERP API verified, but webpage row shows {page_value}"
+                            print(f"[api_property_verify] sequence={sequence} failed={last_failure_detail}")
+                            result["failed"].add(work_key)
+                            self.record_save_result(f"reagent_save_{sequence}", False, last_failure_detail)
+                            self.record_web_write_failure(suggestion, category, last_failure_detail)
+                            self.add_manual_review_item_from_write_failure(suggestion, last_failure_detail)
+                            continue
+                    if page_value:
+                        print(f"[api_property_verify] sequence={sequence} webpage_value={page_value}")
+                if verified and is_canary:
+                    api_configurator.activate()
+                    erp_api_settings = self.settings.setdefault("erp_api", {})
+                    erp_api_settings["enabled_for_write"] = True
+                    erp_api_settings.setdefault("discovery", {})["status"] = "active"
+                    if api_client is not None:
+                        api_client.api_settings["enabled_for_write"] = True
+                    canary_pending = False
+                    print("ERP API canary passed API and webpage read-back checks; API writes are now active.")
+            if verified:
+                self.record_save_result(f"reagent_save_{sequence}", True, category)
+                result["handled"].add(work_key)
+                self.clear_web_write_failure(suggestion)
+                if self.remember_verified_approval_suggestion(suggestion, category):
+                    print(f"Stored verified ERP API approval result in reagent memory: {sequence} {reagent_name} -> {category}")
+                continue
 
             for write_attempt in range(1, write_attempt_limit + 1):
                 if write_attempt > 1:
@@ -2144,15 +2707,22 @@ class ApprovalFlowMixin:
                     result["handled"].add(work_key)
                     return result
 
-                saved = writer.save(page, row)
-                wait_until_spinner_hidden(page, timeout_ms=5000)
-                saved_value = wait_until_row_value(
-                    page,
-                    lambda: self.read_reagent_property_by_sequence(page, sequence),
-                    lambda value: self.property_value_matches(value, category, writer),
-                    timeout_ms=5000,
-                )
-                verified = saved and self.property_value_matches(saved_value, category, writer)
+                recorder = getattr(self, "_erp_api_discovery_recorder", None)
+                if recorder is not None:
+                    recorder.begin_save_window(suggestion, category)
+                try:
+                    saved = writer.save(page, row)
+                    wait_until_spinner_hidden(page, timeout_ms=5000)
+                    saved_value = wait_until_row_value(
+                        page,
+                        lambda: self.read_reagent_property_by_sequence(page, sequence),
+                        lambda value: self.property_value_matches(value, category, writer),
+                        timeout_ms=5000,
+                    )
+                    verified = saved and self.property_value_matches(saved_value, category, writer)
+                finally:
+                    if recorder is not None:
+                        recorder.end_save_window(verified)
                 print(f"Save verified for sequence {sequence}: {verified} (clicked_save={saved})")
                 if verified:
                     break
@@ -2174,6 +2744,8 @@ class ApprovalFlowMixin:
             if verified:
                 result["handled"].add(work_key)
                 self.clear_web_write_failure(suggestion)
+                if self.remember_verified_approval_suggestion(suggestion, category):
+                    print(f"Stored verified approval result in reagent memory: {sequence} {reagent_name} -> {category}")
                 consecutive_failures = 0
                 if not self.settle_after_successful_write(page, writer, sequence):
                     result["failed"].add(work_key)
@@ -2218,10 +2790,20 @@ class ApprovalFlowMixin:
                 self.record_save_result(f"reagent_library_{sequence}", generated, category)
                 print(f"Generate reagent library result for sequence {sequence}: {generated}")
 
-            if mode == "save_one":
-                return result
+        if mode == "save_one":
+            return result
 
         return result
+
+    def queue_low_confidence_write_skips(self, suggestions: list[dict[str, Any]], *, min_confidence: float) -> None:
+        for suggestion in suggestions:
+            if write_skip_reason(
+                suggestion,
+                min_confidence=min_confidence,
+                category_resolver=lambda category: to_erp_property(category, self.settings),
+            ) != "low_confidence":
+                continue
+            self.add_manual_review_item_from_low_confidence_suggestion(suggestion, min_confidence)
 
     def approval_write_batch_size(self) -> int:
         approval_settings = getattr(self, "settings", {}).get("approval", {}) or {}
@@ -2238,6 +2820,12 @@ class ApprovalFlowMixin:
             return float(value)
         except (TypeError, ValueError):
             return 0.8
+
+    def erp_write_backend(self) -> str:
+        approval_settings = getattr(self, "settings", {}).get("approval", {}) or {}
+        return normalize_erp_write_backend(
+            os.getenv("ERP_WRITE_BACKEND") or approval_settings.get("erp_write_backend", "web_ui")
+        )
 
     def record_web_write_failure(self, suggestion: dict[str, Any], category: str, reason: str) -> None:
         if getattr(self, "web_write_failures", None) is None:
@@ -2340,6 +2928,77 @@ class ApprovalFlowMixin:
             "需要人工在网页端核对并处理该试剂。"
         )
         self.add_manual_review_item(reagent, name_result, reason=manual_reason)
+
+    def add_manual_review_item_from_low_confidence_suggestion(
+        self,
+        suggestion: dict[str, Any],
+        min_confidence: float,
+    ) -> None:
+        reagent = {
+            "\u5e8f\u53f7": suggestion.get("\u5e8f\u53f7", ""),
+            "\u8bd5\u5242\u540d\u79f0": suggestion.get("\u8bd5\u5242\u540d\u79f0", ""),
+            "CAS\u53f7": suggestion.get("CAS\u53f7", ""),
+            "\u89c4\u683c": suggestion.get("\u89c4\u683c", ""),
+            "\u89c4\u683c\u5355\u4f4d": suggestion.get("\u89c4\u683c\u5355\u4f4d", ""),
+            "\u8bd5\u5242\u6570\u91cf": suggestion.get("\u8bd5\u5242\u6570\u91cf", ""),
+        }
+        name_result = {
+            "standard_name": suggestion.get("\u6807\u51c6\u5316\u540d\u79f0", ""),
+            "cleaned_name": suggestion.get("\u6e05\u6d17\u540e\u540d\u79f0", ""),
+            "english_name": suggestion.get("\u82f1\u6587\u540d\u79f0", ""),
+            "cas": suggestion.get("CAS\u53f7", ""),
+            "confidence": suggestion.get("\u540d\u79f0\u6807\u51c6\u5316\u7f6e\u4fe1\u5ea6", ""),
+            "need_manual_review": False,
+        }
+        search_result = {
+            "source": suggestion.get("\u67e5\u8be2\u6765\u6e90", ""),
+            "url": suggestion.get("\u67e5\u8be2URL", ""),
+            "cas": suggestion.get("CAS\u53f7", ""),
+            "matched_site_name": suggestion.get("\u7f51\u7ad9\u5339\u914d\u540d\u79f0", ""),
+            "name_similarity": suggestion.get("\u540d\u79f0\u76f8\u4f3c\u5ea6", ""),
+            "relevance_passed": suggestion.get("\u67e5\u8be2\u76f8\u5173\u6027\u901a\u8fc7", False),
+            "source_confidence": suggestion.get("\u8d44\u6599\u53ef\u4fe1\u5ea6", ""),
+            "evidence_quality": suggestion.get("\u8bc1\u636e\u8d28\u91cf", ""),
+            "failure_reason": suggestion.get("\u67e5\u8be2\u5931\u8d25\u539f\u56e0", ""),
+            "need_manual_review": False,
+        }
+        extracted = {
+            "flash_point": suggestion.get("\u95ea\u70b9", ""),
+            "boiling_point": suggestion.get("\u6cb8\u70b9", ""),
+            "toxicity": suggestion.get("\u6bd2\u6027", ""),
+            "corrosive": suggestion.get("\u8150\u8680\u6027", ""),
+            "oxidizing": suggestion.get("\u6c27\u5316\u6027", ""),
+            "flammable": suggestion.get("\u6613\u71c3", ""),
+            "water_reactive": suggestion.get("\u9047\u6c34\u53cd\u5e94", ""),
+            "explosive_risk": suggestion.get("\u7206\u70b8\u98ce\u9669", ""),
+            "heavy_metal": suggestion.get("\u91cd\u91d1\u5c5e", ""),
+            "suggested_categories": [suggestion.get("\u6700\u7ec8\u5efa\u8bae\u7c7b\u522b", "")],
+            "evidence": [suggestion.get("\u8bc1\u636e", "")] if suggestion.get("\u8bc1\u636e") else [],
+        }
+        classification = {
+            "final_category": suggestion.get("\u6700\u7ec8\u5efa\u8bae\u7c7b\u522b", ""),
+            "matched_categories": [
+                item.strip()
+                for item in str(suggestion.get("\u547d\u4e2d\u7c7b\u522b", "") or "").split(",")
+                if item.strip()
+            ],
+            "reason": suggestion.get("\u89c4\u5219\u539f\u56e0", ""),
+            "confidence": suggestion.get("\u7f6e\u4fe1\u5ea6", 0.0),
+            "need_manual_review": True,
+        }
+        confidence = self._float_confidence(suggestion.get("\u7f6e\u4fe1\u5ea6"))
+        manual_reason = (
+            f"规则已给出 {classification['final_category'] or '候选'} 建议，但置信度 {confidence:.2f} "
+            f"低于自动写入阈值 {min_confidence:.2f}；需人工确认后再写入 ERP 或加入试剂记忆库。"
+        )
+        self.add_manual_review_item(
+            reagent,
+            name_result,
+            reason=manual_reason,
+            search_result=search_result,
+            extracted=extracted,
+            classification=classification,
+        )
 
     def write_failure_can_skip_manual_review(self, suggestion: dict[str, Any]) -> bool:
         # A reusable classification is only safe after ERP confirms the webpage
@@ -2786,6 +3445,9 @@ class ApprovalFlowMixin:
             "explosive_risk": extracted.get("explosive_risk"),
             "heavy_metal": extracted.get("heavy_metal"),
             "suggested_categories": extracted.get("suggested_categories", []),
+            "mixture_risk_categories": search_result.get("mixture_risk_categories", []),
+            "sds_categories": search_result.get("sds_categories", []),
+            "component_categories": search_result.get("component_categories", []),
             "evidence": extracted.get("evidence", []),
             "allow_default_normal": bool(
                 not search_result.get("need_manual_review", True)
@@ -2832,6 +3494,10 @@ class ApprovalFlowMixin:
             or name_result.get("cas")
             or reagent.get("CAS\u53f7", "")
         )
+        classification_confidence = self._effective_classification_confidence(
+            search_result,
+            classification,
+        )
         return {
             "\u5e8f\u53f7": reagent.get("\u5e8f\u53f7", ""),
             "\u8bd5\u5242\u540d\u79f0": reagent.get("\u8bd5\u5242\u540d\u79f0", ""),
@@ -2867,6 +3533,11 @@ class ApprovalFlowMixin:
             "\u8d44\u6599\u53ef\u4fe1\u5ea6": search_result.get("source_confidence", 0.0),
             "\u8bc1\u636e\u8d28\u91cf": search_result.get("evidence_quality", ""),
             "\u67e5\u8be2\u5931\u8d25\u539f\u56e0": search_result.get("failure_reason", ""),
+            "身份验证状态": search_result.get("identity_status", ""),
+            "数据获取状态": search_result.get("retrieval_status", ""),
+            "是否混合物": search_result.get("is_mixture", False),
+            "字段证据": json.dumps(search_result.get("evidence_items", []) or [], ensure_ascii=False),
+            "数据源诊断": json.dumps(search_result.get("provider_results", []) or [], ensure_ascii=False),
             "\u662f\u5426\u4f7f\u7528\u5927\u6a21\u578b\u751f\u6210\u5019\u9009\u540d": search_result.get("used_llm_search_candidates", False),
             "\u5927\u6a21\u578b\u5019\u9009\u641c\u7d22\u8bcd": ", ".join(search_result.get("llm_search_candidates", []) or []),
             "是否使用LLM知识托底": search_result.get("used_llm_knowledge_fallback", False),
@@ -2892,7 +3563,7 @@ class ApprovalFlowMixin:
             "\u6700\u7ec8\u5efa\u8bae\u7c7b\u522b": classification.get("final_category", ""),
             "\u547d\u4e2d\u7c7b\u522b": ", ".join(classification.get("matched_categories", []) or []),
             "\u89c4\u5219\u539f\u56e0": classification.get("reason", ""),
-            "\u7f6e\u4fe1\u5ea6": classification.get("confidence", 0.0),
+            "\u7f6e\u4fe1\u5ea6": classification_confidence,
             "\u9700\u4eba\u5de5\u590d\u6838": self._suggestion_needs_manual_review(
                 search_result,
                 name_result,
@@ -2900,6 +3571,37 @@ class ApprovalFlowMixin:
                 classification,
             ),
         }
+
+    def _effective_classification_confidence(
+        self,
+        search_result: dict[str, Any],
+        classification: dict[str, Any],
+    ) -> float:
+        confidence = self._float_confidence(classification.get("confidence", 0.0))
+        if confidence >= 0.7:
+            return confidence
+        if self._trusted_high_quality_exact_example_match(search_result, classification):
+            return max(confidence, 0.7)
+        return confidence
+
+    def _trusted_high_quality_exact_example_match(
+        self,
+        search_result: dict[str, Any],
+        classification: dict[str, Any],
+    ) -> bool:
+        source = str(search_result.get("source") or "").strip()
+        if not ChemicalSearcher.is_trusted_source(source):
+            return False
+        if str(search_result.get("evidence_quality") or "").strip().lower() != "high":
+            return False
+        if not search_result.get("relevance_passed", False):
+            return False
+        if self._float_confidence(search_result.get("source_confidence")) < 0.86:
+            return False
+        if classification.get("need_manual_review", True):
+            return False
+        reason = str(classification.get("reason") or "")
+        return "举例列辅助命中" in reason or "example" in reason.lower()
 
     def _suggestion_needs_manual_review(
         self,
@@ -2923,7 +3625,7 @@ class ApprovalFlowMixin:
     @staticmethod
     def _search_resolved_name_review(search_result: dict[str, Any], name_result: dict[str, Any]) -> bool:
         source = str(search_result.get("source") or "").strip()
-        trusted_source = source in {"Chemsrc", "ChemicalBook"}
+        trusted_source = ChemicalSearcher.is_trusted_source(source)
         confidence = ApprovalFlowMixin._float_confidence(name_result.get("confidence"))
         source_confidence = ApprovalFlowMixin._float_confidence(search_result.get("source_confidence"))
         has_identifier = bool(str(name_result.get("cas") or search_result.get("cas") or "").strip())
@@ -2931,6 +3633,7 @@ class ApprovalFlowMixin:
             trusted_source
             and search_result.get("relevance_passed", False)
             and source_confidence >= 0.86
+            and str(search_result.get("retrieval_status") or "fresh").lower() != "stale"
             and confidence >= 0.8
             and (
                 name_result.get("web_verified_alias")

@@ -5,6 +5,7 @@ import ctypes
 import io
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -34,6 +35,7 @@ from dingtalk_notifier import (
     send_task_result_notification,
 )
 from dingtalk_stream_bot import dingtalk_stream_config
+from erp_api_client import normalize_erp_write_backend
 from category_mapper import (
     category_mapping_summary,
     erp_property_options,
@@ -70,6 +72,7 @@ ACTION_LABELS = {
     "suggestions": "审批流程",
     "todo_export": "待办清单刷新",
     "erp_smoke": "ERP 只读冒烟测试",
+    "api_discovery": "ERP 接口探测",
     "debug_capture": "首页采集",
     "judgement_capture": "试剂判定页采集",
 }
@@ -78,6 +81,11 @@ WEB_WRITE_MODE_LABELS = {
     "disabled": "禁用网页写入",
     "multi_page": "全清单分页保存",
     "generate_library": "保存并生成试剂库",
+}
+ERP_WRITE_BACKEND_LABELS = {
+    "web_ui": "页面写入",
+    "api_read_web_write": "接口读取 + 页面写入",
+    "api_write_with_web_verify": "接口写入 + 接口/页面校验",
 }
 RETIRED_WEB_WRITE_MODES = {"test_one", "save_one", "single_page", ""}
 
@@ -306,6 +314,14 @@ class AutomationJobManager:
             error = self.error
             if light:
                 health = run_health(log_tail, success, error)
+                summary = light_run_summary(
+                    log_tail,
+                    action=self.action,
+                    options=self._last_options,
+                    running=running,
+                    success=success,
+                    error=error,
+                )
                 return {
                     "running": running,
                     "action": self.action,
@@ -317,14 +333,8 @@ class AutomationJobManager:
                     "result_label": result_label(running, success, error, health, action=self.action),
                     "result_health": health,
                     "run_log_path": self._run_log_path,
-                    "summary": light_run_summary(
-                        log_tail,
-                        action=self.action,
-                        options=self._last_options,
-                        running=running,
-                        success=success,
-                        error=error,
-                    ),
+                    "current_list_number": current_approval_list_number(log_tail, self._last_options),
+                    "summary": summary,
                     "log_tail": log_tail,
                     "workflow": workflow_summary(log_tail, running=running, success=success, error=error),
                 }
@@ -350,6 +360,7 @@ class AutomationJobManager:
                 "result_label": result_label(running, success, error, health, action=self.action),
                 "result_health": health,
                 "run_log_path": self._run_log_path,
+                "current_list_number": current_approval_list_number(summary_lines, self._last_options),
                 "summary": summary,
                 "log_tail": log_tail,
                 "workflow": workflow_summary(log_tail, running=running, success=success, error=error),
@@ -462,6 +473,7 @@ class AutomationJobManager:
                 "error": "",
                 "result_label": "未运行",
                 "run_log_path": "",
+                "current_list_number": "",
                 "summary": {},
                 "log_tail": [],
                 "workflow": workflow_summary([], running=False, success=None, error=""),
@@ -478,6 +490,14 @@ class AutomationJobManager:
         action = str(payload.get("action") or "")
         if light:
             health = run_health(log_tail, success, error)
+            summary = light_run_summary(
+                log_tail,
+                action=action,
+                options=payload.get("options") or {},
+                running=False,
+                success=success,
+                error=error,
+            )
             return {
                 "running": False,
                 "action": action,
@@ -489,14 +509,8 @@ class AutomationJobManager:
                 "result_label": result_label(False, success, error, health, action=action),
                 "result_health": health,
                 "run_log_path": run_log_path,
-                "summary": light_run_summary(
-                    log_tail,
-                    action=action,
-                    options=payload.get("options") or {},
-                    running=False,
-                    success=success,
-                    error=error,
-                ),
+                "current_list_number": current_approval_list_number(log_tail, payload.get("options") or {}),
+                "summary": summary,
                 "log_tail": log_tail,
                 "workflow": workflow_summary(log_tail, running=False, success=success, error=error),
             }
@@ -522,6 +536,7 @@ class AutomationJobManager:
             "result_label": result_label(False, success, error, health, action=action),
             "result_health": health,
             "run_log_path": run_log_path,
+            "current_list_number": current_approval_list_number(summary_lines, payload.get("options") or {}),
             "summary": summary,
             "log_tail": log_tail,
             "workflow": workflow_summary(log_tail, running=False, success=success, error=error),
@@ -800,6 +815,7 @@ def run_summary(
         or "pending write candidate(s) not found" in line.lower()
     )
     dropdown_failures = dropdown_failure_details(lines)
+    source_summary = chemical_source_summary(lines)
     llm_seconds = 0.0
     llm_batches = 0
     for line in lines:
@@ -807,6 +823,11 @@ def run_summary(
         if "llm extraction completed" in lower and "s" in lower:
             llm_batches += 1
             seconds = extract_number_before(line, "s")
+            if seconds is not None:
+                llm_seconds += seconds
+        elif "[flow] end" in lower and "llm_extract" in lower:
+            llm_batches += 1
+            seconds = extract_stage_seconds(line)
             if seconds is not None:
                 llm_seconds += seconds
     page_count = len(
@@ -865,6 +886,7 @@ def run_summary(
         "llm_knowledge_fallback_count": int(suggestion_metrics.get("llm_knowledge_fallback_count") or 0),
         "llm_batch_count": llm_batches,
         "llm_seconds": round(llm_seconds, 1),
+        **source_summary,
         "skipped_candidate_count": int(suggestion_metrics.get("skipped_candidate_count") or 0),
         "skip_reasons": suggestion_metrics.get("skip_reasons") or {},
         "has_traceback": "traceback" in lower_text,
@@ -884,6 +906,7 @@ def light_run_summary(
     options = options or {}
     target_lists = parse_target_list_numbers(str(options.get("TARGET_LIST_NUMBERS") or options.get("target_list_numbers") or ""))
     suggestion_metrics = aggregate_suggestion_summaries(lines)
+    source_summary = chemical_source_summary(lines)
     write_success = sum(
         1
         for line in lines
@@ -933,11 +956,109 @@ def light_run_summary(
         "llm_knowledge_fallback_count": int(suggestion_metrics.get("llm_knowledge_fallback_count") or 0),
         "llm_batch_count": 0,
         "llm_seconds": 0.0,
+        **source_summary,
         "skipped_candidate_count": int(suggestion_metrics.get("skipped_candidate_count") or 0),
         "skip_reasons": suggestion_metrics.get("skip_reasons") or {},
         "has_traceback": any("traceback" in line.lower() for line in lines),
         "has_write_warning": write_failed > 0,
     }
+
+
+def chemical_source_summary(lines: list[str]) -> dict[str, int]:
+    summary = {
+        "chemsrc_success_count": 0,
+        "chemsrc_failure_count": 0,
+        "chemsrc_circuit_open_count": 0,
+        "chemicalbook_success_count": 0,
+        "chemicalbook_failure_count": 0,
+        "chemicalbook_circuit_open_count": 0,
+        "chemicalbook_503_count": 0,
+        "pubchem_result_count": 0,
+        "chemical_cache_hit_count": 0,
+        "chemical_fresh_count": 0,
+        "chemical_stale_count": 0,
+        "chemical_unavailable_count": 0,
+        "chemical_identity_conflict_count": 0,
+        "chemical_mixture_count": 0,
+        "chemical_public_request_count": 0,
+        "fallback_web_result_count": 0,
+        "chemsrc_no_trusted_count": 0,
+        "chemicalbook_no_trusted_count": 0,
+        "duplicate_search_reuse_count": 0,
+        "duplicate_llm_reuse_count": 0,
+        "llm_skip_count": 0,
+        "api_read_detail_count": 0,
+        "api_record_resolve_count": 0,
+        "api_record_resolve_failure_count": 0,
+        "api_write_attempt_count": 0,
+        "api_write_success_count": 0,
+        "api_verify_failure_count": 0,
+        "api_fallback_web_write_count": 0,
+    }
+    for raw_line in lines:
+        line = str(raw_line)
+        lower = line.lower()
+        if "chemical source success: chemsrc" in lower:
+            summary["chemsrc_success_count"] += 1
+        if "chemical source failure: chemsrc" in lower:
+            summary["chemsrc_failure_count"] += 1
+        if "chemical source circuit opened: chemsrc" in lower:
+            summary["chemsrc_circuit_open_count"] += 1
+        if "chemical source success: chemicalbook" in lower:
+            summary["chemicalbook_success_count"] += 1
+        if "chemical source failure: chemicalbook" in lower:
+            summary["chemicalbook_failure_count"] += 1
+        if "chemical source failure: chemicalbook" in lower and "http_error_503" in lower:
+            summary["chemicalbook_503_count"] += 1
+        if "chemical source circuit opened: chemicalbook" in lower:
+            summary["chemicalbook_circuit_open_count"] += 1
+        if "chemical source no trusted result: chemsrc" in lower:
+            summary["chemsrc_no_trusted_count"] += 1
+        if "chemical source no trusted result: chemicalbook" in lower:
+            summary["chemicalbook_no_trusted_count"] += 1
+        if "-> pubchem" in lower or ("chemical lookup result:" in lower and "source=pubchem" in lower):
+            summary["pubchem_result_count"] += 1
+        if "chemical lookup result:" in lower and "retrieval=cache" in lower:
+            summary["chemical_cache_hit_count"] += 1
+        if "chemical lookup result:" in lower and "retrieval=fresh" in lower:
+            summary["chemical_fresh_count"] += 1
+        if "served stale verified cache" in lower or (
+            "chemical lookup result:" in lower and "retrieval=stale" in lower
+        ):
+            summary["chemical_stale_count"] += 1
+        if "chemical lookup result:" in lower and "retrieval=unavailable" in lower:
+            summary["chemical_unavailable_count"] += 1
+        if "chemical lookup result:" in lower and "identity=conflict" in lower:
+            summary["chemical_identity_conflict_count"] += 1
+        if "chemical lookup result:" in lower and "mixture=true" in lower:
+            summary["chemical_mixture_count"] += 1
+        if "chemical batch metrics:" in lower:
+            match = re.search(r"public_requests=(\d+)", lower)
+            if match:
+                summary["chemical_public_request_count"] += int(match.group(1))
+        if "fallback_source" in lower and "pubchem" in lower:
+            summary["fallback_web_result_count"] += 1
+        if "reusing run search result for duplicate reagent" in lower:
+            summary["duplicate_search_reuse_count"] += 1
+        if "reusing run llm result for duplicate reagent" in lower:
+            summary["duplicate_llm_reuse_count"] += 1
+        if "[parallel llm] skip" in lower:
+            summary["llm_skip_count"] += 1
+        if "[api_read_detail]" in lower:
+            summary["api_read_detail_count"] += 1
+        if "[api_record_resolve]" in lower and " failed=" not in lower:
+            summary["api_record_resolve_count"] += 1
+        if "[api_record_resolve]" in lower and " failed=" in lower:
+            summary["api_record_resolve_failure_count"] += 1
+        if "[api_property_save]" in lower and "skipped=" not in lower:
+            summary["api_write_attempt_count"] += 1
+        if "[api_property_save]" in lower and "saved=true" in lower and "verified=true" in lower:
+            summary["api_write_success_count"] += 1
+        if "[api_property_verify]" in lower and "failed=" in lower:
+            summary["api_verify_failure_count"] += 1
+        if "[api_fallback_web_write]" in lower:
+            summary["api_fallback_web_write_count"] += 1
+    return summary
 
 
 def extract_after(line: str, marker: str) -> str:
@@ -977,6 +1098,16 @@ def extract_number_before(line: str, marker: str) -> float | None:
     token = before.split()[-1] if before.split() else ""
     try:
         return float(token)
+    except ValueError:
+        return None
+
+
+def extract_stage_seconds(line: str) -> float | None:
+    if "(" not in line or "s)" not in line:
+        return None
+    value = line.rsplit("(", 1)[-1].split("s)", 1)[0].strip()
+    try:
+        return float(value)
     except ValueError:
         return None
 
@@ -1100,6 +1231,27 @@ def parse_target_list_numbers(value: str) -> list[str]:
         if item and item not in numbers:
             numbers.append(item)
     return numbers
+
+
+def current_approval_list_number(lines: list[str], options: dict[str, Any] | None = None) -> str:
+    patterns = (
+        r"Processing todo detail\s+\d+\s*:\s*(SJ\d+)",
+        r"Processing selected todo detail\s+\d+\s*:\s*(SJ\d+)",
+        r"Opening target task detail(?: from todo page \S+)?\s*:\s*(SJ\d+)",
+        r"Auto-pass precheck for list:\s*(SJ\d+)",
+    )
+    for line in reversed(lines):
+        for pattern in patterns:
+            match = re.search(pattern, str(line))
+            if match:
+                return match.group(1)
+
+    target_lists = parse_target_list_numbers(
+        str((options or {}).get("TARGET_LIST_NUMBERS") or (options or {}).get("target_list_numbers") or "")
+    )
+    if len(target_lists) == 1:
+        return target_lists[0]
+    return ""
 
 
 def workflow_step_index(step_id: str) -> int:
@@ -1488,7 +1640,7 @@ def build_review_queue_payload(path: Path) -> dict[str, Any]:
         if "duplicate search url" in lowered:
             return "检索到的网页与其他试剂重复，可能没有匹配到当前试剂的专属页面，需要人工确认检索结果。"
         if "chemsrc" in lowered and "chemicalbook" in lowered and ("失败" in text or "无有效结果" in text):
-            return "Chemsrc 和 ChemicalBook 都没有查到可信结果，需要人工核对试剂名称或补充物性资料。"
+            return "官方化学数据源未查到可信结果，需要人工核对清洗名称、CAS 或补充 SDS。"
         if "lookup failed" in lowered or "query failed" in lowered or "查询失败" in text:
             return "化学资料查询失败，需要人工确认试剂名称、CAS 号或补充可靠资料来源。"
         if "similarity" in lowered or "relevance" in lowered or "相似" in text:
@@ -2139,6 +2291,8 @@ def runtime_config_snapshot() -> dict[str, Any]:
     dingtalk_stream = dingtalk_stream_config(settings)
     llm = settings.get("llm", {}) or {}
     app_settings = settings.get("app", {}) or {}
+    erp_api = settings.get("erp_api", {}) or {}
+    erp_api_discovery = erp_api.get("discovery", {}) or {}
     sync_config = memory_sync_config(settings)
     mapping = category_mapping_summary(settings, ROOT_DIR)
     provider = get_llm_provider(os.getenv("LLM_PROVIDER") or llm.get("provider") or "siliconflow")
@@ -2185,6 +2339,16 @@ def runtime_config_snapshot() -> dict[str, Any]:
             "APPROVAL_WRITE_BATCH_SIZE",
             str(approval.get("write_batch_size", 3)),
         ),
+        "erp_write_backend": normalize_erp_write_backend(
+            os.getenv(
+                "ERP_WRITE_BACKEND",
+                str(approval.get("erp_write_backend", "web_ui")),
+            )
+        ),
+        "erp_write_backend_options": ERP_WRITE_BACKEND_LABELS,
+        "erp_api_discovery_status": str(erp_api_discovery.get("status") or "disabled"),
+        "erp_api_discovery_confidence": str(erp_api_discovery.get("confidence") or ""),
+        "erp_api_write_enabled": "true" if erp_api.get("enabled_for_write") is True else "false",
         "approval_parallel_workers": os.getenv(
             "APPROVAL_PARALLEL_WORKERS",
             str(approval.get("parallel_workers", 3)),
@@ -2253,6 +2417,7 @@ def save_runtime_config(form: dict[str, str]) -> dict[str, Any]:
         "APPROVAL_WRITE_MODE": normalize_web_write_mode(form.get("approval_write_mode", "")),
         "APPROVAL_WRITE_MIN_CONFIDENCE": form.get("approval_write_min_confidence", "0.8").strip() or "0.8",
         "APPROVAL_WRITE_BATCH_SIZE": form.get("approval_write_batch_size", "3").strip() or "3",
+        "ERP_WRITE_BACKEND": normalize_erp_write_backend(form.get("erp_write_backend", "")),
         "LLM_PROVIDER": provider.id,
         "LLM_BASE_URL": llm_base_url,
         "LLM_MODEL": llm_model,
@@ -2313,6 +2478,7 @@ def save_runtime_config(form: dict[str, str]) -> dict[str, Any]:
         env_updates["APPROVAL_WRITE_BATCH_SIZE"],
         approval.get("write_batch_size", 3),
     )
+    approval["erp_write_backend"] = env_updates["ERP_WRITE_BACKEND"]
     approval["parallel_workers"] = coerce_int(
         form.get("approval_parallel_workers", ""),
         approval.get("parallel_workers", 3),

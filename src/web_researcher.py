@@ -4,6 +4,7 @@ import html
 import json
 import re
 import socket
+import time
 from dataclasses import dataclass
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -49,24 +50,32 @@ class WebResearcher:
     ) -> list[ResearchPage]:
         pages: list[ResearchPage] = []
         seen_urls: set[str] = set()
-        clean_queries = self._dedupe([cas, *(queries or [])])
+        clean_queries = self._dedupe([cas, *(queries or [])])[: self._max_queries()]
+        self._deadline = time.monotonic() + self._budget_seconds()
 
-        for query in clean_queries:
-            for page in self._pubchem_pages(query=query, cas=cas):
-                if page.url not in seen_urls:
-                    pages.append(page)
-                    seen_urls.add(page.url)
-                if len(pages) >= limit:
+        try:
+            for query in clean_queries:
+                if self._deadline_expired():
                     return pages
+                for page in self._pubchem_pages(query=query, cas=cas):
+                    if page.url not in seen_urls:
+                        pages.append(page)
+                        seen_urls.add(page.url)
+                    if len(pages) >= limit or self._deadline_expired():
+                        return pages
 
-            for page in self._trusted_web_pages(query=query, cas=cas, validation_names=validation_names or []):
-                if page.url not in seen_urls:
-                    pages.append(page)
-                    seen_urls.add(page.url)
-                if len(pages) >= limit:
+                if self._deadline_expired():
                     return pages
+                for page in self._trusted_web_pages(query=query, cas=cas, validation_names=validation_names or []):
+                    if page.url not in seen_urls:
+                        pages.append(page)
+                        seen_urls.add(page.url)
+                    if len(pages) >= limit or self._deadline_expired():
+                        return pages
 
-        return pages
+            return pages
+        finally:
+            self._deadline = None
 
     def _pubchem_pages(self, query: str, cas: str) -> list[ResearchPage]:
         if not query:
@@ -139,6 +148,9 @@ class WebResearcher:
         return pages
 
     def _fetch(self, url: str) -> str:
+        timeout = self._remaining_timeout()
+        if timeout <= 0:
+            return ""
         request = Request(
             url,
             headers={
@@ -150,12 +162,39 @@ class WebResearcher:
             },
         )
         try:
-            with urlopen(request, timeout=self.timeout_seconds) as response:
+            with urlopen(request, timeout=timeout) as response:
                 data = response.read()
                 charset = response.headers.get_content_charset() or "utf-8"
                 return data.decode(charset, errors="ignore")
         except (HTTPError, URLError, TimeoutError, socket.timeout, OSError):
             return ""
+
+    def _max_queries(self) -> int:
+        settings = ((self.settings or {}).get("chemical_search") or {})
+        try:
+            return max(1, min(8, int(settings.get("fallback_max_queries", 4))))
+        except (TypeError, ValueError):
+            return 4
+
+    def _budget_seconds(self) -> float:
+        settings = ((self.settings or {}).get("chemical_search") or {})
+        try:
+            return max(3.0, float(settings.get("fallback_research_budget_seconds", 35)))
+        except (TypeError, ValueError):
+            return 35.0
+
+    def _deadline_expired(self) -> bool:
+        deadline = getattr(self, "_deadline", None)
+        return bool(deadline is not None and time.monotonic() >= deadline)
+
+    def _remaining_timeout(self) -> float:
+        deadline = getattr(self, "_deadline", None)
+        if deadline is None:
+            return float(max(1, self.timeout_seconds))
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return 0.0
+        return max(0.1, min(float(max(1, self.timeout_seconds)), remaining))
 
     @staticmethod
     def _pubchem_view_to_text(raw_json: str) -> str:

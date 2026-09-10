@@ -11,6 +11,7 @@ from web_runner import (
     automation_failure_reason,
     atomic_write_text,
     artifact_summary,
+    current_approval_list_number,
     current_run_lines,
     normalize_web_write_mode,
     parse_target_list_numbers,
@@ -96,6 +97,16 @@ class WorkflowSummaryTest(unittest.TestCase):
                 "Read reagent page 1: 20 row(s).",
                 "Opening target task detail: SJ202608040001",
                 'Page suggestion summary: {"total": 3, "writable": 2, "manual_review": 1, "low_confidence": 0, "search_failure": 1, "memory_hit": 1, "llm_knowledge_fallback": 0, "skipped": 1, "skip_reasons": {"manual_review": 1}}',
+                "Chemical source success: Chemsrc",
+                "Chemical source no trusted result: Chemsrc reason=no_result_or_relevance; circuit counter unchanged",
+                "Chemical source failure: ChemicalBook reason=timeout failures=1/5",
+                "Chemical source failure: ChemicalBook reason=http_error_503 failures=2/5",
+                "Chemical source circuit opened: ChemicalBook reason=timeout failures=5/5 cooldown_seconds=600",
+                "[parallel search] END page 1 2/3 B -> PubChem",
+                "Reusing run search result for duplicate reagent: page 1 3/3 B",
+                "Reusing run llm result for duplicate reagent: page 1 3/3 B",
+                "[parallel llm] SKIP page 1 3/3 B -> manual_review_no_trusted_evidence",
+                "2026-06-22 12:40:31 [FLOW] END   llm_extract (12.2s)",
                 "Save verified for sequence 1",
                 "Could not select physicochemical property 强反应 for sequence 2",
             ]
@@ -118,6 +129,17 @@ class WorkflowSummaryTest(unittest.TestCase):
             self.assertEqual(summary["manual_review_candidate_count"], 1)
             self.assertEqual(summary["search_failure_count"], 1)
             self.assertEqual(summary["memory_hit_count"], 1)
+            self.assertEqual(summary["chemsrc_success_count"], 1)
+            self.assertEqual(summary["chemsrc_no_trusted_count"], 1)
+            self.assertEqual(summary["chemicalbook_failure_count"], 2)
+            self.assertEqual(summary["chemicalbook_503_count"], 1)
+            self.assertEqual(summary["chemicalbook_circuit_open_count"], 1)
+            self.assertEqual(summary["pubchem_result_count"], 1)
+            self.assertEqual(summary["duplicate_search_reuse_count"], 1)
+            self.assertEqual(summary["duplicate_llm_reuse_count"], 1)
+            self.assertEqual(summary["llm_skip_count"], 1)
+            self.assertEqual(summary["llm_batch_count"], 1)
+            self.assertEqual(summary["llm_seconds"], 12.2)
             self.assertTrue(summary["has_write_warning"])
 
     def test_run_summary_can_count_full_log_beyond_tail(self) -> None:
@@ -236,6 +258,21 @@ class WorkflowSummaryTest(unittest.TestCase):
 
         self.assertEqual(result, ["SJ1", "SJ2", "SJ3"])
 
+    def test_current_approval_list_number_uses_latest_processing_log(self) -> None:
+        lines = [
+            "Processing todo detail 1: SJ202609090001",
+            "2026-09-09 10:00:01 [FLOW] START perform_auto_match",
+            "Processing todo detail 2: SJ202609090002",
+        ]
+
+        self.assertEqual(current_approval_list_number(lines, {}), "SJ202609090002")
+
+    def test_current_approval_list_number_falls_back_to_single_target_option(self) -> None:
+        self.assertEqual(
+            current_approval_list_number([], {"TARGET_LIST_NUMBERS": "SJ202609090003"}),
+            "SJ202609090003",
+        )
+
     def test_repair_display_text_keeps_valid_chinese(self) -> None:
         self.assertEqual(repair_display_text("成功"), "成功")
 
@@ -343,6 +380,9 @@ class WorkflowSummaryTest(unittest.TestCase):
         self.assertIn('value="disabled"', combined)
         self.assertIn('value="multi_page"', combined)
         self.assertIn('value="generate_library"', combined)
+        self.assertIn('name="erp_write_backend"', combined)
+        self.assertIn('value="api_read_web_write"', combined)
+        self.assertIn('value="api_write_with_web_verify"', combined)
         for retired in ["test_one", "save_one", "single_page"]:
             self.assertNotIn(f'<option value="{retired}"', combined)
 
@@ -353,6 +393,44 @@ class WorkflowSummaryTest(unittest.TestCase):
 
         self.assertIn("refreshLogTail({force: true})", script_text)
         self.assertIn("refreshLogTail({force: status.running || runJustFinished})", script_text)
+
+    def test_run_summary_counts_api_write_lifecycle_events(self) -> None:
+        summary = run_summary(
+            [
+                "[api_read_detail] list=SJ1 records=20",
+                "[api_record_resolve] sequence=1 record_id=r1",
+                "[api_record_resolve] sequence=2 failed=missing id",
+                "[api_property_save] sequence=1 record_id=r1 saved=True verified=True detail=ok",
+                "[api_property_verify] sequence=3 failed=ERP API verified, but webpage row shows -",
+                "[api_fallback_web_write] sequence=2 reason=ERP API save_property endpoint is not configured.",
+            ],
+            action="suggestions",
+            options={},
+            running=False,
+            success=True,
+            error="",
+        )
+
+        self.assertEqual(summary["api_read_detail_count"], 1)
+        self.assertEqual(summary["api_record_resolve_count"], 1)
+        self.assertEqual(summary["api_record_resolve_failure_count"], 1)
+        self.assertEqual(summary["api_write_attempt_count"], 1)
+        self.assertEqual(summary["api_write_success_count"], 1)
+        self.assertEqual(summary["api_verify_failure_count"], 1)
+        self.assertEqual(summary["api_fallback_web_write_count"], 1)
+
+    def test_run_summary_counts_legacy_llm_seconds(self) -> None:
+        summary = run_summary(
+            ["LLM extraction completed in 3.5s"],
+            action="suggestions",
+            options={},
+            running=False,
+            success=True,
+            error="",
+        )
+
+        self.assertEqual(summary["llm_batch_count"], 1)
+        self.assertEqual(summary["llm_seconds"], 3.5)
 
     def test_dry_run_safety_gate_is_visible_in_web_ui(self) -> None:
         root = Path(__file__).resolve().parents[1]
@@ -419,10 +497,12 @@ class WorkflowSummaryTest(unittest.TestCase):
             approval_write_mode="disabled",
             approval_write_min_confidence="0.8",
             approval_write_batch_size="3",
+            erp_write_backend="unknown",
             auto_pass="",
         )
 
         self.assertEqual(options["APPROVAL_WRITE_MODE"], "disabled")
+        self.assertEqual(options["ERP_WRITE_BACKEND"], "web_ui")
         self.assertEqual(options["APPROVAL_WRITE_BATCH_SIZE"], "3")
 
     def test_atomic_write_text_replaces_existing_file(self) -> None:

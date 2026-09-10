@@ -134,6 +134,85 @@ class ApprovalFlowPropertyMatchTest(unittest.TestCase):
         with patch.dict(os.environ, {"APPROVAL_WRITE_MODE": "surprise"}, clear=True):
             self.assertEqual(bot.approval_write_mode(), "disabled")
 
+    def test_duplicate_same_reagent_suggestions_use_highest_risk_category(self) -> None:
+        bot = Bot()
+        suggestions = [
+            {
+                "序号": "13",
+                "试剂名称": "2-甲基-1-丙烯基氯化镁0.5M四氢呋喃溶液",
+                "CAS号": "5674-01-01",
+                "最终建议类别": "强反应",
+                "规则原因": "有格氏试剂证据",
+                "置信度": 0.9,
+                "需人工复核": False,
+            },
+            {
+                "序号": "14",
+                "试剂名称": "2-甲基-1-丙烯基氯化镁0.5M四氢呋喃溶液",
+                "CAS号": "5674-01-01",
+                "最终建议类别": "普通类",
+                "规则原因": "网站资料不足",
+                "置信度": 0.9,
+                "需人工复核": False,
+            },
+        ]
+
+        normalized = bot.enforce_duplicate_suggestion_consistency(suggestions)
+
+        self.assertEqual([item["最终建议类别"] for item in normalized], ["强反应", "强反应"])
+        self.assertIn("相同试剂出现不同判定", normalized[1]["规则原因"])
+
+    def test_verified_approval_suggestion_is_stored_in_memory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            bot = Bot()
+            bot.root_dir = Path(tmp)
+            bot.settings = {
+                "paths": {"reagent_memory_sqlite": "data/memory.sqlite"},
+                "memory": {"min_confidence": 0.8},
+                "reagent": {"physicochemical_property_options": ["强反应"]},
+            }
+            suggestion = {
+                "序号": "13",
+                "试剂名称": "2-甲基-1-丙烯基氯化镁0.5M四氢呋喃溶液",
+                "CAS号": "5674-01-01",
+                "清洗后名称": "2-甲基-1-丙烯基氯化镁四氢呋喃溶液",
+                "标准化名称": "2-甲基-1-丙烯基氯化镁四氢呋喃溶液",
+                "最终建议类别": "强反应",
+                "规则原因": "有格氏试剂证据",
+                "置信度": 0.92,
+                "需人工复核": False,
+                "查询来源": "Chemsrc",
+            }
+
+            self.assertTrue(bot.remember_verified_approval_suggestion(suggestion, "强反应"))
+
+            memory = ReagentMemory.from_settings(bot.settings, bot.root_dir)
+            row = memory.lookup(raw_name="2-甲基-1-丙烯基氯化镁0.5M四氢呋喃溶液")
+            self.assertIsNotNone(row)
+            assert row is not None
+            self.assertEqual(row["final_category"], "强反应")
+
+    def test_verified_manual_review_suggestion_is_not_stored_in_memory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            bot = Bot()
+            bot.root_dir = Path(tmp)
+            bot.settings = {
+                "paths": {"reagent_memory_sqlite": "data/memory.sqlite"},
+                "memory": {"min_confidence": 0.8},
+            }
+            suggestion = {
+                "试剂名称": "低置信试剂",
+                "最终建议类别": "普通类",
+                "规则原因": "需要人工判断",
+                "置信度": 0.9,
+                "需人工复核": True,
+            }
+
+            self.assertFalse(bot.remember_verified_approval_suggestion(suggestion, "普通类"))
+
+            memory = ReagentMemory.from_settings(bot.settings, bot.root_dir)
+            self.assertIsNone(memory.lookup(raw_name="低置信试剂"))
+
 
 class ApprovalSuggestionExportTest(unittest.TestCase):
     def test_save_outputs_keep_latest_list_specific_and_aggregate_files(self) -> None:
@@ -577,6 +656,47 @@ class ApprovalFlowTodoLoopTest(unittest.TestCase):
         self.assertTrue(row["CAS\u540d\u79f0\u51b2\u7a81"])
         self.assertTrue(row["CAS\u4fee\u6b63\u5df2\u5e94\u7528"])
 
+    def test_trusted_exact_example_raises_confidence_to_write_threshold(self) -> None:
+        bot = Bot()
+        row = bot._approval_suggestion_row(
+            reagent={
+                "\u5e8f\u53f7": "36",
+                "\u8bd5\u5242\u540d\u79f0": "\u4e09\u6c1f\u4e59\u9178",
+                "CAS\u53f7": "76-05-1",
+            },
+            name_result={
+                "standard_name": "\u4e09\u6c1f\u4e59\u9178",
+                "cleaned_name": "\u4e09\u6c1f\u4e59\u9178",
+                "english_name": "Trifluoroacetic acid",
+                "cas": "76-05-1",
+                "confidence": 0.95,
+                "need_manual_review": False,
+            },
+            search_result={
+                "source": "Chemsrc",
+                "url": "https://www.chemsrc.com/en/baike/1151411.html",
+                "cas": "76-05-1",
+                "matched_site_name": "trifluoroacetic acid",
+                "name_similarity": 1.0,
+                "relevance_passed": True,
+                "source_confidence": 0.92,
+                "evidence_quality": "high",
+                "need_manual_review": False,
+            },
+            extracted={"evidence": [], "confidence": 0.8},
+            classification={
+                "need_manual_review": False,
+                "final_category": "\u7279\u6b8a\u9178",
+                "matched_categories": ["\u7279\u6b8a\u9178", "\u6613\u71c3\u6db2\u4f53"],
+                "reason": "\u7279\u6b8a\u9178(\u4e3e\u4f8b\u5217\u8f85\u52a9\u547d\u4e2d: \u4e09\u6c1f\u4e59\u9178)",
+                "confidence": 0.63,
+            },
+        )
+
+        self.assertEqual(row["\u6700\u7ec8\u5efa\u8bae\u7c7b\u522b"], "\u7279\u6b8a\u9178")
+        self.assertGreaterEqual(row["\u7f6e\u4fe1\u5ea6"], 0.7)
+        self.assertFalse(row["\u9700\u4eba\u5de5\u590d\u6838"])
+
     def test_high_confidence_candidate_allows_empty_evidence_when_not_manual_review(self) -> None:
         bot = Bot()
         bot.settings = {"approval": {"write_min_confidence": 0.8}}
@@ -635,6 +755,53 @@ class ApprovalFlowTodoLoopTest(unittest.TestCase):
 
         self.assertEqual(result[0]["\u6700\u7ec8\u5efa\u8bae\u7c7b\u522b"], "\u62d2\u6536\u7c7b")
         self.assertEqual(result[0]["\u89c4\u5219\u5224\u5b9a\u7c7b\u522b"], "\u4e0d\u5efa\u8bae\u63a5\u6536\u7c7b")
+
+    def test_low_confidence_non_manual_write_skip_is_queued_once_for_review(self) -> None:
+        class LowConfidenceBot(ApprovalFlowMixin, ReviewQueueMixin, ExcelExportsMixin):
+            def __init__(self, root_dir: Path) -> None:
+                self.root_dir = root_dir
+                self.settings = {
+                    "paths": {"review_queue_excel": "data/review_queue.xlsx"},
+                    "approval": {"write_mode": "multi_page", "write_min_confidence": 0.7},
+                    "reagent": {"physicochemical_property_options": ["\u7279\u6b8a\u9178"]},
+                    "app": {"dry_run": False},
+                }
+                self._current_detail_info = {
+                    "\u5f53\u524d\u6e05\u5355\u53f7": "SJ1",
+                    "\u7533\u8bf7\u4eba": "tester",
+                }
+
+        suggestion = {
+            "\u8bd5\u5242\u6e05\u5355\u53f7": "SJ1",
+            "\u5e8f\u53f7": "36",
+            "\u8bd5\u5242\u540d\u79f0": "\u4f4e\u7f6e\u4fe1\u7279\u6b8a\u9178",
+            "CAS\u53f7": "76-05-1",
+            "\u6807\u51c6\u5316\u540d\u79f0": "\u4f4e\u7f6e\u4fe1\u7279\u6b8a\u9178",
+            "\u6e05\u6d17\u540e\u540d\u79f0": "\u4f4e\u7f6e\u4fe1\u7279\u6b8a\u9178",
+            "\u67e5\u8be2\u6765\u6e90": "Chemsrc",
+            "\u67e5\u8be2URL": "https://example.test/tfa",
+            "\u8d44\u6599\u53ef\u4fe1\u5ea6": 0.92,
+            "\u8bc1\u636e\u8d28\u91cf": "high",
+            "\u6700\u7ec8\u5efa\u8bae\u7c7b\u522b": "\u7279\u6b8a\u9178",
+            "\u547d\u4e2d\u7c7b\u522b": "\u7279\u6b8a\u9178",
+            "\u89c4\u5219\u539f\u56e0": "\u4f4e\u7f6e\u4fe1\u6d4b\u8bd5",
+            "\u7f6e\u4fe1\u5ea6": 0.63,
+            "\u9700\u4eba\u5de5\u590d\u6838": False,
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            bot = LowConfidenceBot(Path(tmp))
+            with patch.dict(os.environ, {}, clear=True):
+                first = bot.apply_approval_write_mode(object(), [suggestion])
+                second = bot.apply_approval_write_mode(object(), [suggestion])
+
+            queue = pd.read_excel(Path(tmp) / "data" / "review_queue.xlsx").fillna("")
+
+        self.assertEqual(first["eligible"], set())
+        self.assertEqual(second["eligible"], set())
+        self.assertEqual(len(queue), 1)
+        self.assertEqual(queue.iloc[0]["chemical_name"], "\u4f4e\u7f6e\u4fe1\u7279\u6b8a\u9178")
+        self.assertIn("\u4f4e\u4e8e\u81ea\u52a8\u5199\u5165\u9608\u503c", queue.iloc[0]["reason"])
+        self.assertEqual(queue.iloc[0]["suggested_category"], "\u7279\u6b8a\u9178")
 
     def test_write_failure_recovery_reopens_target_detail_without_old_page_number(self) -> None:
         class RecoveryBot(Bot):
@@ -1040,6 +1207,51 @@ class ApprovalFlowTodoLoopTest(unittest.TestCase):
         self.assertEqual(len(suggestions), 2)
         self.assertEqual({item["\u6700\u7ec8\u5efa\u8bae\u7c7b\u522b"] for item in suggestions}, {"\u672a\u77e5\u7c7b"})
         self.assertTrue(all(item["\u67e5\u8be2\u6765\u6e90"] == "business_rule_unknown_name" for item in suggestions))
+
+    def test_duplicate_reagents_share_search_result_within_run(self) -> None:
+        class DuplicateSearchBot(Bot):
+            def __init__(self) -> None:
+                self.settings = {"approval": {"parallel_workers": 3}}
+                self.calls = 0
+
+            def search_reagent_worker(self, item: dict[str, object]) -> dict[str, object]:
+                self.calls += 1
+                return self.search_failure_result(item["reagent"], "no trusted result")
+
+        bot = DuplicateSearchBot()
+        items = [
+            {
+                "index": 1,
+                "progress": "1/2",
+                "reagent": {"\u8bd5\u5242\u540d\u79f0": "\u6da6\u6e7f\u5206\u6563\u5242", "CAS\u53f7": "-", "\u89c4\u683c": "", "\u89c4\u683c\u5355\u4f4d": ""},
+            },
+            {
+                "index": 2,
+                "progress": "2/2",
+                "reagent": {"\u8bd5\u5242\u540d\u79f0": "\u6da6\u6e7f\u5206\u6563\u5242", "CAS\u53f7": "-", "\u89c4\u683c": "", "\u89c4\u683c\u5355\u4f4d": ""},
+            },
+        ]
+
+        results = bot.search_reagents_parallel(items)
+
+        self.assertEqual(bot.calls, 1)
+        self.assertEqual(set(results), {1, 2})
+        self.assertEqual(results[1]["failure_reason"], results[2]["failure_reason"])
+
+    def test_obvious_product_manual_review_skips_llm(self) -> None:
+        bot = Bot()
+        search_result = bot.search_failure_result(
+            {"\u8bd5\u5242\u540d\u79f0": "\u6da6\u6e7f\u5206\u6563\u5242", "CAS\u53f7": "-"},
+            "Chemsrc 和 ChemicalBook 均查询失败或无有效结果。",
+        )
+
+        self.assertTrue(
+            bot.search_result_should_skip_llm(
+                search_result,
+                search_result["name_normalization"],
+                "\u6da6\u6e7f\u5206\u6563\u5242",
+            )
+        )
 
     def test_direct_business_rule_suggestion_allows_low_priority_normal_keywords(self) -> None:
         bot = Bot()

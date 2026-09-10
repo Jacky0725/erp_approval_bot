@@ -151,6 +151,14 @@
                 <option value="generate_library">保存并生成试剂库</option>
               </select>
             </label>
+            <label>
+              默认写入后端
+              <select name="erp_write_backend">
+                <option value="web_ui">页面写入</option>
+                <option value="api_read_web_write">接口读取 + 页面写入</option>
+                <option value="api_write_with_web_verify">接口写入 + 接口/页面校验</option>
+              </select>
+            </label>
             <label>默认最低置信度 <input name="approval_write_min_confidence" value="{{ runtime.approval_write_min_confidence }}"></label>
             <label>每批写入条数 <input name="approval_write_batch_size" value="{{ runtime.approval_write_batch_size }}"></label>
             <label>查询/LLM worker 数 <input name="approval_parallel_workers" value="{{ runtime.approval_parallel_workers }}"></label>

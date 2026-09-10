@@ -7,6 +7,7 @@ from typing import Any
 
 from playwright.sync_api import Error, Locator, Page, TimeoutError, sync_playwright
 
+from erp_api_discovery import ApiDiscoveryRecorder
 from stage_logger import StageLogger
 
 
@@ -126,6 +127,29 @@ class ErpSessionMixin:
 
             if last_error:
                 raise last_error
+
+    def run_erp_api_discovery(self) -> None:
+        """Capture a sanitized, read-only API discovery trace after login."""
+
+        def after_login(page: Page) -> None:
+            recorder = ApiDiscoveryRecorder(self._log_dir())
+            recorder.attach(page)
+            self.enter_reagent_judgement_page(page)
+            try:
+                self.read_todo_tasks(page)
+            except Exception as error:
+                print(f"ERP API discovery could not read todo rows: {error}")
+            try:
+                self.open_first_task_detail(page)
+                self.read_current_page_unmatched(page)
+            except Exception as error:
+                print(f"ERP API discovery detail read skipped or failed: {error}")
+            page.wait_for_timeout(1000)
+            json_path, md_path = recorder.save()
+            print(f"Saved sanitized ERP API discovery JSON: {json_path}")
+            print(f"Saved sanitized ERP API discovery summary: {md_path}")
+
+        self.run_after_login_capture("erp_api_discovery.png", "erp_api_discovery.html", after_login)
 
     def capture_prompt_if_present(self, page: Page, screenshot_name: str) -> str:
         prompt_locator = page.locator(

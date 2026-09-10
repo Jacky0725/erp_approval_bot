@@ -20,6 +20,7 @@ from dingtalk_stream_bot import DingTalkStreamBot
 from scheduler import ApprovalScheduler
 from update_checker import check_for_update, current_process_is_frozen, download_update, launch_update_package
 from memory_sync import MemorySyncError
+from erp_api_client import normalize_erp_write_backend
 from web_runner import (
     ENV_PATH,
     ROOT_DIR,
@@ -46,7 +47,8 @@ from web_runner import (
     upload_memory_sync,
     download_memory_sync,
 )
-from data_health import data_health_summary
+from data_health import apply_data_health_repairs, data_health_summary
+from enrichment_shadow_report import build_report, load_events
 from runtime_paths import source_root
 
 
@@ -137,6 +139,16 @@ def static_asset_version() -> str:
     asset_paths = [STATIC_DIR / "dashboard.css", STATIC_DIR / "dashboard.js"]
     mtimes = [path.stat().st_mtime for path in asset_paths if path.exists()]
     return str(int(max(mtimes))) if mtimes else "1"
+
+
+def enrichment_shadow_summary() -> dict:
+    settings = load_settings()
+    config = (settings.get("enrichment_v2", {}) or {})
+    metrics = (settings.get("enrichment_metrics", {}) or {})
+    path = ROOT_DIR / str(metrics.get("jsonl_path") or "data/logs/enrichment_metrics.jsonl")
+    report = build_report(load_events(path))
+    report.update({"shadow_mode": bool(config.get("shadow_mode", True)), "enabled": bool(config.get("enabled", False))})
+    return report
 
 
 def dashboard_context(request: Request, active_page: str) -> dict:
@@ -249,6 +261,16 @@ def api_approval_summary() -> JSONResponse:
 @app.get("/api/data_health")
 def api_data_health() -> JSONResponse:
     return JSONResponse(data_health_summary(ROOT_DIR, settings=load_settings()))
+
+
+@app.get("/api/enrichment_shadow")
+def api_enrichment_shadow() -> JSONResponse:
+    return JSONResponse(enrichment_shadow_summary())
+
+
+@app.post("/api/data_health/repair")
+def api_data_health_repair() -> JSONResponse:
+    return JSONResponse(apply_data_health_repairs(ROOT_DIR, settings=load_settings()))
 
 
 @app.get("/api/review_queue")
@@ -459,6 +481,7 @@ def api_settings(
     approval_write_mode: Annotated[str, Form()] = "disabled",
     approval_write_min_confidence: Annotated[str, Form()] = "0.8",
     approval_write_batch_size: Annotated[str, Form()] = "3",
+    erp_write_backend: Annotated[str, Form()] = "web_ui",
     approval_parallel_workers: Annotated[str, Form()] = "3",
     auto_pass: Annotated[str, Form()] = "",
     scheduler_enabled: Annotated[str, Form()] = "",
@@ -512,6 +535,7 @@ def api_settings(
             "approval_write_mode": approval_write_mode,
             "approval_write_min_confidence": approval_write_min_confidence,
             "approval_write_batch_size": approval_write_batch_size,
+            "erp_write_backend": erp_write_backend,
             "approval_parallel_workers": approval_parallel_workers,
             "auto_pass": normalize_checkbox(auto_pass),
             "scheduler_enabled": normalize_checkbox(scheduler_enabled),
@@ -575,9 +599,10 @@ def api_run(
     approval_write_mode: Annotated[str, Form()] = "disabled",
     approval_write_min_confidence: Annotated[str, Form()] = "0.8",
     approval_write_batch_size: Annotated[str, Form()] = "3",
+    erp_write_backend: Annotated[str, Form()] = "web_ui",
     auto_pass: Annotated[str, Form()] = "false",
 ) -> JSONResponse:
-    allowed_actions = {"suggestions", "todo_export", "debug_capture", "judgement_capture", "erp_smoke"}
+    allowed_actions = {"suggestions", "todo_export", "debug_capture", "judgement_capture", "erp_smoke", "api_discovery"}
     if action not in allowed_actions:
         raise HTTPException(status_code=400, detail=f"Unsupported action: {action}")
 
@@ -588,6 +613,7 @@ def api_run(
         approval_write_mode=approval_write_mode,
         approval_write_min_confidence=approval_write_min_confidence,
         approval_write_batch_size=approval_write_batch_size,
+        erp_write_backend=erp_write_backend,
         auto_pass=auto_pass,
     )
     return JSONResponse(manager.start(action, options))
@@ -658,6 +684,7 @@ def run_options(
     approval_write_mode: str,
     approval_write_min_confidence: str,
     approval_write_batch_size: str,
+    erp_write_backend: str,
     auto_pass: str,
 ) -> dict[str, str]:
     return {
@@ -668,6 +695,7 @@ def run_options(
         "APPROVAL_WRITE_MODE": normalize_web_write_mode(approval_write_mode),
         "APPROVAL_WRITE_MIN_CONFIDENCE": approval_write_min_confidence.strip() or "0.8",
         "APPROVAL_WRITE_BATCH_SIZE": approval_write_batch_size.strip() or "3",
+        "ERP_WRITE_BACKEND": normalize_erp_write_backend(erp_write_backend),
         "AUTO_PASS": normalize_checkbox(auto_pass),
     }
 
@@ -682,6 +710,7 @@ def dingtalk_run_options(list_number: str = "") -> dict[str, str]:
         approval_write_mode=str(runtime.get("approval_write_mode") or "disabled"),
         approval_write_min_confidence=str(runtime.get("approval_write_min_confidence") or "0.8"),
         approval_write_batch_size=str(runtime.get("approval_write_batch_size") or "3"),
+        erp_write_backend=str(runtime.get("erp_write_backend") or "web_ui"),
         auto_pass=str(runtime.get("auto_pass") or "false"),
     )
 

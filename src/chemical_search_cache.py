@@ -55,6 +55,36 @@ class ChemicalSearchCache:
         except (TypeError, json.JSONDecodeError):
             return None
 
+    def get_stale(self, cache_key: dict[str, str], max_age_days: int = 180) -> dict[str, Any] | None:
+        """Return an expired successful result for outage-only degradation."""
+        if not self.enabled:
+            return None
+        key = self.cache_key_hash(cache_key)
+        oldest = (datetime.now(timezone.utc) - timedelta(days=max(1, max_age_days))).isoformat(timespec="seconds")
+        with closing(self._connect()) as conn:
+            row = conn.execute(
+                """
+                SELECT payload_json
+                FROM chemical_search_cache
+                WHERE cache_key = ? AND created_at >= ? AND failure_reason = ''
+                """,
+                (key, oldest),
+            ).fetchone()
+        if row is None:
+            return None
+        try:
+            result = copy.deepcopy(json.loads(row["payload_json"]))
+        except (TypeError, json.JSONDecodeError):
+            return None
+        if result.get("need_manual_review"):
+            return None
+        result["retrieval_status"] = "stale"
+        result["served_stale"] = True
+        result["need_manual_review"] = True
+        result["evidence_quality"] = "stale"
+        result["failure_reason"] = "在线数据源暂不可用，使用过期成功缓存，需人工复核。"
+        return result
+
     def put(self, cache_key: dict[str, str], result: dict[str, Any]) -> None:
         if not self.enabled:
             return

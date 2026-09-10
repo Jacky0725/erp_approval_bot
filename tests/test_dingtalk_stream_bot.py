@@ -104,6 +104,23 @@ class DingTalkStreamBotTests(unittest.TestCase):
         self.assertIn("已有审批任务", response)
         self.assertEqual(manager.started, [])
 
+    def test_status_includes_current_approval_list_number_when_running(self) -> None:
+        service = DingTalkCommandService(
+            job_manager=FakeJobManager(),
+            run_options_builder=lambda list_number: {},
+            status_provider=lambda: {
+                "running": True,
+                "action": "suggestions",
+                "started_at": "2026-09-09T10:00:00",
+                "finished_at": "",
+                "current_list_number": "SJ202609090001",
+            },
+        )
+
+        response = service.handle_text("状态")
+
+        self.assertIn("正在审批清单号：SJ202609090001", response)
+
 
 if __name__ == "__main__":
     unittest.main()

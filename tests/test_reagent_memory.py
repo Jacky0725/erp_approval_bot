@@ -221,6 +221,35 @@ class ReagentMemoryTest(unittest.TestCase):
             assert row is not None
             self.assertEqual(row["raw_name"], "name only changed")
 
+    def test_same_name_different_categories_with_different_cas_is_not_reused(self) -> None:
+        tmp, memory = self.make_memory()
+        with tmp:
+            self.assertTrue(
+                memory.add_record(
+                    raw_name="same reagent",
+                    cleaned_name="same reagent",
+                    standard_name="same reagent",
+                    cas="111-11-1",
+                    final_category="强反应",
+                    confidence=0.9,
+                    source="unit_test",
+                )
+            )
+            self.assertTrue(
+                memory.add_record(
+                    raw_name="same reagent",
+                    cleaned_name="same reagent",
+                    standard_name="same reagent",
+                    cas="222-22-2",
+                    final_category="普通类",
+                    confidence=0.9,
+                    source="unit_test",
+                )
+            )
+
+            self.assertIsNone(memory.lookup(standard_name="same reagent"))
+            self.assertEqual(memory.count_records(conflict="1"), 2)
+
     def test_conflicting_identity_keeps_real_category_conflict(self) -> None:
         tmp, memory = self.make_memory()
         with tmp:

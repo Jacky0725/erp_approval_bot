@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -78,6 +79,7 @@ Rules:
 class LlmExtractor:
     settings: dict[str, Any] | None = None
     model: str | None = None
+    metrics: Any | None = None
 
     def __post_init__(self) -> None:
         llm_settings = (self.settings or {}).get("llm", {})
@@ -118,6 +120,7 @@ class LlmExtractor:
             return result
 
         user_prompt = self._build_user_prompt(raw_text=raw_text, name=name, cas=cas)
+        started = time.monotonic()
         try:
             client = self._client()
             response = client.chat.completions.create(
@@ -132,6 +135,7 @@ class LlmExtractor:
             content = response.choices[0].message.content or "{}"
             parsed = json.loads(content)
         except Exception as error:
+            self._record_llm_metric("extract_properties", "failure", started)
             result = dict(DEFAULT_RESULT)
             result.update(
                 {
@@ -143,6 +147,7 @@ class LlmExtractor:
             )
             return self._merge_local_hazard_fallback(result, raw_text=raw_text, name=name, cas=cas)
 
+        self._record_llm_metric("extract_properties", "success", started)
         result = self._normalize_result(parsed, fallback_name=name, fallback_cas=cas)
         result = self._suppress_incompatibility_only_oxidizing(result, raw_text)
         return self._merge_local_hazard_fallback(result, raw_text=raw_text, name=name, cas=cas)
@@ -160,6 +165,36 @@ class LlmExtractor:
 
     def extract_reagent_fields(self, text: str) -> dict[str, Any]:
         return self.extract_properties(raw_text=text)
+
+    def extract_missing_fields(
+        self,
+        raw_text: str,
+        missing_fields: set[str] | list[str] | tuple[str, ...],
+        *,
+        name: str = "",
+        cas: str = "",
+    ) -> dict[str, Any]:
+        """Return only source-backed values for explicitly missing fields.
+
+        The ordinary extractor remains backward compatible.  V2 calls this
+        narrow entry point only with text assembled from trusted source fields.
+        An LLM value is discarded unless one of its returned evidence snippets
+        occurs verbatim in that input text.
+        """
+        allowed = {str(field).strip() for field in missing_fields if str(field).strip()}
+        result = self.extract_properties(raw_text, name=name, cas=cas)
+        spans = [item.strip() for item in result.get("evidence", []) if str(item).strip()]
+        source_text = raw_text.casefold()
+        verified_spans = [span for span in spans if span.casefold() in source_text]
+        filtered = dict(DEFAULT_RESULT)
+        filtered.update({"name": name, "cas": cas, "evidence": verified_spans, "confidence": 0.0})
+        if not verified_spans:
+            return filtered
+        for field in allowed:
+            if field in DEFAULT_RESULT:
+                filtered[field] = result.get(field, DEFAULT_RESULT[field])
+        filtered["confidence"] = float(result.get("confidence") or 0.0)
+        return filtered
 
     def generate_manual_review_advice(self, reagent_info: dict[str, Any]) -> dict[str, Any]:
         """Generate a Chinese, advisory-only second opinion for manual review."""
@@ -544,6 +579,16 @@ raw_text:
         result["evidence"] = LlmExtractor._dedupe_strings(evidence)
         result["confidence"] = 0.75
         return result
+
+    def _record_llm_metric(self, operation: str, status: str, started: float) -> None:
+        metrics = self.metrics
+        if metrics is None:
+            return
+        metrics.record_llm(
+            operation=operation,
+            status=status,
+            elapsed_ms=int((time.monotonic() - started) * 1000),
+        )
 
     @staticmethod
     def _ordinary_mineral_acid_label(text: str) -> str:

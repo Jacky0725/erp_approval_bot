@@ -52,6 +52,14 @@
                 </select>
               </label>
               <label>
+                写入后端
+                <select name="erp_write_backend">
+                  <option value="web_ui">页面写入</option>
+                  <option value="api_read_web_write">接口读取 + 页面写入</option>
+                  <option value="api_write_with_web_verify">接口写入 + 接口/页面校验</option>
+                </select>
+              </label>
+              <label>
                 最低置信度
                 <input name="approval_write_min_confidence" value="{{ runtime.approval_write_min_confidence }}">
               </label>
@@ -91,6 +99,7 @@
               <span>调试采集</span>
               <div class="button-row">
                 <button type="button" data-action="judgement_capture">采集试剂判定页</button>
+                <button type="button" data-action="api_discovery">接口只读探测</button>
                 <button type="button" data-action="debug_capture">采集首页</button>
               </div>
             </div>

@@ -1,0 +1,66 @@
+# 配置草案：由 Codex 在阶段实施时逐项合并，不要直接覆盖 config/settings.yaml。
+enrichment_v2:
+  enabled: false
+  shadow_mode: true
+  page_deadline_seconds: 60
+  identity:
+    deterministic_only: true
+    require_verified_for_auto: true
+    allow_llm_candidates: true
+    llm_candidate_limit: 3
+  providers:
+    pubchem:
+      enabled: true
+      role: primary
+      include_hazard_details: true
+      requests_per_second: 2
+      max_concurrency: 2
+      connect_timeout_seconds: 3
+      read_timeout_seconds: 10
+      max_attempts: 2
+    comptox:
+      enabled: false
+      role: secondary
+      api_key_env: EPA_CTX_API_KEY
+      max_concurrency: 2
+    nist:
+      enabled: true
+      role: field_supplement
+      supported_fields:
+        - boiling_point
+        - flash_point
+    chemsrc:
+      enabled: false
+      role: background_only
+    chemicalbook:
+      enabled: false
+      role: background_only
+  chinese_alias_backfill:
+    enabled: false
+    sources: [chemsrc, chemicalbook]
+    auto_promote: false
+  retry:
+    transient_statuses: [429, 502, 503, 504]
+    respect_retry_after: true
+    jitter: true
+  circuit_breaker:
+    failure_threshold: 3
+    cooldown_seconds: 300
+  cache:
+    identity_success_ttl_days: 180
+    ambiguous_ttl_hours: 24
+    deterministic_not_found_ttl_hours: 6
+    source_response_ttl_days: 30
+    evidence_ttl_days: 90
+    cache_transient_failures: false
+  evidence:
+    preserve_conflicts: true
+    require_field_provenance: true
+    allow_stale_if_error: true
+  llm:
+    enabled: true
+    max_calls_per_identity: 1
+    extract_missing_fields_only: true
+    require_trusted_input_text: true
+    require_evidence_spans: true
+    model_knowledge_advisory_only: true

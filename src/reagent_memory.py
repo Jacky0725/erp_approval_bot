@@ -75,13 +75,21 @@ class ReagentMemory:
         """
         with closing(self._connect()) as conn:
             with conn:
-                row = None
-                for candidate in conn.execute(sql, params).fetchall():
-                    if not self.is_unsafe_reusable_evidence(candidate):
-                        row = candidate
-                        break
-                if row is None:
+                candidates = [
+                    candidate
+                    for candidate in conn.execute(sql, params).fetchall()
+                    if not self.is_unsafe_reusable_evidence(candidate)
+                ]
+                if not candidates:
                     return None
+                if self._lookup_candidates_have_category_conflict(candidates, values):
+                    ids = [int(candidate["id"]) for candidate in candidates]
+                    conn.executemany(
+                        "UPDATE reagent_memory SET conflict = 1, reusable = 0, updated_at = ? WHERE id = ?",
+                        [(self._now(), record_id) for record_id in ids],
+                    )
+                    return None
+                row = candidates[0]
                 conn.execute(
                     """
                     UPDATE reagent_memory
@@ -91,6 +99,25 @@ class ReagentMemory:
                     (self._now(), row["id"]),
                 )
                 return dict(row)
+
+    @staticmethod
+    def _lookup_candidates_have_category_conflict(
+        candidates: list[sqlite3.Row],
+        lookup_values: dict[str, str],
+    ) -> bool:
+        if len(candidates) < 2:
+            return False
+        categories_by_identity: dict[tuple[str, str], set[str]] = {}
+        for candidate in candidates:
+            category = str(candidate["final_category"] or "").strip()
+            if not category:
+                continue
+            for field in ("cas", "standard_name", "cleaned_name", "raw_name"):
+                value = lookup_values.get(field, "")
+                if not value or str(candidate[f"{field}_key"] or "") != value:
+                    continue
+                categories_by_identity.setdefault((field, value), set()).add(category)
+        return any(len(categories) > 1 for categories in categories_by_identity.values())
 
     def find_any(
         self,

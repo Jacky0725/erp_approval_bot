@@ -1,0 +1,8 @@
+Date: 2026-09-10
+Working directory: D:\codex\reagent-approval-bot
+Python executable: C:\Users\admin\AppData\Local\Programs\Python\Python312\python.exe
+Command: python -m pytest tests/test_approval_batch_state.py tests/test_web_review_confirmation.py tests/test_web_runner_workflow.py tests/test_web_data_health.py tests/test_web_enrichment_shadow.py -q
+Output: ................................................................         [100%]
+64 passed in 4.28s
+Exit code: 0
+Scope: selected local tests only; no full-suite, browser, packaging or ERP verification.

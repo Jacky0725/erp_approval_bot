@@ -58,6 +58,37 @@ class WebResearcherTest(unittest.TestCase):
         self.assertEqual(pages[0].queried_cas, "999-99-9")
         self.assertNotIn("999-99-9", pages[0].raw_text)
 
+    def test_research_limits_fallback_queries(self) -> None:
+        class CountingResearcher(WebResearcher):
+            def __init__(self, *args: object, **kwargs: object) -> None:
+                super().__init__(*args, **kwargs)
+                self.queries: list[str] = []
+
+            def _pubchem_pages(self, query: str, cas: str):
+                self.queries.append(query)
+                return []
+
+            def _trusted_web_pages(self, query: str, cas: str, validation_names: list[str]):
+                return []
+
+        researcher = CountingResearcher(settings={"chemical_search": {"fallback_max_queries": 2}})
+
+        researcher.research(["a", "b", "c"], cas="", limit=5)
+
+        self.assertEqual(researcher.queries, ["a", "b"])
+
+    def test_research_budget_can_stop_before_fetch(self) -> None:
+        class DeadlineResearcher(WebResearcher):
+            def _fetch(self, url: str) -> str:
+                self._deadline = 0.0
+                return ""
+
+        researcher = DeadlineResearcher(settings={"chemical_search": {"fallback_research_budget_seconds": 3}})
+
+        pages = researcher.research(["first", "second"], cas="", limit=5)
+
+        self.assertEqual(pages, [])
+
 
 if __name__ == "__main__":
     unittest.main()

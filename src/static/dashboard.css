@@ -2027,6 +2027,15 @@ h1 {
   border-bottom: 1px solid #e5e7eb;
 }
 
+.data-health-panel .panel-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  color: #64748b;
+  font-size: 13px;
+}
+
 .overview-status-list {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));

@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from typing import Any
+from urllib.error import HTTPError
 from unittest.mock import patch
 
 import pandas as pd
@@ -67,6 +68,10 @@ class RecordingSearcher(ChemicalSearcher):
 class ChemicalSearcherTest(unittest.TestCase):
     def setUp(self) -> None:
         ChemicalSearcher._source_failures = {}
+        ChemicalSearcher._source_open_until = {}
+        ChemicalSearcher._source_failure_reasons = {}
+        ChemicalSearcher._source_skip_logged = set()
+        ChemicalSearcher._source_half_open = set()
         ChemicalSearcher._source_semaphores = {}
 
     def test_query_candidates_try_names_after_cas(self) -> None:
@@ -75,7 +80,7 @@ class ChemicalSearcherTest(unittest.TestCase):
             ["123-45-6", "standard", "cleaned", "english"],
         )
 
-    def test_manual_verified_source_url_is_used_before_search(self) -> None:
+    def test_legacy_source_url_is_not_requested_automatically(self) -> None:
         class ManualUrlSearcher(ChemicalSearcher):
             def __init__(self, *args: Any, **kwargs: Any) -> None:
                 super().__init__(*args, **kwargs)
@@ -99,13 +104,12 @@ class ChemicalSearcherTest(unittest.TestCase):
         searcher = ManualUrlSearcher(root_dir=ROOT_DIR)
         result = searcher.search("二氧化钼")
 
-        self.assertEqual(searcher.urls, ["https://www.chemsrc.com/cas/18868-43-4_88297.html"])
-        self.assertFalse(searcher.used_search)
-        self.assertFalse(result["need_manual_review"])
-        self.assertEqual(result["cas"], "18868-43-4")
-        self.assertEqual(result["url"], "https://www.chemsrc.com/cas/18868-43-4_88297.html")
+        self.assertNotIn("https://www.chemsrc.com/cas/18868-43-4_88297.html", searcher.urls)
+        self.assertTrue(searcher.used_search)
+        self.assertTrue(result["need_manual_review"])
+        self.assertIn("chemsrc", result["manual_search_urls"])
 
-    def test_manual_verified_source_url_rejects_wrong_cas(self) -> None:
+    def test_legacy_source_url_is_manual_only_even_when_configured(self) -> None:
         class WrongCasSearcher(ChemicalSearcher):
             def _fetch(self, url: str) -> str:
                 return "CAS No. 1317-33-5 Name: Molybdenum trioxide Chemical Name: Molybdenum trioxide"
@@ -114,24 +118,25 @@ class ChemicalSearcherTest(unittest.TestCase):
         result = searcher.search("二氧化钼")
 
         self.assertTrue(result["need_manual_review"])
-        self.assertIn("人工确认 URL", result["raw_text"])
+        self.assertIn("chemsrc", result["manual_search_urls"])
 
-    def test_search_normalizes_before_query_and_prefers_cas(self) -> None:
+    def test_search_normalizes_before_query_and_prefers_cleaned_name(self) -> None:
         searcher = RecordingSearcher(root_dir=ROOT_DIR)
         result = searcher.search("工业酒精 75% 500ml", cas="64-17-5", specification="500ml", unit="瓶")
 
-        self.assertEqual(searcher.queries, ["64-17-5"])
-        self.assertEqual(result["query"], "64-17-5")
+        self.assertEqual(searcher.queries, ["乙醇"])
+        self.assertEqual(result["query"], "乙醇")
         self.assertEqual(result["name_normalization"]["standard_name"], "乙醇")
         self.assertEqual(result["name_normalization"]["english_name"], "ethanol")
-        self.assertFalse(result["need_manual_review"])
+        self.assertTrue(result["need_manual_review"])
+        self.assertTrue(result["is_mixture"])
 
     def test_search_uses_cas_from_alias_when_cas_is_empty(self) -> None:
         searcher = RecordingSearcher(root_dir=ROOT_DIR)
         result = searcher.search("NaOH 0.1mol/L 分析纯")
 
-        self.assertEqual(searcher.queries, ["1310-73-2"])
-        self.assertEqual(result["query"], "1310-73-2")
+        self.assertEqual(searcher.queries, ["氢氧化钠"])
+        self.assertEqual(result["query"], "氢氧化钠")
         self.assertEqual(result["name_normalization"]["standard_name"], "氢氧化钠")
         self.assertEqual(result["name_normalization"]["english_name"], "sodium hydroxide")
         self.assertEqual(result["name_normalization"]["concentration"], "0.1mol/L")
@@ -483,10 +488,25 @@ abbreviations: {}
         self.assertEqual(second_searcher.queries, [])
         self.assertFalse(second["need_manual_review"])
 
-    def test_source_circuit_breaker_skips_only_failed_source(self) -> None:
+    def test_source_circuit_breaker_skips_only_network_failed_source(self) -> None:
         settings = {"chemical_search": {"failure_circuit_break_threshold": 1, "per_source_concurrency": 2}}
-        searcher = RecordingSearcher(root_dir=ROOT_DIR, settings=settings, succeed=False)
+        class NetworkFailingSearcher(RecordingSearcher):
+            def _search_chemsrc(
+                self,
+                name: str,
+                cas: str,
+                query: str,
+                validation_names: list[str] | None = None,
+            ) -> dict[str, Any] | None:
+                self.queries.append(query)
+                self._mark_provider_fetch_failure("timeout")
+                return None
+
+        searcher = NetworkFailingSearcher(root_dir=ROOT_DIR, settings=settings, succeed=False)
         ChemicalSearcher._source_failures = {}
+        ChemicalSearcher._source_open_until = {}
+        ChemicalSearcher._source_failure_reasons = {}
+        ChemicalSearcher._source_skip_logged = set()
         ChemicalSearcher._source_semaphores = {}
 
         first = searcher._run_provider(
@@ -516,6 +536,89 @@ abbreviations: {}
         self.assertIsNone(second)
         self.assertIsNone(third)
         self.assertEqual(len(searcher.queries), query_count + 1)
+
+    def test_no_result_does_not_trip_source_circuit_breaker(self) -> None:
+        settings = {"chemical_search": {"failure_circuit_break_threshold": 1, "per_source_concurrency": 2}}
+        searcher = RecordingSearcher(root_dir=ROOT_DIR, settings=settings, succeed=False)
+
+        first = searcher._run_provider(
+            searcher._search_chemsrc,
+            name="unknown",
+            cas="",
+            query="unknown",
+            validation_names=["unknown"],
+        )
+        second = searcher._run_provider(
+            searcher._search_chemsrc,
+            name="unknown",
+            cas="",
+            query="unknown2",
+            validation_names=["unknown2"],
+        )
+
+        self.assertIsNone(first)
+        self.assertIsNone(second)
+        self.assertEqual(searcher.queries, ["unknown", "unknown2"])
+
+    def test_source_circuit_breaker_recovers_after_cooldown(self) -> None:
+        settings = {
+            "chemical_search": {
+                "failure_circuit_break_threshold": 1,
+                "failure_circuit_cooldown_seconds": 1,
+                "per_source_concurrency": 2,
+            }
+        }
+        searcher = RecordingSearcher(root_dir=ROOT_DIR, settings=settings)
+        ChemicalSearcher._source_failures = {"Chemsrc": 1}
+        ChemicalSearcher._source_open_until = {"Chemsrc": 1.0}
+
+        result = searcher._run_provider(
+            searcher._search_chemsrc,
+            name="ethanol",
+            cas="64-17-5",
+            query="64-17-5",
+            validation_names=["ethanol"],
+        )
+
+        self.assertIsNotNone(result)
+        self.assertEqual(ChemicalSearcher._source_failures.get("Chemsrc"), 0)
+
+    def test_product_or_mixture_without_cas_skips_fallback_web_research(self) -> None:
+        searcher = ChemicalSearcher(root_dir=ROOT_DIR)
+        name_result = {
+            "raw_name": "\u805a\u6c28\u916f\u578b\u9632\u805a\u51dd\u5206\u6563\u5242",
+            "cleaned_name": "\u805a\u6c28\u916f\u578b\u9632\u805a\u51dd\u5206\u6563\u5242",
+            "standard_name": "\u805a\u6c28\u916f\u578b\u9632\u805a\u51dd\u5206\u6563\u5242",
+            "confidence": 0.2,
+            "suspected_invalid_name": True,
+        }
+
+        self.assertFalse(
+            searcher._fallback_web_research_candidate_allowed(
+                "\u805a\u6c28\u916f\u578b\u9632\u805a\u51dd\u5206\u6563\u5242",
+                "",
+                "\u805a\u6c28\u916f\u578b\u9632\u805a\u51dd\u5206\u6563\u5242",
+                name_result,
+            )
+        )
+
+    def test_precise_chemical_name_still_allows_fallback_web_research(self) -> None:
+        searcher = ChemicalSearcher(root_dir=ROOT_DIR)
+        name_result = {
+            "raw_name": "5-\u7532\u57fa-1,3-\u82ef\u4e8c\u915a",
+            "cleaned_name": "5-\u7532\u57fa-1,3-\u82ef\u4e8c\u915a",
+            "standard_name": "5-\u7532\u57fa-1,3-\u82ef\u4e8c\u915a",
+            "confidence": 0.6,
+        }
+
+        self.assertTrue(
+            searcher._fallback_web_research_candidate_allowed(
+                "5-\u7532\u57fa-1,3-\u82ef\u4e8c\u915a",
+                "",
+                "5-\u7532\u57fa-1,3-\u82ef\u4e8c\u915a",
+                name_result,
+            )
+        )
 
     def test_relevance_passes_for_similar_name_without_cas(self) -> None:
         searcher = ChemicalSearcher(root_dir=ROOT_DIR)
@@ -639,7 +742,7 @@ abbreviations: {}
         self.assertEqual(result["url"], "https://example.test/b")
         self.assertTrue(result["relevance_passed"])
 
-    def test_fallback_web_research_is_used_after_primary_sources_fail(self) -> None:
+    def test_unapproved_web_research_is_not_used_after_official_sources_fail(self) -> None:
         class FailingPrimarySearcher(ChemicalSearcher):
             def _search_chemsrc(
                 self,
@@ -696,12 +799,10 @@ abbreviations: {}
         with patch("chemical_searcher.LlmExtractor", FakeExtractor), patch("chemical_searcher.WebResearcher", FakeResearcher):
             result = FailingPrimarySearcher(root_dir=ROOT_DIR).search("NaOH", cas="1310-73-2")
 
-        self.assertFalse(result["need_manual_review"])
-        self.assertEqual(result["source"], "PubChem")
-        self.assertEqual(result["fallback_source"], "PubChem")
-        self.assertEqual(result["source_confidence"], 0.9)
-        self.assertEqual(result["evidence_quality"], "high")
-        self.assertTrue(result["used_llm_search_candidates"])
+        self.assertTrue(result["need_manual_review"])
+        self.assertEqual(result["source"], "")
+        self.assertEqual(result["fallback_source"], "")
+        self.assertFalse(result["used_llm_search_candidates"])
 
     def test_low_quality_fallback_result_forces_manual_review(self) -> None:
         class FakeExtractor:
@@ -738,10 +839,10 @@ abbreviations: {}
             result = searcher.search("NaOH", cas="1310-73-2")
 
         self.assertTrue(result["need_manual_review"])
-        self.assertEqual(result["fallback_source"], "GuideChem")
-        self.assertIn("low", result["failure_reason"])
+        self.assertEqual(result["fallback_source"], "")
+        self.assertEqual(result["retrieval_status"], "not_found")
 
-    def test_llm_knowledge_fallback_is_used_when_no_web_evidence_exists(self) -> None:
+    def test_llm_does_not_generate_chemical_evidence_when_sources_fail(self) -> None:
         class FakeExtractor:
             def __init__(self, *args: Any, **kwargs: Any) -> None:
                 pass
@@ -778,12 +879,11 @@ abbreviations: {}
             result = searcher.search("unknown reagent")
 
         self.assertTrue(result["need_manual_review"])
-        self.assertEqual(result["source"], "LLM knowledge fallback")
-        self.assertEqual(result["fallback_source"], "LLM knowledge fallback")
-        self.assertEqual(result["evidence_quality"], "llm_knowledge_low")
-        self.assertLessEqual(result["source_confidence"], 0.65)
-        self.assertTrue(result["used_llm_knowledge_fallback"])
-        self.assertIn("no trusted web evidence", result["failure_reason"])
+        self.assertEqual(result["source"], "")
+        self.assertEqual(result["fallback_source"], "")
+        self.assertEqual(result["evidence_quality"], "none")
+        self.assertEqual(result["source_confidence"], 0.0)
+        self.assertFalse(result["used_llm_knowledge_fallback"])
 
     def test_llm_knowledge_fallback_handles_non_numeric_confidence(self) -> None:
         class FakeExtractor:
@@ -820,7 +920,7 @@ abbreviations: {}
 
         self.assertTrue(result["need_manual_review"])
         self.assertEqual(result["source_confidence"], 0.0)
-        self.assertEqual(result["evidence_quality"], "llm_knowledge_low")
+        self.assertEqual(result["evidence_quality"], "none")
 
     def test_nonstandard_selenium_name_gets_manual_review_candidates(self) -> None:
         name_result = {
@@ -845,15 +945,15 @@ abbreviations: {}
         self.assertTrue(result["need_manual_review"])
 
 
-    def test_erp_cas_is_query_priority_even_when_name_matches_different_alias(self) -> None:
+    def test_cleaned_name_is_query_priority_and_erp_cas_is_used_for_verification(self) -> None:
         searcher = RecordingSearcher(root_dir=ROOT_DIR)
         result = searcher.search("????", cas="1310-73-2")
 
-        self.assertEqual(searcher.queries, ["1310-73-2"])
-        self.assertEqual(result["query"], "1310-73-2")
+        self.assertEqual(searcher.queries, ["氢氧化钠"])
+        self.assertEqual(result["query"], "氢氧化钠")
         self.assertEqual(result["cas"], "1310-73-2")
 
-    def test_conflicting_erp_cas_is_corrected_by_trusted_name_search(self) -> None:
+    def test_conflicting_erp_cas_is_preserved_and_sent_to_review(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             config_dir = root / "config"
@@ -939,15 +1039,207 @@ abbreviations: {}
             searcher = ConflictingCasSearcher(root_dir=root, settings=settings)
             result = searcher.search("氢氧化钠", cas="64-17-5")
 
-        self.assertEqual(result["cas"], "1310-73-2")
+        self.assertEqual(result["cas"], "64-17-5")
         self.assertEqual(result["original_erp_cas"], "64-17-5")
-        self.assertEqual(result["corrected_cas"], "1310-73-2")
+        self.assertEqual(result["candidate_cas"], "1310-73-2")
         self.assertTrue(result["cas_name_conflict"])
-        self.assertTrue(result["cas_correction_applied"])
-        self.assertEqual(result["name_normalization"]["cas"], "1310-73-2")
-        self.assertEqual(result["name_normalization"]["original_erp_cas"], "64-17-5")
-        self.assertIn(("64-17-5", "64-17-5"), searcher.queries)
-        self.assertIn(("1310-73-2", ""), searcher.queries)
+        self.assertFalse(result["cas_correction_applied"])
+        self.assertTrue(result["need_manual_review"])
+        self.assertEqual(result["identity_status"], "conflict")
+
+    def test_pubchem_name_and_cas_converge_with_field_evidence(self) -> None:
+        class FixturePubChemSearcher(ChemicalSearcher):
+            def _fetch_json(self, url: str) -> dict[str, Any]:
+                if "/cids/JSON" in url:
+                    return {"IdentifierList": {"CID": [702]}}
+                if "/property/" in url:
+                    return {"PropertyTable": {"Properties": [{
+                        "CID": 702,
+                        "Title": "Ethanol",
+                        "IUPACName": "ethanol",
+                        "MolecularFormula": "C2H6O",
+                        "MolecularWeight": "46.07",
+                    }]}}
+                if "/synonyms/JSON" in url:
+                    return {"InformationList": {"Information": [{"Synonym": ["ethanol", "64-17-5"]}]}}
+                return {"Record": {"Section": [
+                    {
+                        "TOCHeading": "Flash Point",
+                        "Information": [{"Name": "Flash Point", "Value": {"StringWithMarkup": [{"String": "13 °C"}]}}],
+                    },
+                    {
+                        "TOCHeading": "Boiling Point",
+                        "Information": [{"Name": "Boiling Point", "Value": {"StringWithMarkup": [{"String": "78 °C"}]}}],
+                    },
+                ]}}
+
+        result = FixturePubChemSearcher(root_dir=ROOT_DIR).search("ethanol", cas="64-17-5")
+
+        self.assertEqual(result["identity_status"], "verified")
+        self.assertEqual(result["retrieval_status"], "fresh")
+        self.assertFalse(result["need_manual_review"])
+        self.assertTrue(any(item["field"] == "flash_point" for item in result["evidence_items"]))
+
+    def test_cas_only_hit_is_accepted_when_returned_name_exactly_validates_input(self) -> None:
+        class CasFallbackSearcher(ChemicalSearcher):
+            def _pubchem_cids(self, query: str) -> list[str]:
+                return ["702"] if query == "64-17-5" else []
+
+            def _fetch_json(self, url: str) -> dict[str, Any]:
+                if "/property/" in url:
+                    return {"PropertyTable": {"Properties": [{"Title": "Ethanol", "IUPACName": "ethanol"}]}}
+                if "/synonyms/JSON" in url:
+                    return {"InformationList": {"Information": [{"Synonym": ["ethanol", "64-17-5"]}]}}
+                return {"Record": {}}
+
+            def _enrich_missing_official_fields(self, result: dict[str, Any]) -> dict[str, Any]:
+                return result
+
+        result = CasFallbackSearcher(root_dir=ROOT_DIR).search("ethanol", cas="64-17-5")
+
+        self.assertEqual(result["identity_status"], "cas_only")
+        self.assertTrue(result["relevance_passed"])
+        self.assertFalse(result["need_manual_review"])
+
+    def test_supplier_sds_extracts_mixture_components_and_measured_properties(self) -> None:
+        sds = """
+SECTION 2: Hazard identification
+Highly flammable liquid and vapor
+SECTION 3: Composition
+Ethanol 64-17-5 70-80%
+Water 7732-18-5 20-30%
+SECTION 9: Physical and chemical properties
+Flash point: 18 °C
+Boiling point: 78 °C
+SECTION 10: Stability and reactivity
+Stable under normal conditions
+"""
+        result = ChemicalSearcher(root_dir=ROOT_DIR).search(
+            "Ethanol disinfectant",
+            manufacturer="Example Supplier",
+            catalog_number="SDS-001",
+            sds_text=sds,
+            erp_is_mixture=True,
+        )
+
+        self.assertEqual(result["source"], "Supplier SDS")
+        self.assertEqual(result["retrieval_status"], "local")
+        self.assertEqual(result["identity_status"], "verified")
+        self.assertTrue(result["is_mixture"])
+        self.assertTrue(result["composition_complete"])
+        self.assertEqual({item["cas"] for item in result["mixture_components"]}, {"64-17-5", "7732-18-5"})
+        self.assertTrue(any(item["field"] == "flash_point" for item in result["evidence_items"]))
+
+    def test_supplier_sds_with_trade_secret_requires_review(self) -> None:
+        sds = """
+SECTION 2: Hazard identification
+Flammable
+SECTION 3: Composition
+Proprietary trade secret component
+SECTION 9: Physical and chemical properties
+Flash point: 25 °C
+SECTION 10: Stability and reactivity
+Stable
+"""
+        result = ChemicalSearcher(root_dir=ROOT_DIR).search("Commercial cleaner", sds_text=sds, erp_is_mixture=True)
+
+        self.assertTrue(result["need_manual_review"])
+        self.assertFalse(result["composition_complete"])
+
+    def test_http_503_retries_three_times_then_succeeds(self) -> None:
+        class Response:
+            headers = type("Headers", (), {"get_content_charset": lambda self: "utf-8"})()
+
+            def __enter__(self) -> "Response":
+                return self
+
+            def __exit__(self, *args: Any) -> None:
+                return None
+
+            @staticmethod
+            def read() -> bytes:
+                return b'{"ok": true}'
+
+        url = "https://example.test/retry"
+        transient = HTTPError(url, 503, "busy", {}, None)
+        searcher = ChemicalSearcher(settings={"chemical_search": {"max_attempts": 3}}, root_dir=ROOT_DIR)
+        with patch("chemical_searcher.urlopen", side_effect=[transient, transient, Response()]) as mocked, patch.object(
+            searcher, "_retry_wait", return_value=None
+        ):
+            payload = searcher._fetch(url)
+
+        self.assertEqual(payload, '{"ok": true}')
+        self.assertEqual(mocked.call_count, 3)
+
+    def test_sustained_503_returns_unavailable_without_exception_or_log_spam(self) -> None:
+        class UnavailableSearcher(ChemicalSearcher):
+            def _search_pubchem(
+                self,
+                name: str,
+                cas: str,
+                query: str,
+                validation_names: list[str] | None = None,
+            ) -> dict[str, Any] | None:
+                self._mark_provider_fetch_failure("http_error_503")
+                return None
+
+        settings = {"chemical_search": {"failure_circuit_break_threshold": 1, "failure_circuit_cooldown_seconds": 300}}
+        with patch("builtins.print") as mocked_print:
+            result = UnavailableSearcher(settings=settings, root_dir=ROOT_DIR).search("ethanol", cas="64-17-5")
+
+        messages = [str(call.args[0]) for call in mocked_print.call_args_list if call.args]
+        self.assertEqual(result["retrieval_status"], "unavailable")
+        self.assertTrue(result["need_manual_review"])
+        self.assertEqual(sum("circuit opened" in message for message in messages), 1)
+        self.assertFalse(any("Chemical source failure:" in message for message in messages))
+
+    def test_search_many_deduplicates_identical_upstream_work(self) -> None:
+        searcher = RecordingSearcher(root_dir=ROOT_DIR)
+        results = searcher.search_many([
+            {"name": "ethanol", "cas": "64-17-5"},
+            {"name": "ethanol", "cas": "64-17-5"},
+        ])
+
+        self.assertEqual(len(results), 2)
+        self.assertEqual(len(searcher.queries), 1)
+
+    def test_search_many_batches_pubchem_properties_by_cid(self) -> None:
+        class BatchFixtureSearcher(ChemicalSearcher):
+            def __init__(self, *args: Any, **kwargs: Any) -> None:
+                super().__init__(*args, **kwargs)
+                self.urls: list[str] = []
+
+            def _fetch_json(self, url: str) -> dict[str, Any]:
+                self.urls.append(url)
+                if "/name/ethanol/" in url or "/name/64-17-5/" in url:
+                    return {"IdentifierList": {"CID": [702]}}
+                if "/name/water/" in url or "/name/7732-18-5/" in url:
+                    return {"IdentifierList": {"CID": [962]}}
+                if "/property/" in url:
+                    cids = [cid for cid in ("702", "962") if cid in url]
+                    return {"PropertyTable": {"Properties": [
+                        {"CID": int(cid), "Title": "Ethanol" if cid == "702" else "Water", "IUPACName": "ethanol" if cid == "702" else "oxidane"}
+                        for cid in cids
+                    ]}}
+                if "/synonyms/JSON" in url:
+                    cids = [cid for cid in ("702", "962") if cid in url]
+                    return {"InformationList": {"Information": [
+                        {"CID": int(cid), "Synonym": ["ethanol", "64-17-5"] if cid == "702" else ["water", "7732-18-5"]}
+                        for cid in cids
+                    ]}}
+                return {"Record": {}}
+
+            def _enrich_missing_official_fields(self, result: dict[str, Any]) -> dict[str, Any]:
+                return result
+
+        searcher = BatchFixtureSearcher(root_dir=ROOT_DIR)
+        results = searcher.search_many([
+            {"name": "ethanol", "cas": "64-17-5"},
+            {"name": "water", "cas": "7732-18-5"},
+        ])
+
+        self.assertEqual(len(results), 2)
+        self.assertTrue(any("cid/702,962/property/" in url for url in searcher.urls))
 
     def test_conflicting_erp_cas_without_trusted_name_result_is_not_corrected(self) -> None:
         class LowTrustCorrectionSearcher(ChemicalSearcher):

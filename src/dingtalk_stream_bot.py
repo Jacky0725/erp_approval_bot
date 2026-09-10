@@ -168,6 +168,9 @@ class DingTalkCommandService:
             f"- 开始时间：{status.get('started_at') or '-'}",
             f"- 结束时间：{status.get('finished_at') or '-'}",
         ]
+        if running and status.get("action") == "suggestions":
+            list_number = str(status.get("current_list_number") or "").strip()
+            lines.append(f"- 正在审批清单号：{list_number or '正在获取待办清单'}")
         error = str(status.get("error") or "").strip()
         if error:
             lines.append(f"- 错误：{error[:220]}")

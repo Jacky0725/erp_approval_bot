@@ -32,8 +32,22 @@
     const initialRuntime = dashboardData.runtime || {};
     const initialScheduler = dashboardData.scheduler || {};
     const approvalWriteModeLabels = {
+      disabled: "禁用网页写入",
       multi_page: "全清单分页保存",
       generate_library: "保存并生成试剂库",
+    };
+    const erpWriteBackendLabels = {
+      web_ui: "页面写入",
+      api_read_web_write: "接口读取 + 页面写入",
+      api_write_with_web_verify: "接口写入 + 接口/页面校验",
+    };
+    const erpApiDiscoveryLabels = {
+      disabled: "未启用",
+      pending_capture: "采集中",
+      candidate: "候选待确认",
+      pending_canary: "待金丝雀验证",
+      active: "已启用",
+      rejected: "已回退",
     };
     const logState = {
       lines: [],
@@ -105,6 +119,14 @@
       return approvalWriteModeLabels[value] || safe(value);
     }
 
+    function erpWriteBackendLabel(value) {
+      return erpWriteBackendLabels[value] || safe(value);
+    }
+
+    function erpApiDiscoveryLabel(value) {
+      return erpApiDiscoveryLabels[value] || safe(value);
+    }
+
     function updateDryRunUi(value) {
       const enabled = String(value || "").toLowerCase() === "true";
       setText("#dryRunText", enabled ? "开启" : "关闭");
@@ -121,7 +143,9 @@
     }
 
     setSelectValue(runForm, "approval_write_mode", initialRuntime.approval_write_mode);
+    setSelectValue(runForm, "erp_write_backend", initialRuntime.erp_write_backend);
     setSelectValue(settingsForm, "approval_write_mode", initialRuntime.approval_write_mode);
+    setSelectValue(settingsForm, "erp_write_backend", initialRuntime.erp_write_backend);
     setCheckbox(runForm, "process_all_todos", initialRuntime.process_all_todos);
     setCheckbox(runForm, "auto_pass", initialRuntime.auto_pass);
     setCheckbox(settingsForm, "process_all_todos", initialRuntime.process_all_todos);
@@ -144,6 +168,7 @@
     setSelectValue(settingsForm, "scheduler_mode", initialRuntime.scheduler_mode);
     setSelectValue(settingsForm, "scheduler_approval_write_mode", initialRuntime.scheduler_approval_write_mode);
     setText("#writeModeText", approvalWriteModeLabel(initialRuntime.approval_write_mode));
+    setText("#erpApiDiscoveryText", erpApiDiscoveryLabel(initialRuntime.erp_api_discovery_status));
     updateDryRunUi(initialRuntime.app_dry_run);
     setText("#schedulerNextRun", safe(initialScheduler.next_run_at));
     setText("#schedulerLastRun", safe(initialScheduler.last_run_at));
@@ -189,6 +214,37 @@
       setText("#artifactRefreshState", "刷新中...");
       await refreshArtifacts({force: true});
       setText("#artifactRefreshState", "已刷新");
+    });
+
+    on("#repairDataHealthButton", "click", async () => {
+      if (!confirm("确认执行数据健康修复？系统会先备份试剂记忆库和人工复核队列。")) return;
+      setDisabled("#repairDataHealthButton", true);
+      setText("#dataHealthRepairState", "修复中...");
+      try {
+        const response = await fetch("/api/data_health/repair", { method: "POST" });
+        const payload = await response.json();
+        if (!response.ok) {
+          throw new Error(payload.detail || payload.message || "修复失败");
+        }
+        refreshDataHealth.loaded = false;
+        reviewStateLoaded = false;
+        memoryState.loading = false;
+        await refreshDataHealth({force: true});
+        await refreshReviewQueue({force: true});
+        if (document.querySelector("#memoryTable")) await loadMemory({force: true});
+        const rebuilt = payload.review_queue?.rebuilt_memory ?? 0;
+        const disabled = payload.memory?.disabled_records ?? 0;
+        const unsafe = payload.memory?.unsafe_disabled ?? 0;
+        const duplicates = payload.review_queue?.blocking_duplicates_resolved ?? 0;
+        setText(
+          "#dataHealthRepairState",
+          `已修复：补入 ${rebuilt}，停用 ${Number(disabled) + Number(unsafe)}，重复 ${duplicates}`
+        );
+      } catch (error) {
+        setText("#dataHealthRepairState", `修复失败：${error.message || error}`);
+      } finally {
+        setDisabled("#repairDataHealthButton", false);
+      }
     });
 
     document.querySelectorAll("button[data-action]").forEach((button) => {
@@ -1621,6 +1677,25 @@
     }
     refreshDataHealth.loaded = false;
 
+    async function refreshEnrichmentShadow() {
+      if (!document.querySelector("#enrichmentShadowPanel")) return;
+      try {
+        const response = await fetch("/api/enrichment_shadow");
+        const payload = await response.json();
+        const comparisons = Number(payload.shadow_comparisons || 0);
+        const matched = Number(payload.same_category_count || 0);
+        setText("#enrichmentShadowStatus", comparisons ? "正在积累影子验收数据" : "尚无真实影子样本");
+        setText("#enrichmentShadowMode", payload.shadow_mode ? "已启用" : "未启用");
+        setText("#enrichmentProductionMode", payload.enabled ? "已启用" : "保持关闭");
+        setText("#enrichmentShadowComparisons", comparisons);
+        setText("#enrichmentShadowMatchRate", comparisons ? `${((matched / comparisons) * 100).toFixed(1)}%` : "-");
+        setText("#enrichmentProviderCalls", Number(payload.provider_calls || 0));
+        setText("#enrichmentShadowFailures", Number(payload.shadow_failures || 0));
+      } catch (error) {
+        setText("#enrichmentShadowStatus", `检查失败：${error}`);
+      }
+    }
+
     async function refreshLogTail(options = {}) {
       if (logStateLoaded && !options.force) return;
       if (!document.querySelector("#logBox")) return;
@@ -1666,6 +1741,26 @@
       setText("#runWritableCandidates", safe(runSummary.writable_candidate_count, "-"));
       setText("#runManualReviewCandidates", safe(runSummary.manual_review_candidate_count, "-"));
       setText("#runSearchFailures", safe(runSummary.search_failure_count, "-"));
+      setText("#runChemicalCacheHits", safe(runSummary.chemical_cache_hit_count, "-"));
+      setText("#runChemicalFresh", safe(runSummary.chemical_fresh_count, "-"));
+      setText("#runChemicalStale", safe(runSummary.chemical_stale_count, "-"));
+      setText("#runChemicalUnavailable", safe(runSummary.chemical_unavailable_count, "-"));
+      setText("#runChemicalConflicts", safe(runSummary.chemical_identity_conflict_count, "-"));
+      setText("#runChemicalMixtures", safe(runSummary.chemical_mixture_count, "-"));
+      setText("#runChemicalPublicRequests", safe(runSummary.chemical_public_request_count, "-"));
+      setText("#runPubChemResults", safe(runSummary.pubchem_result_count, "-"));
+      setText("#runLlmBatches", safe(runSummary.llm_batch_count, "-"));
+      setText("#runLlmSeconds", runSummary.llm_seconds === undefined ? "-" : `${safe(runSummary.llm_seconds, "0")}s`);
+      setText("#runLlmSkips", safe(runSummary.llm_skip_count, "-"));
+      setText("#runDuplicateSearchReuse", safe(runSummary.duplicate_search_reuse_count, "-"));
+      setText("#runDuplicateLlmReuse", safe(runSummary.duplicate_llm_reuse_count, "-"));
+      setText("#runApiReadDetail", safe(runSummary.api_read_detail_count, "-"));
+      setText("#runApiRecordResolve", safe(runSummary.api_record_resolve_count, "-"));
+      setText("#runApiRecordResolveFailure", safe(runSummary.api_record_resolve_failure_count, "-"));
+      setText("#runApiWriteAttempt", safe(runSummary.api_write_attempt_count, "-"));
+      setText("#runApiWriteSuccess", safe(runSummary.api_write_success_count, "-"));
+      setText("#runApiVerifyFailure", safe(runSummary.api_verify_failure_count, "-"));
+      setText("#runApiFallbackWebWrite", safe(runSummary.api_fallback_web_write_count, "-"));
       setText("#runWriteSuccess", safe(runSummary.write_success_count, "-"));
       setText("#runWriteFailure", safe(runSummary.write_failure_count, "-"));
       setText("#runDeferredWrites", safe(runSummary.deferred_write_count, "-"));
@@ -1674,6 +1769,8 @@
       updateDryRunUi(runtime.app_dry_run);
       setText("#autoPassText", safe(runtime.auto_pass));
       setText("#writeModeText", approvalWriteModeLabel(runtime.approval_write_mode));
+      setText("#erpWriteBackendText", erpWriteBackendLabel(runtime.erp_write_backend));
+      setText("#erpApiDiscoveryText", erpApiDiscoveryLabel(runtime.erp_api_discovery_status));
       setText("#processScopeText", runtime.process_all_todos === "true" ? "全部待办" : "勾选清单/首条");
       const selectedLists = selectedTodoNumbers();
       setText("#targetList", selectedLists.length ? `${selectedLists.length} 个清单` : "-");
@@ -1701,6 +1798,7 @@
       }
       if (activePage === "overview") {
         await refreshDataHealth({force: runJustFinished});
+        await refreshEnrichmentShadow();
       }
       if (activePage === "artifacts") {
         await refreshArtifacts({force: runJustFinished});

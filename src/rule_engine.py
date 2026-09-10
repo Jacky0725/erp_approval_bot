@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import hashlib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -32,6 +33,15 @@ class RuleMatch:
     score: float
 
 
+@dataclass(frozen=True)
+class DecisionTrace:
+    rule_version: str
+    final_category: str
+    matched_categories: tuple[str, ...]
+    evidence_refs: tuple[str, ...]
+    warnings: tuple[str, ...]
+
+
 @dataclass
 class RuleEngine:
     rules: list[Rule]
@@ -39,6 +49,7 @@ class RuleEngine:
     manual_review_categories: set[str] = field(
         default_factory=lambda: {UNKNOWN_CATEGORY}
     )
+    rule_version: str = ""
 
     @classmethod
     def from_settings(cls, settings: dict[str, Any], root_dir: Path) -> "RuleEngine":
@@ -120,10 +131,16 @@ class RuleEngine:
         for rule in rule_entries:
             if rule.category not in priority:
                 priority.append(rule.category)
+        rule_version = ""
+        try:
+            rule_version = f"sha256:{hashlib.sha256(Path(rules_path).read_bytes()).hexdigest()[:16]}"
+        except OSError:
+            pass
         return cls(
             rules=rule_entries,
             priority=priority,
             manual_review_categories=manual_review_categories,
+            rule_version=rule_version,
         )
 
     @classmethod
@@ -158,7 +175,53 @@ class RuleEngine:
             for category, row in grouped.iterrows()
         ]
         priority = cls._priority_from_remarks(remarks, [rule.category for rule in rules])
-        return cls(rules=rules, priority=priority)
+        rule_version = ""
+        try:
+            rule_version = f"sha256:{hashlib.sha256(Path(rules_path).read_bytes()).hexdigest()[:16]}"
+        except OSError:
+            pass
+        return cls(rules=rules, priority=priority, rule_version=rule_version)
+
+    def classify_resolved_properties(
+        self,
+        properties: Any,
+        *,
+        name: str = "",
+        cas: str = "",
+        identity_status: str = "unresolved",
+    ) -> dict[str, Any]:
+        """Classify field-level evidence without changing the legacy dict API."""
+
+        reagent_info = properties.to_rule_input(name=name, cas=cas)
+        result = dict(self.classify(reagent_info))
+        warnings: list[str] = []
+        if identity_status != "verified":
+            warnings.append(f"identity_status:{identity_status or 'unresolved'}")
+        conflicts = tuple(getattr(properties, "conflicts", ()) or ())
+        if conflicts:
+            warnings.extend(f"evidence_conflict:{field}" for field in conflicts)
+        if warnings:
+            result["need_manual_review"] = True
+        evidence_refs = tuple(
+            f"evidence:{index}"
+            for field in getattr(properties, "fields", {}).values()
+            for index in getattr(field, "evidence_refs", ())
+        )
+        trace = DecisionTrace(
+            rule_version=self.rule_version or "unversioned",
+            final_category=str(result.get("final_category") or ""),
+            matched_categories=tuple(str(value) for value in result.get("matched_categories", []) or []),
+            evidence_refs=tuple(dict.fromkeys(evidence_refs)),
+            warnings=tuple(warnings),
+        )
+        result["decision_trace"] = {
+            "rule_version": trace.rule_version,
+            "final_category": trace.final_category,
+            "matched_categories": list(trace.matched_categories),
+            "evidence_refs": list(trace.evidence_refs),
+            "warnings": list(trace.warnings),
+        }
+        return result
 
     @staticmethod
     def _enabled_rows(dataframe: pd.DataFrame) -> pd.DataFrame:
@@ -205,6 +268,14 @@ class RuleEngine:
             }
 
         matches: dict[str, RuleMatch] = {}
+        mixture_categories = self._mixture_categories(reagent_info)
+        for category in mixture_categories:
+            matches[category] = RuleMatch(
+                category=category,
+                explanation_hits=[f"混合物/SDS组分最高风险候选：{category}"],
+                example_hits=[],
+                score=10.0,
+            )
         suppress_special_acid_rule = (
             self._is_mineral_acid_salt_like(reagent_info)
             or self._is_ordinary_mineral_acid(reagent_info)
@@ -303,6 +374,25 @@ class RuleEngine:
             "confidence": confidence,
             "need_manual_review": need_manual_review,
         }
+
+    def highest_priority_category(self, categories: list[str]) -> str:
+        """Return the strictest category using the configured rule priority."""
+        normalized = [str(value or "").strip() for value in categories if str(value or "").strip()]
+        rank = {category: index for index, category in enumerate(self.priority)}
+        known = [category for category in dict.fromkeys(normalized) if category in rank]
+        return min(known, key=lambda category: rank[category]) if known else ""
+
+    def _mixture_categories(self, reagent_info: dict[str, Any]) -> list[str]:
+        categories: list[str] = []
+        for key in ("mixture_risk_categories", "sds_categories", "component_categories"):
+            value = reagent_info.get(key) or []
+            if isinstance(value, str):
+                value = re.split(r"[,，;；|]+", value)
+            for category in value if isinstance(value, (list, tuple, set)) else []:
+                text = str(category or "").strip()
+                if text and text in self.priority and text not in categories:
+                    categories.append(text)
+        return categories
 
     def evaluate_text(self, item_text: str) -> dict[str, Any]:
         result = self.classify({"text": item_text})
