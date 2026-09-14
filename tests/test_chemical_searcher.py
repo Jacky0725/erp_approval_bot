@@ -122,12 +122,13 @@ class ChemicalSearcherTest(unittest.TestCase):
 
     def test_search_normalizes_before_query_and_prefers_cleaned_name(self) -> None:
         searcher = RecordingSearcher(root_dir=ROOT_DIR)
-        result = searcher.search("工业酒精 75% 500ml", cas="64-17-5", specification="500ml", unit="瓶")
+        with patch.dict("os.environ", NO_LLM_ENV, clear=False):
+            result = searcher.search("工业酒精 75% 500ml", cas="64-17-5", specification="500ml", unit="瓶")
 
-        self.assertEqual(searcher.queries, ["乙醇"])
-        self.assertEqual(result["query"], "乙醇")
-        self.assertEqual(result["name_normalization"]["standard_name"], "乙醇")
-        self.assertEqual(result["name_normalization"]["english_name"], "ethanol")
+        self.assertEqual(searcher.queries, ["工业酒精", "64-17-5"])
+        self.assertEqual(result["query"], "工业酒精")
+        self.assertEqual(result["name_normalization"]["standard_name"], "工业酒精")
+        self.assertEqual(result["name_normalization"]["english_name"], "")
         self.assertTrue(result["need_manual_review"])
         self.assertTrue(result["is_mixture"])
 
@@ -135,7 +136,7 @@ class ChemicalSearcherTest(unittest.TestCase):
         searcher = RecordingSearcher(root_dir=ROOT_DIR)
         result = searcher.search("NaOH 0.1mol/L 分析纯")
 
-        self.assertEqual(searcher.queries, ["氢氧化钠"])
+        self.assertEqual(searcher.queries, ["氢氧化钠", "1310-73-2"])
         self.assertEqual(result["query"], "氢氧化钠")
         self.assertEqual(result["name_normalization"]["standard_name"], "氢氧化钠")
         self.assertEqual(result["name_normalization"]["english_name"], "sodium hydroxide")
@@ -560,6 +561,33 @@ abbreviations: {}
         self.assertIsNone(second)
         self.assertEqual(searcher.queries, ["unknown", "unknown2"])
 
+    def test_budget_exhaustion_without_request_does_not_trip_provider_circuit(self) -> None:
+        settings = {"chemical_search": {"failure_circuit_break_threshold": 1}}
+
+        class BudgetExpiredSearcher(RecordingSearcher):
+            def _search_chemicalbook(
+                self,
+                name: str,
+                cas: str,
+                query: str,
+                validation_names: list[str] | None = None,
+            ) -> dict[str, Any] | None:
+                self._mark_provider_fetch_failure("lookup_budget_exceeded")
+                return None
+
+        searcher = BudgetExpiredSearcher(root_dir=ROOT_DIR, settings=settings)
+        result = searcher._run_provider(
+            searcher._search_chemicalbook,
+            name="ethanol",
+            cas="64-17-5",
+            query="64-17-5",
+            validation_names=["ethanol"],
+        )
+
+        self.assertIsNone(result)
+        self.assertEqual(ChemicalSearcher._source_failures.get("ChemicalBook", 0), 0)
+        self.assertFalse(searcher._source_circuit_open("ChemicalBook"))
+
     def test_source_circuit_breaker_recovers_after_cooldown(self) -> None:
         settings = {
             "chemical_search": {
@@ -949,11 +977,11 @@ abbreviations: {}
         searcher = RecordingSearcher(root_dir=ROOT_DIR)
         result = searcher.search("????", cas="1310-73-2")
 
-        self.assertEqual(searcher.queries, ["氢氧化钠"])
-        self.assertEqual(result["query"], "氢氧化钠")
+        self.assertEqual(searcher.queries, ["????", "1310-73-2"])
+        self.assertEqual(result["query"], "????")
         self.assertEqual(result["cas"], "1310-73-2")
 
-    def test_conflicting_erp_cas_is_preserved_and_sent_to_review(self) -> None:
+    def test_conflicting_erp_cas_uses_trusted_name_identity(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             config_dir = root / "config"
@@ -1039,13 +1067,16 @@ abbreviations: {}
             searcher = ConflictingCasSearcher(root_dir=root, settings=settings)
             result = searcher.search("氢氧化钠", cas="64-17-5")
 
-        self.assertEqual(result["cas"], "64-17-5")
+        self.assertEqual(result["cas"], "1310-73-2")
         self.assertEqual(result["original_erp_cas"], "64-17-5")
         self.assertEqual(result["candidate_cas"], "1310-73-2")
         self.assertTrue(result["cas_name_conflict"])
-        self.assertFalse(result["cas_correction_applied"])
-        self.assertTrue(result["need_manual_review"])
+        self.assertTrue(result["cas_correction_applied"])
+        self.assertFalse(result["need_manual_review"])
         self.assertEqual(result["identity_status"], "conflict")
+        self.assertEqual(result["identity_decision_basis"], "name_identity")
+        self.assertEqual(result["name_identity"]["cas"], "1310-73-2")
+        self.assertEqual(result["cas_identity"]["cas"], "64-17-5")
 
     def test_pubchem_name_and_cas_converge_with_field_evidence(self) -> None:
         class FixturePubChemSearcher(ChemicalSearcher):
@@ -1201,7 +1232,7 @@ Stable
         ])
 
         self.assertEqual(len(results), 2)
-        self.assertEqual(len(searcher.queries), 1)
+        self.assertEqual(len(searcher.queries), 2)
 
     def test_search_many_batches_pubchem_properties_by_cid(self) -> None:
         class BatchFixtureSearcher(ChemicalSearcher):

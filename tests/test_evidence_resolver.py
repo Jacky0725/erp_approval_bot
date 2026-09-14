@@ -12,6 +12,20 @@ from evidence_resolver import EvidenceResolver  # noqa: E402
 
 
 class EvidenceResolverTest(unittest.TestCase):
+
+    def test_boolean_negation_is_field_specific(self) -> None:
+        resolver = EvidenceResolver()
+        corrosive = resolver.resolve(resolver.normalize_legacy_items([
+            {"field": "corrosive", "value": "Non-flammable but corrosive", "source": "PubChem"},
+        ]))
+        self.assertTrue(corrosive.fields["corrosive"].value)
+
+        negative = resolver.resolve(resolver.normalize_legacy_items([
+            {"field": "corrosive", "value": "Not corrosive", "source": "PubChem"},
+            {"field": "oxidizing", "value": "Non-oxidizing", "source": "PubChem"},
+        ]))
+        self.assertFalse(negative.fields["corrosive"].value)
+        self.assertFalse(negative.fields["oxidizing"].value)
     def setUp(self) -> None:
         self.resolver = EvidenceResolver()
 

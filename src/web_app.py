@@ -30,6 +30,7 @@ from web_runner import (
     delete_conflicting_memory,
     delete_memory_record,
     delete_review_item,
+    generate_review_llm_advice,
     import_approval_suggestions_to_memory,
     load_settings,
     manager,
@@ -643,6 +644,16 @@ async def api_review_confirm(request: Request) -> JSONResponse:
         raise HTTPException(status_code=409, detail="当前自动化任务正在运行，请先停止或等待任务结束后，再确认人工复核项。")
     payload = await request.json()
     return JSONResponse(confirm_review_item(payload))
+
+
+@app.post("/api/review/llm_advice")
+async def api_review_llm_advice(request: Request) -> JSONResponse:
+    if manager.status().get("running"):
+        raise HTTPException(status_code=409, detail="当前自动化任务正在运行，请等待结束后再生成第二意见。")
+    result = generate_review_llm_advice(await request.json())
+    if not result.get("generated") and not result.get("cached"):
+        raise HTTPException(status_code=422, detail=result.get("message") or "LLM 第二意见生成失败。")
+    return JSONResponse(result)
 
 
 @app.delete("/api/review")

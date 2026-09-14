@@ -4,6 +4,7 @@ import shutil
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 import pandas as pd
@@ -31,6 +32,18 @@ class RuleMaintainerTest(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.tempdir.cleanup()
+
+    def test_retry_after_candidate_publish_failure_does_not_duplicate_rule(self) -> None:
+        candidate = {"standard_name": "synthetic-approved-reagent", "manual_result": "氧化剂", "status": "approved"}
+        pd.DataFrame([candidate]).to_excel(self.maintainer.candidates_path, index=False)
+        with patch("rule_maintainer.write_excel_atomic", side_effect=PermissionError("candidate locked")):
+            with self.assertRaises(PermissionError):
+                self.maintainer.promote_approved_candidates()
+        self.assertEqual(pd.read_excel(self.maintainer.candidates_path).loc[0, "status"], "approved")
+        self.assertEqual(self.maintainer.promote_approved_candidates(), 0)
+        self.assertEqual(pd.read_excel(self.maintainer.candidates_path).loc[0, "status"], "promoted")
+        examples = pd.read_excel(self.maintainer.structured_rules_path, sheet_name="examples")
+        self.assertEqual(int(examples["example_name"].eq("synthetic-approved-reagent").sum()), 1)
 
     def test_records_pending_candidate_and_deduplicates(self) -> None:
         reagent = {"\u8bd5\u5242\u540d\u79f0": "\u6a21\u62df\u65b0\u8bd5\u5242", "CAS\u53f7": ""}

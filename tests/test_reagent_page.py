@@ -21,6 +21,87 @@ class FakePage:
 
 
 class ReagentPageAutoMatchTest(unittest.TestCase):
+    def test_detail_identity_waits_until_expected_list_is_visible(self) -> None:
+        class Bot(ReagentPageMixin):
+            detail_rows = iter([
+                {"当前清单号": "SJ0001"},
+                {"当前清单号": "SJ0002", "客户名称": "测试客户"},
+            ])
+
+            def read_detail_info(self, page: FakePage) -> dict[str, str]:
+                return next(self.detail_rows)
+
+        page = FakePage()
+        page.wait_for_load_state = lambda *args, **kwargs: None
+        result = Bot().wait_for_detail_ready(page, {"试剂清单号": "SJ0002 加急"}, timeout_ms=1000)
+        self.assertEqual(result["当前清单号"], "SJ0002")
+        self.assertEqual(page.waits, [200])
+
+    def test_detail_identity_mismatch_fails_closed(self) -> None:
+        class Bot(ReagentPageMixin):
+            def read_detail_info(self, page: FakePage) -> dict[str, str]:
+                return {"当前清单号": "SJ0001"}
+
+        page = FakePage()
+        page.wait_for_load_state = lambda *args, **kwargs: None
+        with self.assertRaisesRegex(RuntimeError, "expected SJ0002, observed SJ0001"):
+            Bot().wait_for_detail_ready(page, {"试剂清单号": "SJ0002"}, timeout_ms=1)
+
+    def test_detail_identity_missing_fails_closed(self) -> None:
+        class Bot(ReagentPageMixin):
+            def read_detail_info(self, page: FakePage) -> dict[str, str]:
+                return {}
+
+        page = FakePage()
+        page.wait_for_load_state = lambda *args, **kwargs: None
+        with self.assertRaisesRegex(RuntimeError, "observed <missing>"):
+            Bot().wait_for_detail_ready(page, {"试剂清单号": "SJ0002"}, timeout_ms=1)
+
+    def test_detail_identity_requires_list_number_on_selected_row(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "no reagent list number"):
+            ReagentPageMixin().wait_for_detail_ready(FakePage(), {}, timeout_ms=1)
+
+    def test_todo_page_change_requires_positive_page_or_table_evidence(self) -> None:
+        class Bot(ReagentPageMixin):
+            def wait_for_table_ready(self, page: FakePage) -> None:
+                return None
+
+            def current_todo_page_number(self, page: FakePage) -> str:
+                return ""
+
+            def todo_table_signature(self, page: FakePage) -> str:
+                return "unchanged"
+
+        self.assertFalse(Bot().wait_for_todo_page_change(FakePage(), "", "unchanged"))
+
+    def test_todo_page_change_accepts_changed_table_when_page_number_is_unavailable(self) -> None:
+        class Bot(ReagentPageMixin):
+            signatures = iter(["new page"])
+
+            def wait_for_table_ready(self, page: FakePage) -> None:
+                return None
+
+            def current_todo_page_number(self, page: FakePage) -> str:
+                return ""
+
+            def todo_table_signature(self, page: FakePage) -> str:
+                return next(self.signatures)
+
+        self.assertTrue(Bot().wait_for_todo_page_change(FakePage(), "", "old page"))
+
+    def test_todo_page_change_accepts_changed_page_number(self) -> None:
+        class Bot(ReagentPageMixin):
+            def wait_for_table_ready(self, page: FakePage) -> None:
+                return None
+
+            def current_todo_page_number(self, page: FakePage) -> str:
+                return "2"
+
+            def todo_table_signature(self, page: FakePage) -> str:
+                return ""
+
+        self.assertTrue(Bot().wait_for_todo_page_change(FakePage(), "1", ""))
+
     def test_auto_match_no_table_change_continues(self) -> None:
         class Bot(ReagentPageMixin):
             def capture_prompt_if_present(self, page: FakePage, screenshot_name: str) -> str:

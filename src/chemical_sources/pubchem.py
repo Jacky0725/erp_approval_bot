@@ -54,6 +54,65 @@ class PubChemAdapter:
                     results[index] = self._empty(identities[index], "unavailable", "exception", str(error))
         return [result if result is not None else self._empty(identity, "not_found") for identity, result in zip(identities, results)]
 
+    def resolve_identity_pair(self, identity: IdentityRecord) -> dict[str, Any]:
+        """Resolve the name and CAS independently for audit/review purposes.
+
+        The ordinary resolver intentionally returns one provider identity.  Review
+        workflows need both sides of a possible mismatch, so this method keeps
+        the candidate CID sets separate and never chooses a side.
+        """
+        name_query = identity.standard_name_en or identity.standard_name_cn or identity.cleaned_base_name
+        name_cids, name_failure = self._cids(name_query) if name_query else ([], "")
+        cas_query = identity.cas or ""
+        cas_cids, cas_failure = self._cids(cas_query) if cas_query else ([], "")
+        name_candidate = self._identity_candidate(identity, "name", name_query, name_cids)
+        cas_candidate = self._identity_candidate(identity, "cas", cas_query, cas_cids)
+        if not cas_query:
+            status = "cas_missing"
+        elif name_cids and cas_cids and not set(name_cids).intersection(cas_cids):
+            status = "conflict"
+        elif len(name_cids) > 1 or len(cas_cids) > 1:
+            status = "ambiguous"
+        elif name_cids and cas_cids:
+            status = "verified"
+        elif name_cids or cas_cids:
+            status = "unresolved"
+        else:
+            status = "unresolved"
+        return {
+            "status": status,
+            "name_query": name_query,
+            "cas_query": cas_query,
+            "name_candidate": name_candidate,
+            "cas_candidate": cas_candidate,
+            "name_candidates": [self._candidate_dict(identity, "name", name_query, cid) for cid in name_cids],
+            "cas_candidates": [self._candidate_dict(identity, "cas", cas_query, cid) for cid in cas_cids],
+            "diagnostics": {
+                "name_failure_kind": name_failure,
+                "cas_failure_kind": cas_failure,
+            },
+        }
+
+    @staticmethod
+    def _candidate_dict(identity: IdentityRecord, source: str, query: str, cid: str) -> dict[str, str]:
+        return {
+            "source": source,
+            "query": query,
+            "cid": str(cid),
+            "cas": identity.cas if source == "cas" else "",
+            "name": "",
+            "url": f"https://pubchem.ncbi.nlm.nih.gov/compound/{cid}" if cid else "",
+        }
+
+    def _identity_candidate(
+        self,
+        identity: IdentityRecord,
+        source: str,
+        query: str,
+        cids: list[str],
+    ) -> dict[str, Any] | None:
+        return self._candidate_dict(identity, source, query, cids[0]) if cids else None
+
     def fetch_evidence_many(self, identities: Sequence[IdentityRecord]) -> list[ProviderEvidence]:
         by_cid = {identity.provider_id("pubchem_cid"): identity for identity in identities if identity.provider_id("pubchem_cid")}
         results: dict[str, ProviderEvidence] = {}

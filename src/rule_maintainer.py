@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 import pandas as pd
+from excel_exports import atomic_excel_path, write_excel_atomic
 
 
 CANDIDATE_COLUMNS = [
@@ -46,7 +47,7 @@ class RuleMaintainer:
     def ensure_candidate_file(self) -> Path:
         self.candidates_path.parent.mkdir(parents=True, exist_ok=True)
         if not self.candidates_path.exists():
-            pd.DataFrame(columns=CANDIDATE_COLUMNS).to_excel(self.candidates_path, index=False)
+            write_excel_atomic(pd.DataFrame(columns=CANDIDATE_COLUMNS), self.candidates_path)
         return self.candidates_path
 
     def record_candidate(
@@ -74,7 +75,7 @@ class RuleMaintainer:
 
         candidates = pd.concat([candidates, pd.DataFrame([row])], ignore_index=True)
         candidates = candidates.reindex(columns=CANDIDATE_COLUMNS)
-        candidates.to_excel(self.candidates_path, index=False)
+        write_excel_atomic(candidates, self.candidates_path)
         return True
 
     def promote_approved_candidates(self) -> int:
@@ -89,6 +90,7 @@ class RuleMaintainer:
         examples = rules_book.get("examples", pd.DataFrame()).fillna("")
 
         promoted = 0
+        updated = False
         for index, row in approved.iterrows():
             category = str(row.get("manual_result") or row.get("candidate_category") or "").strip()
             standard_name = str(row.get("standard_name") or row.get("reagent_name") or "").strip()
@@ -115,14 +117,19 @@ class RuleMaintainer:
                 )
                 promoted += 1
             candidates.at[index, "status"] = "promoted"
+            updated = True
 
         if promoted:
             rules_book["rules"] = rules
             rules_book["examples"] = examples
-            with pd.ExcelWriter(self.structured_rules_path, engine="openpyxl") as writer:
-                for sheet_name, dataframe in rules_book.items():
-                    dataframe.to_excel(writer, sheet_name=sheet_name, index=False)
-            candidates.to_excel(self.candidates_path, index=False)
+            with atomic_excel_path(self.structured_rules_path) as temporary_path:
+                with pd.ExcelWriter(temporary_path, engine="openpyxl") as writer:
+                    for sheet_name, dataframe in rules_book.items():
+                        dataframe.to_excel(writer, sheet_name=sheet_name, index=False)
+        if updated:
+            # A previous attempt may have published the rules but failed to
+            # publish candidate statuses. Finish that attempt without duplicates.
+            write_excel_atomic(candidates, self.candidates_path)
         return promoted
 
     @staticmethod

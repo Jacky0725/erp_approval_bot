@@ -47,6 +47,7 @@
       candidate: "候选待确认",
       pending_canary: "待金丝雀验证",
       active: "已启用",
+      verified: "已验证启用",
       rejected: "已回退",
     };
     const logState = {
@@ -827,6 +828,8 @@
       if (type === "llm_fallback") return "LLM辅助";
       if (type === "trusted_web") return "可信网站";
       if (type === "web_fallback") return "网页兜底";
+      if (type === "erp_write_verification") return "写入待核验";
+      if (row.review_kind === "erp_write_verification") return "写入待核验";
       return "证据不足";
     }
 
@@ -853,19 +856,80 @@
       const sourceLink = row.source_url
         ? `<a href="${escapeHtml(row.source_url)}" target="_blank" rel="noreferrer">来源链接</a>`
         : "";
+      const parseJson = (value) => {
+        try { return value ? JSON.parse(value) : null; } catch (_) { return null; }
+      };
+      const identityResolution = parseJson(row.identity_resolution);
+      const sourceEvidenceItems = parseJson(row.source_evidence_items) || [];
+      const nameIdentity = parseJson(row.name_identity) || identityResolution?.name_identity;
+      const casIdentity = parseJson(row.cas_identity) || identityResolution?.cas_identity;
+      const identityStatus = row.identity_status || identityResolution?.status || "";
+      const hasNameIdentity = nameIdentity && Object.keys(nameIdentity).length > 0;
+      const hasCasIdentity = casIdentity && Object.keys(casIdentity).length > 0;
+      const candidateText = (candidate) => {
+        if (!candidate) return "";
+        const label = candidate.name || candidate.query || candidate.cid || "未知";
+        return candidate.url ? `${escapeHtml(label)} <a href="${escapeHtml(candidate.url)}" target="_blank" rel="noreferrer">来源</a>` : escapeHtml(label);
+      };
+      const identityBlock = (identityStatus || hasNameIdentity || hasCasIdentity) ? `
+        <div class="review-detail-section"><strong>身份确认：</strong>
+          ${identityStatus ? `状态：${escapeHtml(identityStatus)}；` : ""}
+          ${row.cas ? `ERP CAS：${escapeHtml(row.cas)}；` : ""}
+          ${hasNameIdentity ? `名称身份：${candidateText(nameIdentity)}；` : ""}
+          ${hasCasIdentity ? `CAS 身份：${candidateText(casIdentity)}` : ""}
+        </div>` : "";
+      const correctionCandidate = String(row.cas_correction_candidate || row.cas_name_conflict || "").toLowerCase() === "true"
+        || String(row.cas_correction_candidate || row.cas_name_conflict || "") === "1";
+      const correctionBlock = correctionCandidate ? `
+        <div class="review-detail-section review-detail-warning"><strong>CAS 修正候选：</strong>
+          原 ERP CAS：${escapeHtml(row.original_erp_cas || row.cas || "-")}；
+          名称对应 CAS：${escapeHtml(row.corrected_cas || "-")}；
+          判定依据：${escapeHtml(row.identity_decision_basis || "名称身份")}。
+          ${row.cas_correction_source ? `来源：${escapeHtml(row.cas_correction_source)}；` : ""}
+          ${row.cas_correction_url ? `<a href="${escapeHtml(row.cas_correction_url)}" target="_blank" rel="noreferrer">来源链接</a>` : ""}
+          <div class="review-detail-advisory">人工确认后才写入试剂记忆库；不自动修改 ERP CAS。</div>
+        </div>` : "";
+      const evidenceItemsBlock = Array.isArray(sourceEvidenceItems) && sourceEvidenceItems.length ? `
+        <div class="review-detail-section"><strong>来源与物化证据：</strong>
+          <ul>${sourceEvidenceItems.map((item) => `<li>${escapeHtml(item.field || "属性")}：${escapeHtml(formatReviewEvidenceValue(item.value || "-", item.unit || ""))}；来源：${escapeHtml(item.source || "-")}${item.source_url ? `；<a href="${escapeHtml(item.source_url)}" target="_blank" rel="noreferrer">查看来源</a>` : ""}${item.conflict ? "；存在来源冲突" : ""}</li>`).join("")}</ul>
+        </div>` : "";
+      const ruleBlock = (row.matched_rule_ids || row.rule_version) ? `
+        <div class="review-detail-section"><strong>规则判定：</strong>
+          命中规则：${escapeHtml(row.matched_rule_ids || "-")}；规则版本/指纹：${escapeHtml(row.rule_version || "-")}；正式结果：${escapeHtml(row.suggested_category || "需人工复核")}；复核原因：${escapeHtml(row.reason_full || row.reason || "-")}。
+        </div>` : "";
+      const identityOpinion = [
+        row.llm_name_identity_opinion ? `名称身份意见：${row.llm_name_identity_opinion}` : "",
+        row.llm_cas_identity_opinion ? `CAS 身份意见：${row.llm_cas_identity_opinion}` : "",
+        row.llm_identity_opinion ? `总体意见：${row.llm_identity_opinion}` : "",
+        row.llm_identity_trigger_status ? `触发状态：${row.llm_identity_trigger_status}` : "",
+        row.llm_advisory_category ? `候选类别：${row.llm_advisory_category}` : "",
+        row.llm_advisory_summary_cn ? `物化摘要：${row.llm_advisory_summary_cn}` : "",
+        row.llm_advisory_reason_cn ? `理由：${row.llm_advisory_reason_cn}` : "",
+        row.llm_advisory_rule_cn ? `可能涉及规则：${row.llm_advisory_rule_cn}` : "",
+        row.llm_advisory_uncertainties_cn ? `不确定性：${row.llm_advisory_uncertainties_cn}` : "",
+      ].filter(Boolean).join("；");
+      const opinionBlock = identityOpinion ? `
+        <div class="review-detail-section"><strong>LLM 第二意见：</strong>${escapeHtml(identityOpinion)}
+          <div class="review-detail-advisory">仅供人工参考，不作为自动审批依据；依据类型：${escapeHtml(row.llm_advisory_evidence_basis || "证据不足")}；置信度：${escapeHtml(row.llm_advisory_confidence || "-")}；模型：${escapeHtml(row.llm_provider || "-")} / ${escapeHtml(row.llm_model || "-")}；生成时间：${escapeHtml(row.llm_generated_at || "-")}；规则指纹：${escapeHtml(row.llm_rules_fingerprint || "-")}。</div>
+        </div>` : "";
       return `
-        <div class="review-evidence ${["llm_fallback", "llm_rule_fallback", "llm_manual_review_advice"].includes(row.evidence_source_type) ? "llm-evidence" : ""}">
+        <div class="review-evidence ${["llm_fallback", "llm_rule_fallback", "llm_manual_review_advice"].includes(row.evidence_source_type) ? "llm-evidence" : ""} ${row.review_kind === "erp_write_verification" ? "write-verification-evidence" : ""}">
           <div class="review-evidence-head">
             <span>${escapeHtml(evidenceStatus)}</span>
             ${sourceLink}
           </div>
           <p><strong>建议：</strong>${escapeHtml(suggestion)}</p>
           <p><strong>原因：</strong>${escapeHtml(reason)}</p>
-          ${(detail || properties.length) ? `
+          ${(detail || properties.length || identityBlock || opinionBlock) ? `
             <details class="review-evidence-detail">
               <summary>查看详情</summary>
+              ${identityBlock}
+              ${correctionBlock}
+              ${evidenceItemsBlock}
+              ${ruleBlock}
               ${detail ? `<p>${escapeHtml(detail)}</p>` : ""}
               ${properties.length ? `<p>${properties.map((item) => `${escapeHtml(item[0])}：${escapeHtml(localizeReviewDetailText(item[1]))}`).join(" · ")}</p>` : ""}
+              ${opinionBlock}
             </details>
           ` : ""}
         </div>
@@ -889,6 +953,7 @@
         llm_rule_matched_rule: "LLM匹配规则",
       };
       text = text.replace(/\b(flash_point|boiling_point|toxicity|corrosive|oxidizing|flammable|water_reactive|explosive_risk|evidence|llm_rule_reason|llm_rule_matched_rule)=/g, (_, key) => `${keyLabels[key] || key}：`);
+      text = normalizeReviewTemperatureText(text);
       const replacements = [
         ["No specific acute toxicity data provided.", "未提供明确的急性毒性数据。"],
         ["No specific acute toxicity data provided", "未提供明确的急性毒性数据"],
@@ -911,6 +976,38 @@
         text = text.split(source).join(target);
       });
       return text;
+    }
+
+    function formatReviewEvidenceValue(value, unit) {
+      const raw = String(value || "").trim();
+      const rawUnit = String(unit || "").trim();
+      if (rawUnit.toLowerCase() === "degc" && /^[-+]?\d+(?:\.\d+)?$/.test(raw)) {
+        return `${formatCelsius(Number(raw))}℃`;
+      }
+      return normalizeReviewTemperatureText(rawUnit ? `${raw} ${rawUnit}` : raw);
+    }
+
+    function normalizeReviewTemperatureText(value) {
+      return String(value || "").replace(/([<>≤≥~约]?\s*)([-+]?\d+(?:\.\d+)?)\s*(°\s*[CF]|[CFK])\b/gi, (match, prefix, numberText, rawUnit) => {
+        const numeric = Number(numberText);
+        if (!Number.isFinite(numeric)) return match;
+        const unit = String(rawUnit || "").replace(/\s+/g, "").toUpperCase();
+        let celsius = numeric;
+        if (unit === "K") {
+          celsius = numeric - 273.15;
+        } else if (unit === "F" || unit === "°F") {
+          celsius = (numeric - 32) * 5 / 9;
+        } else if (unit !== "C" && unit !== "°C") {
+          return match;
+        }
+        return `${prefix || ""}${formatCelsius(celsius)}℃`;
+      });
+    }
+
+    function formatCelsius(value) {
+      if (!Number.isFinite(value)) return "";
+      const rounded = Math.round(value * 10) / 10;
+      return Number.isInteger(rounded) ? String(rounded) : String(rounded.toFixed(1)).replace(/\.0$/, "");
     }
 
     function renderReviewRows() {
@@ -955,6 +1052,7 @@
             <span class="review-selected">未选择</span>
           </td>
           <td class="review-action-cell">
+            <button type="button" class="review-llm-advice review-secondary-action">${String(row.used_llm_manual_review_advice || "").toLowerCase() === "true" ? "查看第二意见" : "生成LLM第二意见"}</button>
             <button type="button" class="review-confirm review-primary-action" disabled>确认入库</button>
             <button type="button" class="review-delete review-danger-action">删除</button>
             <span class="review-row-message"></span>
@@ -963,6 +1061,7 @@
         const categorySelect = tr.querySelector(".review-category");
         const selectedText = tr.querySelector(".review-selected");
         const confirmButton = tr.querySelector(".review-confirm");
+        const adviceButton = tr.querySelector(".review-llm-advice");
         const deleteButton = tr.querySelector(".review-delete");
         const rowMessage = tr.querySelector(".review-row-message");
         const updateReviewSelection = () => {
@@ -974,6 +1073,37 @@
         };
         categorySelect.addEventListener("change", updateReviewSelection);
         updateReviewSelection();
+        adviceButton.addEventListener("click", async () => {
+          adviceButton.disabled = true;
+          rowMessage.textContent = "正在生成 LLM 第二意见...";
+          rowMessage.className = "review-row-message";
+          try {
+            const {response, payload} = await fetchDashboardJSON("/api/review/llm_advice", {
+              method: "POST",
+              headers: {"Content-Type": "application/json"},
+              body: JSON.stringify({
+                review_key: row.review_key,
+                list_number: row.list_number,
+                sequence: row.sequence,
+                reagent_name: row.reagent_name,
+                cas: row.cas,
+                standard_name: row.standard_name,
+              }),
+            }, 120000);
+            if (!response.ok) throw new Error(apiErrorMessage(payload) || "LLM 第二意见生成失败。");
+            rowMessage.textContent = payload.cached ? "已加载缓存的第二意见。" : "LLM 第二意见已生成。";
+            rowMessage.className = "review-row-message ok";
+            try {
+              await refreshReviewQueue({force: true});
+            } catch (_) {
+              rowMessage.textContent += " 列表刷新超时，请稍后手动刷新页面。";
+            }
+          } catch (error) {
+            rowMessage.textContent = dashboardRequestErrorMessage(error, "LLM 第二意见生成失败。");
+            rowMessage.className = "review-row-message failed";
+            adviceButton.disabled = false;
+          }
+        });
         confirmButton.addEventListener("click", async () => {
           const finalCategory = categorySelect.value;
           if (!finalCategory) {
@@ -1621,8 +1751,7 @@
     async function refreshApprovalSummary(options = {}) {
       if (approvalStateLoaded && !options.force) return;
       if (!document.querySelector("#suggestionTable") && !document.querySelector("#suggestionRows")) return;
-      const response = await fetch("/api/approval_summary");
-      const approval = await response.json();
+      const approval = await readDashboardJSON("/api/approval_summary");
       approvalStateLoaded = true;
       setText("#suggestionRows", safe(approval.rows, "0"));
       setText("#suggestionMeta", approval.exists ? `最近更新：${safe(approval.modified)}` : "尚未生成 approval_suggestions.xlsx");
@@ -1639,8 +1768,7 @@
         list_number: reviewState.listNumber || "",
         sort: reviewState.sortDirection || "desc",
       });
-      const response = await fetch(`/api/review_queue?${params.toString()}`);
-      const reviewQueue = await response.json();
+      const reviewQueue = await readDashboardJSON(`/api/review_queue?${params.toString()}`);
       reviewStateLoaded = true;
       setText("#manualReview", safe(reviewQueue.pending, "0"));
       if (options.force || !reviewInteractionActive()) {
@@ -1651,8 +1779,7 @@
     async function refreshArtifacts(options = {}) {
       if (artifactStateLoaded && !options.force) return;
       if (!document.querySelector("#artifactList")) return;
-      const response = await fetch("/api/artifacts");
-      const payload = await response.json();
+      const payload = await readDashboardJSON("/api/artifacts");
       artifactStateLoaded = true;
       renderArtifacts(payload.artifacts || []);
     }
@@ -1661,8 +1788,7 @@
       if (!document.querySelector("#dataHealthPanel")) return;
       if (refreshDataHealth.loaded && !options.force) return;
       try {
-        const response = await fetch("/api/data_health");
-        const payload = await response.json();
+        const payload = await readDashboardJSON("/api/data_health");
         refreshDataHealth.loaded = true;
         setText("#dataHealthStatus", `最近检查：${safe(payload.last_checked_at)}`);
         setText("#healthMemoryMojibake", safe(payload.memory_mojibake_records, "0"));
@@ -1680,8 +1806,7 @@
     async function refreshEnrichmentShadow() {
       if (!document.querySelector("#enrichmentShadowPanel")) return;
       try {
-        const response = await fetch("/api/enrichment_shadow");
-        const payload = await response.json();
+        const payload = await readDashboardJSON("/api/enrichment_shadow");
         const comparisons = Number(payload.shadow_comparisons || 0);
         const matched = Number(payload.same_category_count || 0);
         setText("#enrichmentShadowStatus", comparisons ? "正在积累影子验收数据" : "尚无真实影子样本");
@@ -1699,23 +1824,69 @@
     async function refreshLogTail(options = {}) {
       if (logStateLoaded && !options.force) return;
       if (!document.querySelector("#logBox")) return;
-      const response = await fetch("/api/log_tail");
-      const payload = await response.json();
+      const payload = await readDashboardJSON("/api/log_tail");
       logStateLoaded = true;
       logState.lines = payload.log_tail || [];
       renderLogBox();
     }
 
-    async function refreshStatus(options = {}) {
-      const response = await fetch("/api/status");
-      const data = await response.json();
+    let statusRefreshPromise = null;
+
+    async function fetchDashboardJSON(url, options = {}, timeoutMs = 10000) {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), timeoutMs);
+      try {
+        const response = await fetch(url, {...options, signal: controller.signal});
+        const payload = await response.json();
+        return {response, payload};
+      } finally {
+        clearTimeout(timeout);
+      }
+    }
+
+    async function readDashboardJSON(url, options = {}, timeoutMs = 10000) {
+      const {response, payload} = await fetchDashboardJSON(url, options, timeoutMs);
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      return payload;
+    }
+
+    function dashboardRequestErrorMessage(error, fallback = "操作失败。") {
+      const message = String(error?.message || error || "");
+      if (
+        error?.name === "AbortError"
+        || /aborted|aborterror|signal is aborted/i.test(message)
+      ) {
+        return "请求等待时间较长，前端已停止等待；请稍后刷新查看结果，或检查 LLM 服务是否响应较慢。";
+      }
+      return message || fallback;
+    }
+
+    function refreshStatus(options = {}) {
+      if (statusRefreshPromise) return statusRefreshPromise;
+      statusRefreshPromise = readAndRenderStatus(options)
+        .then(() => {
+          const badge = document.querySelector("#runBadge");
+          if (badge) badge.removeAttribute("title");
+          return true;
+        })
+        .catch(() => {
+          setText("#runBadge", "刷新失败 · 数据可能已过期");
+          const badge = document.querySelector("#runBadge");
+          if (badge) badge.title = "暂时无法刷新状态，保留上次数据；稍后自动重试。";
+          return false;
+        })
+        .finally(() => { statusRefreshPromise = null; });
+      return statusRefreshPromise;
+    }
+
+    async function readAndRenderStatus(options = {}) {
+      const data = await readDashboardJSON("/api/status");
       const status = data.status || {};
       const runSummary = status.summary || {};
       const runtime = data.runtime || {};
       const todoTasks = data.todo_tasks || {};
       const scheduler = data.scheduler || {};
       const runJustFinished = !status.running && status.finished_at && status.finished_at !== lastFinishedAt;
-      if (status.finished_at) lastFinishedAt = status.finished_at;
       if (runtime.review_decision_options && runtime.review_decision_options.length) {
         reviewCategories = runtime.review_decision_options;
       }
@@ -1748,12 +1919,16 @@
       setText("#runChemicalConflicts", safe(runSummary.chemical_identity_conflict_count, "-"));
       setText("#runChemicalMixtures", safe(runSummary.chemical_mixture_count, "-"));
       setText("#runChemicalPublicRequests", safe(runSummary.chemical_public_request_count, "-"));
+      setText("#runChemicalSearchSeconds", runSummary.chemical_search_seconds === undefined ? "-" : `${safe(runSummary.chemical_search_seconds, "0")}s`);
       setText("#runPubChemResults", safe(runSummary.pubchem_result_count, "-"));
       setText("#runLlmBatches", safe(runSummary.llm_batch_count, "-"));
       setText("#runLlmSeconds", runSummary.llm_seconds === undefined ? "-" : `${safe(runSummary.llm_seconds, "0")}s`);
       setText("#runLlmSkips", safe(runSummary.llm_skip_count, "-"));
       setText("#runDuplicateSearchReuse", safe(runSummary.duplicate_search_reuse_count, "-"));
       setText("#runDuplicateLlmReuse", safe(runSummary.duplicate_llm_reuse_count, "-"));
+      setText("#runManualReviewQueued", safe(runSummary.manual_review_queued_count, "-"));
+      setText("#runManualReviewUpdated", safe(runSummary.manual_review_updated_count, "-"));
+      setText("#runManualReviewFlushes", safe(runSummary.manual_review_batch_flush_count, "-"));
       setText("#runApiReadDetail", safe(runSummary.api_read_detail_count, "-"));
       setText("#runApiRecordResolve", safe(runSummary.api_record_resolve_count, "-"));
       setText("#runApiRecordResolveFailure", safe(runSummary.api_record_resolve_failure_count, "-"));
@@ -1806,6 +1981,8 @@
       if (activePage === "logs") {
         await refreshLogTail({force: status.running || runJustFinished});
       }
+      // Retry completion-dependent reads if any of them failed this time.
+      if (status.finished_at) lastFinishedAt = status.finished_at;
     }
 
     function setUpdateState(state, label) {

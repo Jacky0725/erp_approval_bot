@@ -12,7 +12,7 @@ ROOT_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT_DIR / "src"))
 
 from excel_exports import ExcelExportsMixin  # noqa: E402
-from review_queue import ReviewQueueMixin  # noqa: E402
+from review_queue import ReviewQueueMixin, localize_review_detail_text, review_display_summary_from_row  # noqa: E402
 
 
 class ReviewQueueBot(ReviewQueueMixin, ExcelExportsMixin):
@@ -27,6 +27,64 @@ class ReviewQueueBot(ReviewQueueMixin, ExcelExportsMixin):
 
 
 class ReviewQueueTest(unittest.TestCase):
+    def test_review_detail_temperature_units_are_displayed_as_celsius(self) -> None:
+        summary = localize_review_detail_text(
+            "flash_point=55 F | boiling_point=333 K | evidence=Flash point less than 69°F and boiling point 78 °C"
+        )
+
+        self.assertIn("闪点：12.8℃", summary)
+        self.assertIn("沸点：59.9℃", summary)
+        self.assertIn("less than 20.6℃", summary)
+        self.assertIn("78℃", summary)
+        self.assertNotIn("55 F", summary)
+        self.assertNotIn("333 K", summary)
+        self.assertNotIn("69°F", summary)
+
+    def test_legacy_write_failure_is_displayed_as_write_verification(self) -> None:
+        summary = review_display_summary_from_row(
+            {
+                "chemical_name": "pH计电极保护液",
+                "standard_name": "氯化钾",
+                "suggested_category": "普通类",
+                "reason": "试剂名称、来源证据或规则判定存在不确定性，需要人工核对物化特性。",
+                "reason_raw": "网页写入失败：ERP API verified, but webpage row shows -。",
+                "display_reason": "缺少可信网站资料或可用的辅助判断，需人工核对。",
+            },
+            reason="试剂名称、来源证据或规则判定存在不确定性，需要人工核对物化特性。",
+        )
+
+        self.assertEqual(summary["review_kind"], "erp_write_verification")
+        self.assertEqual(summary["display_suggestion"], "已判定：普通类")
+        self.assertEqual(summary["evidence_status"], "写入待核验")
+        self.assertNotIn("物化特性不确定", summary["display_reason"])
+        self.assertTrue(summary["allow_suggestion_preselect"])
+
+    def test_manual_review_batch_writes_once_and_keeps_each_sequence(self) -> None:
+        class CountingBot(ReviewQueueBot):
+            def __init__(self, root_dir: Path) -> None:
+                super().__init__(root_dir)
+                self.write_count = 0
+                self._current_detail_info = {"当前清单号": "SJ1"}
+
+            def write_excel_with_fallback(self, frame, path):  # noqa: ANN001
+                self.write_count += 1
+                return super().write_excel_with_fallback(frame, path)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            bot = CountingBot(Path(tmp))
+            bot.begin_manual_review_batch()
+            for sequence in ("1", "2"):
+                bot.add_manual_review_item(
+                    {"序号": sequence, "试剂名称": "同名试剂", "CAS号": "1-11-1"},
+                    {"standard_name": "同名试剂", "cleaned_name": "同名试剂"},
+                    reason="证据不足",
+                )
+            bot.flush_manual_review_batch()
+            frame = pd.read_excel(Path(tmp) / "review_queue.xlsx", dtype=str).fillna("")
+
+        self.assertEqual(bot.write_count, 1)
+        self.assertEqual(set(frame["序号"]), {"1", "2"})
+
     def test_missing_review_queue_does_not_block_auto_pass(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             blocked, reason = ReviewQueueBot(Path(tmp)).current_list_has_manual_review_item("SJ1")

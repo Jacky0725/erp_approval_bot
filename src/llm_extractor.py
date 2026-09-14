@@ -339,6 +339,91 @@ reagent_info:
         )
         return base
 
+    def generate_identity_second_opinion(self, reagent_info: dict[str, Any]) -> dict[str, Any]:
+        """Generate an advisory-only identity opinion for missing/conflicting CAS."""
+        base = {
+            "name_identity_opinion": "",
+            "cas_identity_opinion": "",
+            "identity_opinion": "",
+            "candidate_category": "",
+            "physicochemical_summary_cn": "",
+            "reason_cn": "",
+            "matched_rule_summary_cn": "",
+            "uncertainties_cn": ["身份需要人工确认"],
+            "evidence_basis": "证据不足",
+            "advisory_confidence": 0.0,
+            "must_manual_review": True,
+            "advisory_only": True,
+            "used_llm": False,
+            "model": str(self.model or ""),
+            "provider": str(self.provider or ""),
+            "generated_at": datetime.now().isoformat(timespec="seconds"),
+            "rules_fingerprint": str(reagent_info.get("rules_fingerprint") or ""),
+            "raw_diagnostic": "",
+        }
+        if not self._has_api_key():
+            base.update(self._manual_advice_failure(ValueError("LLM API key is not configured.")))
+            return base
+        allowed_categories = [str(item).strip() for item in reagent_info.get("allowed_categories", []) if str(item).strip()]
+        knowledge_instruction = "可以使用通用化学知识，但必须标注为模型知识。" if reagent_info.get("allow_model_knowledge", True) else "不得使用模型自身知识；证据不足时返回证据不足。"
+        prompt = f"""
+你是化学品人工复核助手。当前试剂存在 CAS 缺失/无效，或名称与 CAS 可能指向不同物质。
+请根据原始名称、清洗标准名、英文名、别名、两套身份解析结果、可信网页证据，
+{knowledge_instruction}给出第二意见。该意见仅供人工参考，
+不得决定审批结果，不得写入 ERP，不得把模型知识伪装成网页证据。
+
+只返回严格 JSON：
+{{"name_identity_opinion":"名称身份意见","cas_identity_opinion":"CAS 身份意见","identity_opinion":"一致|冲突|CAS缺失|无法确认","candidate_category":"候选类别或空字符串","physicochemical_summary_cn":"中文物化特性摘要","reason_cn":"第二意见理由","matched_rule_summary_cn":"可能涉及的规则","uncertainties_cn":["不确定项"],"evidence_basis":"网页资料|模型知识|混合依据|证据不足","advisory_confidence":0.0}}
+
+必须明确区分网页资料和模型知识；candidate_category 只能来自 allowed_categories；不得输出自动审批或纠正 CAS 的指令。
+
+allowed_categories:\n{json.dumps(allowed_categories, ensure_ascii=False)}
+reagent_info:\n{json.dumps(reagent_info, ensure_ascii=False)}
+""".strip()
+        try:
+            response = self._client().chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": "你只输出中文 JSON，意见仅供人工复核，不能替代规则引擎。"},
+                    {"role": "user", "content": prompt},
+                ],
+                response_format={"type": "json_object"},
+                temperature=0,
+            )
+            parsed = json.loads(response.choices[0].message.content or "{}")
+            if not isinstance(parsed, dict):
+                raise ValueError("LLM identity opinion must be a JSON object")
+        except Exception as error:
+            base.update(self._manual_advice_failure(error))
+            return base
+        category = str(parsed.get("candidate_category") or "").strip()
+        if category not in allowed_categories:
+            category = ""
+        basis = str(parsed.get("evidence_basis") or "证据不足").strip()
+        basis = {"web": "网页资料", "model_knowledge": "模型知识", "llm_chemical_knowledge": "模型知识", "mixed": "混合依据", "insufficient": "证据不足"}.get(basis.lower(), basis)
+        if basis not in {"网页资料", "模型知识", "混合依据", "证据不足"}:
+            basis = "证据不足"
+        confidence = self._normalize_confidence(parsed.get("advisory_confidence"))
+        if basis == "模型知识" and not reagent_info.get("evidence"):
+            confidence = min(confidence, 0.65)
+        uncertainties = [self._prefer_chinese_text(item, "存在未明确的不确定项") for item in self._normalize_string_list(parsed.get("uncertainties_cn"))]
+        if not uncertainties:
+            uncertainties = ["名称/CAS 身份仍需人工确认"]
+        base.update({
+            "name_identity_opinion": self._prefer_chinese_text(parsed.get("name_identity_opinion"), "无法形成可靠的名称身份意见。"),
+            "cas_identity_opinion": self._prefer_chinese_text(parsed.get("cas_identity_opinion"), "无法形成可靠的 CAS 身份意见。"),
+            "identity_opinion": str(parsed.get("identity_opinion") or "无法确认").strip(),
+            "candidate_category": category,
+            "physicochemical_summary_cn": self._prefer_chinese_text(parsed.get("physicochemical_summary_cn"), "现有信息不足，无法形成可靠物化摘要。"),
+            "reason_cn": self._prefer_chinese_text(parsed.get("reason_cn"), "身份存在不确定性，请人工核验。"),
+            "matched_rule_summary_cn": self._prefer_chinese_text(parsed.get("matched_rule_summary_cn"), ""),
+            "uncertainties_cn": uncertainties,
+            "evidence_basis": basis,
+            "advisory_confidence": confidence,
+            "used_llm": True,
+        })
+        return base
+
     @staticmethod
     def _prefer_chinese_text(value: Any, fallback: str) -> str:
         text = str(value or "").strip()

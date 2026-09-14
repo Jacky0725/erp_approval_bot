@@ -712,6 +712,60 @@ class ApprovalFlowTodoLoopTest(unittest.TestCase):
 
         self.assertEqual(result, [suggestion])
 
+    def test_unknown_candidate_overrides_stale_review_and_confidence_flags(self) -> None:
+        bot = Bot()
+        bot.settings = {
+            "approval": {"write_min_confidence": 0.8},
+            "reagent": {"physicochemical_property_options": ["未知类"]},
+        }
+        suggestion = {
+            "最终建议类别": "未知类",
+            "需人工复核": True,
+            "置信度": 0.0,
+            "LLM辅助意见仅供复核": True,
+            "明确未知名称规则命中": True,
+        }
+
+        with patch.dict(os.environ, {}, clear=True):
+            result = bot.high_confidence_write_candidates([suggestion])
+
+        self.assertEqual(len(result), 1)
+        self.assertFalse(suggestion["需人工复核"])
+        self.assertEqual(suggestion["置信度"], 1.0)
+
+    def test_unknown_suggestion_is_not_added_to_manual_review_queue(self) -> None:
+        class ReviewGuardBot(Bot):
+            def add_manual_review_item_from_suggestion(self, *_args: object, **_kwargs: object) -> None:
+                raise AssertionError("unknown category must not enter the manual review queue")
+
+        suggestion = {
+            "最终建议类别": "未知类",
+            "需人工复核": True,
+            "置信度": 0.0,
+            "明确未知名称规则命中": True,
+        }
+        ReviewGuardBot().queue_manual_review_if_suggestion_requires_it(
+            {"试剂名称": "未知样品"},
+            suggestion,
+        )
+
+        self.assertFalse(suggestion["需人工复核"])
+        self.assertEqual(suggestion["置信度"], 1.0)
+
+    def test_unknown_without_explicit_name_evidence_requires_manual_review(self) -> None:
+        suggestion = {
+            "最终建议类别": "未知类",
+            "需人工复核": False,
+            "置信度": 1.0,
+            "查询来源": "",
+            "证据质量": "none",
+        }
+
+        Bot().apply_unknown_auto_write_policy(suggestion)
+
+        self.assertTrue(suggestion["需人工复核"])
+        self.assertEqual(suggestion["未知类判定状态"], "证据不足，需人工确认")
+
     def test_high_confidence_candidate_maps_rule_category_to_erp_property(self) -> None:
         bot = Bot()
         bot.settings = {
@@ -755,6 +809,24 @@ class ApprovalFlowTodoLoopTest(unittest.TestCase):
 
         self.assertEqual(result[0]["\u6700\u7ec8\u5efa\u8bae\u7c7b\u522b"], "\u62d2\u6536\u7c7b")
         self.assertEqual(result[0]["\u89c4\u5219\u5224\u5b9a\u7c7b\u522b"], "\u4e0d\u5efa\u8bae\u63a5\u6536\u7c7b")
+
+    def test_trusted_name_preferred_identity_conflict_can_be_written(self) -> None:
+        bot = Bot()
+        bot.settings = {
+            "approval": {"write_min_confidence": 0.7},
+            "reagent": {"physicochemical_property_options": ["易燃类"]},
+        }
+        suggestion = {
+            "最终建议类别": "易燃类",
+            "需人工复核": False,
+            "置信度": 0.92,
+            "身份验证状态": "conflict",
+            "身份判定依据": "名称身份",
+            "原ERP CAS号": "67-64-1",
+            "修正CAS号": "64-17-5",
+            "LLM辅助意见仅供复核": True,
+        }
+        self.assertEqual(bot.high_confidence_write_candidates([suggestion]), [suggestion])
 
     def test_low_confidence_non_manual_write_skip_is_queued_once_for_review(self) -> None:
         class LowConfidenceBot(ApprovalFlowMixin, ReviewQueueMixin, ExcelExportsMixin):
@@ -802,6 +874,129 @@ class ApprovalFlowTodoLoopTest(unittest.TestCase):
         self.assertEqual(queue.iloc[0]["chemical_name"], "\u4f4e\u7f6e\u4fe1\u7279\u6b8a\u9178")
         self.assertIn("\u4f4e\u4e8e\u81ea\u52a8\u5199\u5165\u9608\u503c", queue.iloc[0]["reason"])
         self.assertEqual(queue.iloc[0]["suggested_category"], "\u7279\u6b8a\u9178")
+
+    def test_verified_save_remains_terminal_when_page_settlement_fails(self) -> None:
+        class FakeRow:
+            def scroll_into_view_if_needed(self, **kwargs: object) -> None:
+                return None
+
+            def evaluate(self, script: str) -> None:
+                return None
+
+        class FakePage:
+            def wait_for_timeout(self, timeout: int) -> None:
+                return None
+
+            def screenshot(self, **kwargs: object) -> None:
+                return None
+
+        class FakeWriter:
+            _last_property_failure_stage = ""
+
+            def dismiss_open_dropdown(self, page: object) -> None:
+                return None
+
+            def row_is_editing(self, page: object, row: object) -> bool:
+                return False
+
+            def open_technical_judgement(self, row: object, page: object) -> bool:
+                return True
+
+            def choose_property(self, page: object, category: str, row: object) -> bool:
+                return True
+
+            def save(self, page: object, row: object) -> bool:
+                return True
+
+            def property_name_candidates(self, category: str) -> list[str]:
+                return [category]
+
+        class SettlementBot(Bot):
+            def __init__(self, root_dir: Path) -> None:
+                self.root_dir = root_dir
+                self.settings = {
+                    "app": {"dry_run": False},
+                    "approval": {"write_mode": "multi_page", "write_min_confidence": 0.7},
+                    "reagent": {"physicochemical_property_options": ["\u666e\u901a\u7c7b"]},
+                }
+                self.save_results = []
+                self.web_write_failures = []
+                self.manual_failures: list[str] = []
+
+            def high_confidence_write_candidates(self, suggestions: list[dict[str, object]]) -> list[dict[str, object]]:
+                return suggestions
+
+            def queue_low_confidence_write_skips(self, suggestions: list[dict[str, object]], *, min_confidence: float) -> None:
+                return None
+
+            def clear_existing_edit_state(self, page: object, writer: object, sequence: str) -> bool:
+                return True
+
+            def find_reagent_row_by_sequence(self, page: object, sequence: str, reagent_name: str, cas: str) -> object:
+                return FakeRow()
+
+            def read_reagent_property_by_sequence(self, page: object, sequence: str) -> str:
+                return "\u666e\u901a\u7c7b"
+
+            def clear_web_write_failure(self, suggestion: dict[str, object]) -> None:
+                return None
+
+            def remember_verified_approval_suggestion(self, suggestion: dict[str, object], category: str) -> bool:
+                return False
+
+            def settle_after_successful_write(self, page: object, writer: object, sequence: str) -> bool:
+                return False
+
+            def capture_write_failure(self, *args: object, **kwargs: object) -> None:
+                return None
+
+            def add_manual_review_item_from_write_failure(self, suggestion: dict[str, object], reason: str) -> None:
+                self.manual_failures.append(reason)
+
+            def _log_dir(self) -> Path:
+                return self.root_dir
+
+        suggestion = {
+            "\u8bd5\u5242\u6e05\u5355\u53f7": "SJ1",
+            "\u5e8f\u53f7": "1",
+            "\u8bd5\u5242\u540d\u79f0": "\u6d4b\u8bd5\u8bd5\u5242",
+            "CAS\u53f7": "64-17-5",
+            "\u6700\u7ec8\u5efa\u8bae\u7c7b\u522b": "\u666e\u901a\u7c7b",
+            "\u7f6e\u4fe1\u5ea6": 0.9,
+            "\u9700\u4eba\u5de5\u590d\u6838": False,
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            bot = SettlementBot(Path(tmp))
+            with (
+                patch.dict(os.environ, {}, clear=True),
+                patch("approval_flow.ApprovalWriter", return_value=FakeWriter()),
+                patch("approval_flow.wait_until_spinner_hidden"),
+                patch("approval_flow.wait_until_row_value", return_value="\u666e\u901a\u7c7b"),
+            ):
+                result = bot.apply_approval_write_mode(FakePage(), [suggestion])
+
+        key = bot.suggestion_work_key(suggestion)
+        self.assertEqual(result["handled"], {key})
+        self.assertEqual(result["failed"], set())
+        self.assertTrue(any(item["name"] == "page_settle_1" and not item["success"] for item in bot.save_results))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            unknown_bot = SettlementBot(Path(tmp))
+            with (
+                patch.dict(os.environ, {}, clear=True),
+                patch("approval_flow.ApprovalWriter", return_value=FakeWriter()),
+                patch("approval_flow.wait_until_spinner_hidden"),
+                patch(
+                    "approval_flow.wait_until_row_value",
+                    side_effect=["\u666e\u901a\u7c7b", RuntimeError("read-back failed")],
+                ),
+            ):
+                unknown_result = unknown_bot.apply_approval_write_mode(FakePage(), [suggestion])
+
+        self.assertEqual(unknown_result["handled"], {key})
+        self.assertEqual(unknown_result["failed"], set())
+        self.assertEqual(len(unknown_bot.manual_failures), 1)
+        self.assertIn("save outcome unknown", unknown_bot.manual_failures[0])
 
     def test_write_failure_recovery_reopens_target_detail_without_old_page_number(self) -> None:
         class RecoveryBot(Bot):
@@ -968,6 +1163,15 @@ class ApprovalFlowTodoLoopTest(unittest.TestCase):
         self.assertTrue(suggestion["CAS\u540d\u79f0\u51b2\u7a81"])
         self.assertTrue(suggestion["CAS\u4fee\u6b63\u5df2\u5e94\u7528"])
         self.assertFalse(suggestion["\u9700\u4eba\u5de5\u590d\u6838"])
+
+    def test_direct_business_rule_does_not_downgrade_hazardous_drug_name(self) -> None:
+        bot = Bot()
+        engine = RuleEngine.from_structured_excel(ROOT_DIR / "config" / "rules_structured.xlsx")
+        suggestion = bot.direct_business_rule_suggestion(
+            {"序号": "27", "试剂名称": "某药物叠氮化物", "CAS号": ""},
+            engine,
+        )
+        self.assertIsNone(suggestion)
 
     def test_reagent_work_key_normalizes_zero_width_cas(self) -> None:
         left = Bot.reagent_work_key(
@@ -1580,12 +1784,10 @@ class ApprovalFlowTodoLoopTest(unittest.TestCase):
         with patch("approval_flow.LlmExtractor", FakeExtractor):
             extracted, classification = bot.extract_and_classify_worker(item, FakeRuleEngine())  # type: ignore[arg-type]
 
-        self.assertTrue(item["search_result"]["used_llm_knowledge_fallback"])
-        self.assertEqual(item["search_result"]["llm_confidence"], 0.65)
-        self.assertEqual(item["search_result"]["source_confidence"], 0.0)
-        self.assertTrue(extracted["used_llm_knowledge_fallback"])
+        self.assertNotIn("used_llm_knowledge_fallback", item["search_result"])
+        self.assertIn("insufficient website evidence", " ".join(extracted.get("evidence") or []))
         self.assertTrue(classification["need_manual_review"])
-        self.assertIn("advisory only", classification["reason"])
+        self.assertIn("No trusted web evidence", classification["reason"])
 
     def test_low_quality_search_uses_llm_rule_fallback_as_manual_review_advice(self) -> None:
         class FakeExtractor:
@@ -1676,13 +1878,10 @@ class ApprovalFlowTodoLoopTest(unittest.TestCase):
         with patch("approval_flow.LlmExtractor", FakeExtractor):
             extracted, classification = bot.extract_and_classify_worker(item, engine)  # type: ignore[arg-type]
 
-        self.assertTrue(item["search_result"]["used_llm_rule_fallback"])
-        self.assertEqual(item["search_result"]["llm_rule_confidence"], 0.88)
-        self.assertIn("强反应性", extracted["suggested_categories"])
-        self.assertTrue(extracted["used_llm_rule_fallback"])
-        self.assertIn("强反应性", engine.last_input["suggested_categories"])
+        self.assertNotIn("used_llm_rule_fallback", item["search_result"])
+        self.assertEqual(extracted.get("suggested_categories"), [])
         self.assertTrue(classification["need_manual_review"])
-        self.assertEqual(classification["llm_rule_confidence"], 0.88)
+        self.assertNotIn("llm_rule_confidence", classification)
 
     def test_reagent_memory_match_skips_chemical_search(self) -> None:
         class MemoryBot(Bot):

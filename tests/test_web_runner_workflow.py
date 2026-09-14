@@ -4,6 +4,8 @@ import sys
 import unittest
 from unittest.mock import patch
 
+import pandas as pd
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from web_runner import (
@@ -11,8 +13,10 @@ from web_runner import (
     automation_failure_reason,
     atomic_write_text,
     artifact_summary,
+    build_review_queue_payload,
     current_approval_list_number,
     current_run_lines,
+    new_run_log_path,
     normalize_web_write_mode,
     parse_target_list_numbers,
     repair_display_text,
@@ -28,6 +32,36 @@ from web_app import artifact_path_for_download, run_options, web_ui_restart_comm
 
 
 class WorkflowSummaryTest(unittest.TestCase):
+    def test_legacy_write_failure_row_is_exposed_as_write_verification(self) -> None:
+        with TemporaryDirectory() as tmp:
+            path = Path(tmp) / "review_queue.xlsx"
+            pd.DataFrame(
+                [
+                    {
+                        "timestamp": "2026-09-12T23:49:59",
+                        "试剂清单号": "SJ1",
+                        "序号": "231",
+                        "试剂名称": "pH计电极保护液",
+                        "cas": "-",
+                        "standard_name": "氯化钾",
+                        "status": "pending",
+                        "suggested_category": "普通类",
+                        "reason": "试剂名称、来源证据或规则判定存在不确定性，需要人工核对物化特性。",
+                        "reason_raw": "网页写入失败：ERP API verified, but webpage row shows -。",
+                        "display_reason": "缺少可信网站资料或可用的辅助判断，需人工核对。",
+                        "evidence_status": "证据不足",
+                    }
+                ]
+            ).to_excel(path, index=False)
+
+            row = build_review_queue_payload(path)["pending_rows"][0]
+
+        self.assertEqual(row["review_kind"], "erp_write_verification")
+        self.assertEqual(row["display_suggestion"], "已判定：普通类")
+        self.assertEqual(row["evidence_status"], "写入待核验")
+        self.assertIn("ERP 接口结果与网页显示不一致", row["reason"])
+        self.assertEqual(row["allow_suggestion_preselect"], "True")
+
     def test_repeated_reagent_pipeline_marks_current_stage_active(self) -> None:
         lines = [
             "2026-06-22 12:39:48 [FLOW] START chemical_search - page 1 1/20 A",
@@ -61,6 +95,19 @@ class WorkflowSummaryTest(unittest.TestCase):
 
             self.assertEqual(status["result_label"], "审批流程完成")
             self.assertEqual(status["action"], "suggestions")
+
+    def test_manager_persists_state_and_run_paths_under_its_root(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manager = AutomationJobManager(root_dir=root)
+            manager.running = True
+            manager.action = "suggestions"
+            manager._run_log_path = str(new_run_log_path("suggestions", root))
+
+            manager._persist_state()
+
+            self.assertTrue((root / "data" / "logs" / "web_run_state.yaml").exists())
+            self.assertTrue(Path(manager._run_log_path).is_relative_to(root))
 
     def test_todo_export_status_uses_business_label(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -418,6 +465,26 @@ class WorkflowSummaryTest(unittest.TestCase):
         self.assertEqual(summary["api_write_success_count"], 1)
         self.assertEqual(summary["api_verify_failure_count"], 1)
         self.assertEqual(summary["api_fallback_web_write_count"], 1)
+
+    def test_run_summary_counts_search_time_and_batched_review_writes(self) -> None:
+        summary = run_summary(
+            [
+                "2026-09-11 16:06:36 [FLOW] END   chemical_search (12.5s)",
+                "Queued search-failure item for manual review: SJ1 / 1",
+                "Queued manual review update: SJ1 / 2",
+                "Flushed 2 total manual review row(s) in one batch write: queue.xlsx",
+            ],
+            action="suggestions",
+            options={},
+            running=False,
+            success=True,
+            error="",
+        )
+
+        self.assertEqual(summary["chemical_search_seconds"], 12.5)
+        self.assertEqual(summary["manual_review_queued_count"], 1)
+        self.assertEqual(summary["manual_review_updated_count"], 1)
+        self.assertEqual(summary["manual_review_batch_flush_count"], 1)
 
     def test_run_summary_counts_legacy_llm_seconds(self) -> None:
         summary = run_summary(

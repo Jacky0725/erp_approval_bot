@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import re
+import json
 import shutil
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 import pandas as pd
+from excel_exports import write_excel_atomic
 
 
 REVIEW_EVIDENCE_COLUMNS = [
@@ -18,6 +20,9 @@ REVIEW_EVIDENCE_COLUMNS = [
     "llm_confidence",
     "evidence_quality",
     "source_url",
+    "source_evidence_items",
+    "matched_rule_ids",
+    "rule_version",
     "flash_point",
     "boiling_point",
     "toxicity",
@@ -52,10 +57,25 @@ REVIEW_EVIDENCE_COLUMNS = [
     "original_erp_cas",
     "corrected_cas",
     "cas_name_conflict",
+    "cas_correction_candidate",
     "cas_correction_applied",
+    "identity_decision_basis",
     "cas_correction_reason",
     "cas_correction_source",
     "cas_correction_url",
+    "identity_resolution",
+    "name_identity",
+    "cas_identity",
+    "identity_status",
+    "identity_candidates",
+    "llm_identity_opinion",
+    "llm_name_identity_opinion",
+    "llm_cas_identity_opinion",
+    "llm_identity_second_opinion",
+    "llm_identity_trigger_status",
+    "review_kind",
+    "expected_category",
+    "write_failure_reason",
     "display_suggestion",
     "display_reason",
     "evidence_status",
@@ -111,6 +131,39 @@ def canonicalize_review_queue_columns(frame: pd.DataFrame) -> pd.DataFrame:
 
 
 class ReviewQueueMixin:
+    def begin_manual_review_batch(self) -> None:
+        """Cache the review workbook so one approval page produces one atomic write."""
+        paths = self.settings.get("paths", {})
+        path = self.root_dir / paths.get("review_queue_excel", "data/review_queue.xlsx")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        migrate_pending_review_reasons(path)
+        try:
+            frame = (
+                canonicalize_review_queue_columns(pd.read_excel(path, dtype=str).fillna(""))
+                if path.exists()
+                else pd.DataFrame()
+            )
+        except Exception:
+            frame = pd.DataFrame()
+        self._review_queue_batch_path = path
+        self._review_queue_batch_frame = frame
+        self._review_queue_batch_dirty = False
+
+    def flush_manual_review_batch(self) -> int:
+        frame = getattr(self, "_review_queue_batch_frame", None)
+        path = getattr(self, "_review_queue_batch_path", None)
+        dirty = bool(getattr(self, "_review_queue_batch_dirty", False))
+        try:
+            if dirty and isinstance(frame, pd.DataFrame) and isinstance(path, Path):
+                self.write_excel_with_fallback(frame, path)
+                print(f"Flushed {len(frame)} total manual review row(s) in one batch write: {path}")
+                return len(frame)
+            return 0
+        finally:
+            self._review_queue_batch_frame = None
+            self._review_queue_batch_path = None
+            self._review_queue_batch_dirty = False
+
     def clear_manual_review_items_for_list(self, list_number: str) -> None:
         list_number = str(list_number or "").strip()
         if not list_number:
@@ -260,14 +313,19 @@ class ReviewQueueMixin:
         review_queue_path.parent.mkdir(parents=True, exist_ok=True)
         migrate_pending_review_reasons(review_queue_path)
 
-        try:
-            queue = (
-                canonicalize_review_queue_columns(pd.read_excel(review_queue_path, dtype=str).fillna(""))
-                if review_queue_path.exists()
-                else pd.DataFrame()
-            )
-        except Exception:
-            queue = pd.DataFrame()
+        batched_queue = getattr(self, "_review_queue_batch_frame", None)
+        batch_active = isinstance(batched_queue, pd.DataFrame)
+        if batch_active:
+            queue = batched_queue
+        else:
+            try:
+                queue = (
+                    canonicalize_review_queue_columns(pd.read_excel(review_queue_path, dtype=str).fillna(""))
+                    if review_queue_path.exists()
+                    else pd.DataFrame()
+                )
+            except Exception:
+                queue = pd.DataFrame()
 
         list_number = detail_info.get("\u5f53\u524d\u6e05\u5355\u53f7", "")
         chemical_name = reagent.get("\u8bd5\u5242\u540d\u79f0", "")
@@ -342,8 +400,13 @@ class ReviewQueueMixin:
                 evidence_fields,
             )
             if updated:
-                review_queue_path = self.write_excel_with_fallback(queue, review_queue_path)
-                print(f"Updated manual review queue reason: {review_queue_path}")
+                if batch_active:
+                    self._review_queue_batch_frame = queue
+                    self._review_queue_batch_dirty = True
+                    print(f"Queued manual review update: {list_number} / {sequence or chemical_name}")
+                else:
+                    review_queue_path = self.write_excel_with_fallback(queue, review_queue_path)
+                    print(f"Updated manual review queue reason: {review_queue_path}")
             else:
                 print(f"Manual review queue already contains search-failure item: {list_number} / {chemical_name}")
             return
@@ -367,8 +430,13 @@ class ReviewQueueMixin:
             **evidence_fields,
         }
         queue = pd.concat([queue, pd.DataFrame([row])], ignore_index=True)
-        review_queue_path = self.write_excel_with_fallback(queue, review_queue_path)
-        print(f"Added search-failure item to manual review queue: {review_queue_path}")
+        if batch_active:
+            self._review_queue_batch_frame = queue
+            self._review_queue_batch_dirty = True
+            print(f"Queued search-failure item for manual review: {list_number} / {sequence or chemical_name}")
+        else:
+            review_queue_path = self.write_excel_with_fallback(queue, review_queue_path)
+            print(f"Added search-failure item to manual review queue: {review_queue_path}")
 
     @staticmethod
     def _update_existing_manual_review_reason(
@@ -424,7 +492,12 @@ class ReviewQueueMixin:
         classification: dict[str, Any],
         reason: str = "",
     ) -> dict[str, Any]:
-        suggested_category = str(classification.get("final_category") or "").strip()
+        suggested_category = str(
+            classification.get("final_category")
+            or name_result.get("expected_category")
+            or name_result.get("final_category")
+            or ""
+        ).strip()
         if not suggested_category:
             suggested_category = ", ".join(str(item) for item in classification.get("matched_categories", []) or [])
         used_llm_rule = bool(search_result.get("used_llm_rule_fallback") or extracted.get("used_llm_rule_fallback"))
@@ -475,8 +548,18 @@ class ReviewQueueMixin:
             if search_result.get("llm_rule_matched_rule"):
                 property_parts.append(f"llm_rule_matched_rule={search_result.get('llm_rule_matched_rule')}")
 
+        review_kind = str(search_result.get("review_kind") or name_result.get("review_kind") or "").strip()
+        write_failure_reason = str(
+            search_result.get("write_failure_reason") or name_result.get("write_failure_reason") or ""
+        ).strip()
+        if not review_kind and _is_erp_write_verification_reason(reason):
+            review_kind = "erp_write_verification"
+            write_failure_reason = str(reason or "").strip()
+
         advice = "需人工确认物化特性后再处理，系统不会自动写入 ERP。"
-        if used_llm_advice:
+        if review_kind == "erp_write_verification":
+            advice = "物化特性判定已完成；请核验 ERP 页面是否已显示预期类别。"
+        elif used_llm_advice:
             advice = "LLM 仅提供第二意见，需人工主动选择物化特性，系统不会自动预选或写入 ERP。"
         elif used_llm_rule:
             advice = "LLM 规则辅助意见仅供参考，需人工确认后再处理。"
@@ -495,11 +578,16 @@ class ReviewQueueMixin:
             "suggested_category": suggested_category,
             "classification_confidence": classification.get("confidence", ""),
             "property_summary": " | ".join(property_parts),
-            "evidence_source_type": evidence_source_type,
+            "evidence_source_type": "erp_write_verification"
+            if review_kind == "erp_write_verification"
+            else evidence_source_type,
             "source_confidence": "" if used_llm else search_result.get("source_confidence", ""),
             "llm_confidence": llm_confidence,
             "evidence_quality": search_result.get("evidence_quality", ""),
             "source_url": search_result.get("url") or search_result.get("fallback_url") or "",
+            "source_evidence_items": json.dumps(search_result.get("evidence_items") or [], ensure_ascii=False),
+            "matched_rule_ids": ", ".join(classification.get("matched_rule_ids") or []),
+            "rule_version": classification.get("rule_version", ""),
             "flash_point": extracted.get("flash_point", ""),
             "boiling_point": extracted.get("boiling_point", ""),
             "toxicity": extracted.get("toxicity", ""),
@@ -542,6 +630,7 @@ class ReviewQueueMixin:
             "original_erp_cas": search_result.get("original_erp_cas") or name_result.get("original_erp_cas") or "",
             "corrected_cas": search_result.get("corrected_cas") or name_result.get("corrected_cas") or "",
             "cas_name_conflict": search_result.get("cas_name_conflict") or name_result.get("cas_name_conflict") or False,
+            "cas_correction_candidate": search_result.get("cas_correction_candidate") or name_result.get("cas_correction_candidate") or False,
             "cas_correction_applied": search_result.get("cas_correction_applied")
             or name_result.get("cas_correction_applied")
             or False,
@@ -552,6 +641,20 @@ class ReviewQueueMixin:
             or name_result.get("cas_correction_source")
             or "",
             "cas_correction_url": search_result.get("cas_correction_url") or name_result.get("cas_correction_url") or "",
+            "identity_decision_basis": search_result.get("identity_decision_basis") or name_result.get("identity_decision_basis") or "",
+            "identity_resolution": search_result.get("identity_resolution", ""),
+            "name_identity": search_result.get("name_identity", ""),
+            "cas_identity": search_result.get("cas_identity", ""),
+            "identity_status": search_result.get("identity_status", "") or search_result.get("identity_verification_status", ""),
+            "identity_candidates": search_result.get("identity_candidates", ""),
+            "llm_identity_opinion": search_result.get("llm_identity_opinion", ""),
+            "llm_name_identity_opinion": search_result.get("llm_name_identity_opinion", ""),
+            "llm_cas_identity_opinion": search_result.get("llm_cas_identity_opinion", ""),
+            "llm_identity_second_opinion": search_result.get("llm_identity_second_opinion", ""),
+            "llm_identity_trigger_status": search_result.get("llm_identity_trigger_status", ""),
+            "review_kind": review_kind or "classification_review",
+            "expected_category": suggested_category,
+            "write_failure_reason": write_failure_reason,
         }
         fields.update(
             review_display_summary(
@@ -593,8 +696,22 @@ def review_display_summary(
     source = str(search_result.get("source") or search_result.get("fallback_source") or "").strip()
     source_confidence = str(evidence_fields.get("source_confidence") or search_result.get("source_confidence") or "").strip()
     llm_confidence = str(evidence_fields.get("llm_confidence") or search_result.get("llm_confidence") or "").strip()
-    raw_reason = " ".join(str(value or "") for value in (reason, search_result.get("failure_reason"), evidence_fields.get("property_summary")))
-    detail_reason = " ".join(str(value or "") for value in (reason, search_result.get("failure_reason")))
+    preserved_reason = str(evidence_fields.get("reason_raw") or "").strip()
+    write_failure_reason = str(evidence_fields.get("write_failure_reason") or "").strip()
+    raw_reason = " ".join(
+        str(value or "")
+        for value in (
+            reason,
+            preserved_reason,
+            write_failure_reason,
+            search_result.get("failure_reason"),
+            evidence_fields.get("property_summary"),
+        )
+    )
+    detail_reason = " ".join(
+        str(value or "")
+        for value in (preserved_reason or reason, write_failure_reason, search_result.get("failure_reason"))
+    )
     text_for_salt_check = " ".join(
         str(value or "")
         for value in (
@@ -633,6 +750,8 @@ def review_display_summary(
     original_erp_cas = str(evidence_fields.get("original_erp_cas") or "").strip()
     corrected_cas = str(evidence_fields.get("corrected_cas") or "").strip()
     acid_suggestion = suggested in {"常规酸", "特殊酸"} or advisory_category in {"常规酸", "特殊酸"}
+    review_kind = str(evidence_fields.get("review_kind") or search_result.get("review_kind") or "").strip()
+    is_write_verification = review_kind == "erp_write_verification" or _is_erp_write_verification_reason(raw_reason)
 
     detail_parts = []
     if evidence_fields.get("property_summary"):
@@ -649,6 +768,20 @@ def review_display_summary(
     if detail_reason.strip():
         detail_parts.append(localize_review_detail_text(_compact_error(detail_reason, limit=320)))
     detail_summary = " | ".join(part for part in detail_parts if part)
+
+    if is_write_verification:
+        expected_category = str(evidence_fields.get("expected_category") or suggested or "").strip()
+        return {
+            "review_kind": "erp_write_verification",
+            "display_suggestion": f"已判定：{expected_category}" if expected_category else "物化特性判定已完成",
+            "display_reason": (
+                "物化特性判定已完成，但 ERP 接口结果与网页显示不一致；"
+                "请核验网页中的实际写入状态。"
+            ),
+            "evidence_status": "写入待核验",
+            "detail_summary": detail_summary,
+            "allow_suggestion_preselect": bool(expected_category),
+        }
 
     if cas_correction_applied and corrected_cas:
         return {
@@ -841,6 +974,25 @@ def _llm_failed(text: str) -> bool:
     )
 
 
+def _is_erp_write_verification_reason(text: Any) -> bool:
+    value = " ".join(str(text or "").split()).lower()
+    if not value:
+        return False
+    return any(
+        token in value
+        for token in (
+            "网页写入失败",
+            "erp api verified, but webpage row shows",
+            "row still shows",
+            "saved=false, row shows",
+            "could not select",
+            "could not write",
+            "保存后页面仍",
+            "页面显示值与预期不一致",
+        )
+    )
+
+
 def _llm_failure_label(text: str) -> str:
     lowered = str(text or "").lower()
     if "402" in lowered or "balance is insufficient" in lowered or "insufficient" in lowered:
@@ -900,8 +1052,27 @@ def localize_review_detail_text(text: Any) -> str:
         ("at room temperature", "在室温下"),
     ]
 
+    def normalize_temperatures(value: str) -> str:
+        def replace(match: re.Match[str]) -> str:
+            prefix = match.group(1) or ""
+            numeric = float(match.group(2))
+            unit = re.sub(r"\s+", "", match.group(3)).upper()
+            if unit == "K":
+                celsius = numeric - 273.15
+            elif unit in {"F", "°F"}:
+                celsius = (numeric - 32) * 5 / 9
+            elif unit in {"C", "°C"}:
+                celsius = numeric
+            else:
+                return match.group(0)
+            rounded = round(celsius, 1)
+            number = str(int(rounded)) if rounded.is_integer() else f"{rounded:.1f}".rstrip("0").rstrip(".")
+            return f"{prefix}{number}℃"
+
+        return re.sub(r"([<>≤≥~约]?\s*)([-+]?\d+(?:\.\d+)?)\s*(°\s*[CF]|[CFK])\b", replace, value, flags=re.I)
+
     def localize_value(value: str) -> str:
-        localized = value.strip()
+        localized = normalize_temperatures(value.strip())
         for source, target in value_replacements:
             localized = localized.replace(source, target)
         return localized
@@ -1027,7 +1198,7 @@ def migrate_pending_review_reasons(path: Path) -> bool:
     backup = path.with_name(f"{path.stem}.before_chinese_remarks.{timestamp}{path.suffix}")
     try:
         shutil.copy2(path, backup)
-        frame.to_excel(path, index=False)
+        write_excel_atomic(frame, path)
     except Exception:
         return False
     try:

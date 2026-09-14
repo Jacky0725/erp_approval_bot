@@ -172,9 +172,22 @@ class ApiDiscoveryRecorder:
     events: list[dict[str, Any]] = field(default_factory=list)
     _save_window_start: int | None = field(default=None, init=False, repr=False)
     _save_context: dict[str, Any] = field(default_factory=dict, init=False, repr=False)
+    _save_window_id: int = field(default=0, init=False, repr=False)
+    _request_contexts: dict[int, dict[str, Any]] = field(default_factory=dict, init=False, repr=False)
 
     def attach(self, page: Page) -> None:
+        page.on("request", self._record_request_context)
         page.on("response", self._record_response)
+
+    def _record_request_context(self, request: Request) -> None:
+        if self._save_window_start is None:
+            return
+        self._request_contexts[id(request)] = {
+            "save_context": sanitize_value(self._save_context),
+            "in_save_window": True,
+            "save_window_id": self._save_window_id,
+            "web_save_verified": None,
+        }
 
     def _record_response(self, response: Response) -> None:
         if len(self.events) >= self.max_events:
@@ -205,12 +218,17 @@ class ApiDiscoveryRecorder:
             "candidate_fields": candidate_api_fields(response_payload),
             "action_hint": classify_api_action(request.method.upper(), parsed.path, request_payload, response_payload),
         }
-        if self._save_window_start is not None:
+        request_context = self._request_contexts.pop(id(request), None)
+        if request_context is not None:
+            event.update(request_context)
+        elif self._save_window_start is not None:
             event["save_context"] = sanitize_value(self._save_context)
             event["in_save_window"] = True
+            event["save_window_id"] = self._save_window_id
         self.events.append(event)
 
     def begin_save_window(self, identity: dict[str, Any], expected_property: str) -> None:
+        self._save_window_id += 1
         self._save_window_start = len(self.events)
         self._save_context = {
             "sequence": identity.get("序号") or identity.get("sequence"),
@@ -226,6 +244,9 @@ class ApiDiscoveryRecorder:
             return
         for event in self.events[self._save_window_start:]:
             event["web_save_verified"] = bool(web_save_verified)
+        for context in self._request_contexts.values():
+            if context.get("save_window_id") == self._save_window_id:
+                context["web_save_verified"] = bool(web_save_verified)
         self._save_window_start = None
         self._save_context = {}
 
@@ -363,6 +384,21 @@ class ApiDiscoveryAnalyzer:
             "save_static_payload": self._common_static_payload(samples, set(save_mapping.values())),
             "success_indicators": success_indicators,
         }
+        odoo_samples = [self._odoo_line_update(sample) for sample in samples]
+        if odoo_samples and all(odoo_samples):
+            config.update({
+                "protocol": "odoo_jsonrpc",
+                "record_id_fields": ["id"],
+                "property_fields": ["phchproperty_id", "phchproperty_name"],
+                "rpc": {
+                    "endpoint": save_path,
+                    "models": {
+                        "list_model": "reagent.list",
+                        "line_model": "reagent.list.line",
+                        "property_model": "reagent.phchproperty",
+                    },
+                },
+            })
         if not origin.startswith(("http://", "https://")):
             missing.append("base_url")
         if config["reagent_detail_method"] not in {"GET", "POST"}:
@@ -381,7 +417,52 @@ class ApiDiscoveryAnalyzer:
         if not event.get("in_save_window") or not event.get("web_save_verified"):
             return False
         expected = str((event.get("save_context") or {}).get("expected_property") or "").strip()
-        return bool(expected and self._find_matching_fields(event.get("request_payload"), expected))
+        if expected and self._find_matching_fields(event.get("request_payload"), expected):
+            return True
+        return bool(expected and self._odoo_line_update(event))
+
+    @staticmethod
+    def _odoo_line_update(event: dict[str, Any]) -> dict[str, Any] | None:
+        """Return a correlated Odoo one2many line update from a verified save window."""
+        payload = event.get("request_payload") or {}
+        params = payload.get("params") if isinstance(payload, dict) else None
+        if not isinstance(params, dict) or params.get("method") != "write":
+            return None
+        args = params.get("args")
+        if not isinstance(args, list) or len(args) < 2 or not isinstance(args[1], dict):
+            return None
+        commands = args[1].get("reagent_list_line_ids")
+        if not isinstance(commands, list):
+            return None
+        context = event.get("save_context") or {}
+        expected_record_id = str(context.get("record_id") or "").strip()
+        expected_sequence = str(context.get("sequence") or "").strip()
+        expected_name = str(context.get("name") or "").strip()
+        expected_cas = str(context.get("cas") or "").strip()
+        for index, command in enumerate(commands):
+            if not isinstance(command, list) or len(command) < 3 or command[0] != 1:
+                continue
+            line_id, values = command[1], command[2]
+            if not isinstance(values, dict) or values.get("phchproperty_id") in (None, "", False):
+                continue
+            if expected_record_id and str(line_id) != expected_record_id:
+                continue
+            comparisons = (
+                (expected_sequence, values.get("sequence")),
+                (expected_name, values.get("name")),
+                (expected_cas, values.get("cas_code")),
+            )
+            if any(expected and actual not in (None, "") and str(actual).strip() != expected for expected, actual in comparisons):
+                continue
+            base = f"params.args.1.reagent_list_line_ids.{index}"
+            return {
+                "record_id": str(line_id),
+                "record_id_field": f"{base}.1",
+                "property_id": values.get("phchproperty_id"),
+                "property_field": f"{base}.2.phchproperty_id",
+                "line_values": values,
+            }
+        return None
 
     @classmethod
     def _flatten(cls, value: Any, prefix: str = "") -> list[tuple[str, Any]]:
@@ -403,6 +484,13 @@ class ApiDiscoveryAnalyzer:
         return [path for path, value in cls._flatten(payload) if expected_text and str(value or "").strip() == expected_text]
 
     def _consistent_matching_field(self, samples: list[dict[str, Any]], context_key: str) -> str:
+        if context_key == "expected_property":
+            odoo_fields = [
+                str((self._odoo_line_update(sample) or {}).get("property_field") or "")
+                for sample in samples
+            ]
+            if odoo_fields and all(odoo_fields) and len(set(odoo_fields)) == 1:
+                return odoo_fields[0]
         fields: list[str] = []
         for sample in samples:
             expected = (sample.get("save_context") or {}).get(context_key)
@@ -413,6 +501,12 @@ class ApiDiscoveryAnalyzer:
         return fields[0] if fields and len(set(fields)) == 1 else ""
 
     def _record_id_field(self, samples: list[dict[str, Any]]) -> str:
+        odoo_fields = [
+            str((self._odoo_line_update(sample) or {}).get("record_id_field") or "")
+            for sample in samples
+        ]
+        if odoo_fields and all(odoo_fields) and len(set(odoo_fields)) == 1:
+            return odoo_fields[0]
         context_match = self._consistent_matching_field(samples, "record_id")
         if context_match:
             return context_match
@@ -533,7 +627,7 @@ class ErpApiConfigurator:
             settings = self._load_settings()
             erp_api = settings.setdefault("erp_api", {})
             discovery = erp_api.setdefault("discovery", {})
-            if str(discovery.get("status") or "") in {"pending_canary", "active"}:
+            if str(discovery.get("status") or "") in {"pending_canary", "verified", "active"}:
                 return False
             self._backup_settings(discovery)
             discovery["previous_config"] = copy.deepcopy(
@@ -556,7 +650,7 @@ class ErpApiConfigurator:
         return True
 
     def activate(self) -> None:
-        self._set_activation("active", True, "")
+        self._set_activation("verified", True, "")
 
     def reject(self, reason: str) -> None:
         with self._lock:

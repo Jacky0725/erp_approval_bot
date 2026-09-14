@@ -11,6 +11,7 @@ import subprocess
 import sys
 import threading
 import traceback
+import hashlib
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -53,6 +54,9 @@ from review_queue import (
 )
 from runtime_paths import ensure_runtime_layout, runtime_root, source_root
 from scheduler import scheduler_config
+from llm_extractor import LlmExtractor
+from rule_engine import RuleEngine
+from excel_exports import write_excel_atomic
 
 
 ensure_runtime_layout()
@@ -63,6 +67,7 @@ ENV_PATH = ROOT_DIR / ".env"
 LOG_DIR = ROOT_DIR / "data" / "logs"
 RUN_LOG_DIR = LOG_DIR / "runs"
 REVIEW_QUEUE_PATH = ROOT_DIR / "data" / "review_queue.xlsx"
+REVIEW_QUEUE_LOCK = threading.RLock()
 WEB_RUN_STATE_PATH = LOG_DIR / "web_run_state.yaml"
 TODO_TASKS_PATH = LOG_DIR / "todo_tasks.xlsx"
 TODO_TASKS_JSON_PATH = LOG_DIR / "todo_tasks.json"
@@ -275,7 +280,7 @@ class AutomationJobManager:
             self._stop_requested = False
             self._last_action = action
             self._last_options = dict(options)
-            self._run_log_path = str(new_run_log_path(action))
+            self._run_log_path = str(new_run_log_path(action, self.root_dir))
             self._persist_state()
             self._thread = threading.Thread(
                 target=self._run,
@@ -367,16 +372,17 @@ class AutomationJobManager:
             }
 
     def _run(self, action: str, options: dict[str, str]) -> None:
-        LOG_DIR.mkdir(parents=True, exist_ok=True)
-        aggregate_log_path = LOG_DIR / "web_run_stdout.txt"
-        run_log_path = Path(self._run_log_path) if self._run_log_path else new_run_log_path(action)
+        log_dir = self.root_dir / "data" / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        aggregate_log_path = log_dir / "web_run_stdout.txt"
+        run_log_path = Path(self._run_log_path) if self._run_log_path else new_run_log_path(action, self.root_dir)
         self._run_log_path = str(run_log_path)
         writer = LineBufferWriter(self.lines, [aggregate_log_path, run_log_path])
         memory_signature_before = memory_file_signature(self.root_dir) if action == "suggestions" else None
 
         try:
             if action == "todo_export":
-                clear_todo_task_cache()
+                clear_todo_task_cache(self.root_dir)
             writer.write(f"{datetime.now().isoformat(timespec='seconds')} START {action}\n")
             return_code = self._run_worker_process(action, options, writer)
             if self._stop_requested:
@@ -442,7 +448,8 @@ class AutomationJobManager:
                 self._record_notification_failure(f"Automation completion callback failed: {exc}")
 
     def _persist_state(self) -> None:
-        WEB_RUN_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        state_path = self.root_dir / "data" / "logs" / "web_run_state.yaml"
+        state_path.parent.mkdir(parents=True, exist_ok=True)
         log_tail = [repair_display_text(line) for line in self.lines[-160:]]
         payload = {
             "running": self.running,
@@ -457,12 +464,13 @@ class AutomationJobManager:
             "log_tail": log_tail,
         }
         atomic_write_text(
-            WEB_RUN_STATE_PATH,
+            state_path,
             yaml.safe_dump(payload, allow_unicode=True, sort_keys=False),
         )
 
     def _status_from_persisted_state(self, *, light: bool = False) -> dict[str, Any]:
-        if not WEB_RUN_STATE_PATH.exists():
+        state_path = self.root_dir / "data" / "logs" / "web_run_state.yaml"
+        if not state_path.exists():
             return {
                 "running": False,
                 "action": "",
@@ -479,7 +487,7 @@ class AutomationJobManager:
                 "workflow": workflow_summary([], running=False, success=None, error=""),
             }
         try:
-            with WEB_RUN_STATE_PATH.open("r", encoding="utf-8") as file:
+            with state_path.open("r", encoding="utf-8") as file:
                 payload = yaml.safe_load(file) or {}
         except Exception:
             payload = {}
@@ -733,7 +741,8 @@ class AutomationJobManager:
 
     def _record_notification_failure(self, message: str) -> None:
         self.lines.append(message)
-        for path in [LOG_DIR / "web_run_stdout.txt", Path(self._run_log_path) if self._run_log_path else None]:
+        aggregate_log_path = self.root_dir / "data" / "logs" / "web_run_stdout.txt"
+        for path in [aggregate_log_path, Path(self._run_log_path) if self._run_log_path else None]:
             if path is None:
                 continue
             try:
@@ -745,10 +754,10 @@ class AutomationJobManager:
         self._persist_state()
 
 
-def new_run_log_path(action: str) -> Path:
+def new_run_log_path(action: str, root_dir: Path = ROOT_DIR) -> Path:
     safe_action = "".join(char if char.isalnum() or char in {"-", "_"} else "_" for char in str(action or "run"))
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    return RUN_LOG_DIR / f"{stamp}_{safe_action}.log"
+    return root_dir / "data" / "logs" / "runs" / f"{stamp}_{safe_action}.log"
 
 
 def current_run_lines(run_log_path: str | Path | None, *, fallback: list[str] | None = None) -> list[str]:
@@ -964,7 +973,7 @@ def light_run_summary(
     }
 
 
-def chemical_source_summary(lines: list[str]) -> dict[str, int]:
+def chemical_source_summary(lines: list[str]) -> dict[str, Any]:
     summary = {
         "chemsrc_success_count": 0,
         "chemsrc_failure_count": 0,
@@ -987,6 +996,10 @@ def chemical_source_summary(lines: list[str]) -> dict[str, int]:
         "duplicate_search_reuse_count": 0,
         "duplicate_llm_reuse_count": 0,
         "llm_skip_count": 0,
+        "chemical_search_seconds": 0.0,
+        "manual_review_queued_count": 0,
+        "manual_review_updated_count": 0,
+        "manual_review_batch_flush_count": 0,
         "api_read_detail_count": 0,
         "api_record_resolve_count": 0,
         "api_record_resolve_failure_count": 0,
@@ -1044,6 +1057,16 @@ def chemical_source_summary(lines: list[str]) -> dict[str, int]:
             summary["duplicate_llm_reuse_count"] += 1
         if "[parallel llm] skip" in lower:
             summary["llm_skip_count"] += 1
+        if "[flow] end" in lower and "chemical_search" in lower:
+            seconds = extract_stage_seconds(line)
+            if seconds is not None:
+                summary["chemical_search_seconds"] += seconds
+        if "queued search-failure item for manual review" in lower:
+            summary["manual_review_queued_count"] += 1
+        if "queued manual review update" in lower:
+            summary["manual_review_updated_count"] += 1
+        if "flushed " in lower and "manual review row" in lower:
+            summary["manual_review_batch_flush_count"] += 1
         if "[api_read_detail]" in lower:
             summary["api_read_detail_count"] += 1
         if "[api_record_resolve]" in lower and " failed=" not in lower:
@@ -1058,6 +1081,7 @@ def chemical_source_summary(lines: list[str]) -> dict[str, int]:
             summary["api_verify_failure_count"] += 1
         if "[api_fallback_web_write]" in lower:
             summary["api_fallback_web_write_count"] += 1
+    summary["chemical_search_seconds"] = round(float(summary["chemical_search_seconds"]), 1)
     return summary
 
 
@@ -1700,6 +1724,8 @@ def build_review_queue_payload(path: Path) -> dict[str, Any]:
     for _, row in pending_frame.iterrows():
         reason = first_existing(row, ["reason", "原因", "复核原因", "manual_review_reason"])
         display_summary = review_display_summary_from_row(row, reason=reason)
+        review_kind = str(display_summary.get("review_kind") or first_existing(row, ["review_kind"])).strip()
+        write_verification = review_kind == "erp_write_verification"
         suggested_category = first_existing(row, ["suggested_category"])
         mapped_suggested_category = to_erp_property(suggested_category, settings) or suggested_category
         preview.append(
@@ -1714,8 +1740,8 @@ def build_review_queue_payload(path: Path) -> dict[str, Any]:
                 "cleaned_name": first_existing(row, ["cleaned_name", "清洗后名称"]),
                 "specification": first_existing(row, ["specification", "规格"]),
                 "unit": first_existing(row, ["unit", "规格单位"]),
-                "reason": natural_reason(reason),
-                "reason_full": reason,
+                "reason": display_summary["display_reason"] if write_verification else natural_reason(reason),
+                "reason_full": first_existing(row, ["reason_raw", "write_failure_reason"]) or reason,
                 "status": first_existing(row, ["status", "状态", "处理状态"]) or "pending",
                 "suggested_category": mapped_suggested_category,
                 "classification_confidence": first_existing(row, ["classification_confidence"]),
@@ -1725,6 +1751,9 @@ def build_review_queue_payload(path: Path) -> dict[str, Any]:
                 "llm_confidence": first_existing(row, ["llm_confidence"]),
                 "evidence_quality": first_existing(row, ["evidence_quality"]),
                 "source_url": first_existing(row, ["source_url"]),
+                "source_evidence_items": first_existing(row, ["source_evidence_items"]),
+                "matched_rule_ids": first_existing(row, ["matched_rule_ids"]),
+                "rule_version": first_existing(row, ["rule_version"]),
                 "flash_point": first_existing(row, ["flash_point"]),
                 "boiling_point": first_existing(row, ["boiling_point"]),
                 "toxicity": first_existing(row, ["toxicity"]),
@@ -1758,16 +1787,32 @@ def build_review_queue_payload(path: Path) -> dict[str, Any]:
                 "original_erp_cas": first_existing(row, ["original_erp_cas"]),
                 "corrected_cas": first_existing(row, ["corrected_cas"]),
                 "cas_name_conflict": first_existing(row, ["cas_name_conflict"]),
+                "cas_correction_candidate": first_existing(row, ["cas_correction_candidate"]),
                 "cas_correction_applied": first_existing(row, ["cas_correction_applied"]),
                 "cas_correction_reason": first_existing(row, ["cas_correction_reason"]),
                 "cas_correction_source": first_existing(row, ["cas_correction_source"]),
                 "cas_correction_url": first_existing(row, ["cas_correction_url"]),
-                "display_suggestion": first_existing(row, ["display_suggestion"]) or display_summary["display_suggestion"],
-                "display_reason": first_existing(row, ["display_reason"]) or display_summary["display_reason"],
-                "evidence_status": first_existing(row, ["evidence_status"]) or display_summary["evidence_status"],
-                "detail_summary": first_existing(row, ["detail_summary"]) or display_summary["detail_summary"],
-                "allow_suggestion_preselect": first_existing(row, ["allow_suggestion_preselect"])
-                or str(display_summary["allow_suggestion_preselect"]),
+                "identity_decision_basis": first_existing(row, ["identity_decision_basis"]),
+                "identity_resolution": first_existing(row, ["identity_resolution"]),
+                "name_identity": first_existing(row, ["name_identity"]),
+                "cas_identity": first_existing(row, ["cas_identity"]),
+                "identity_status": first_existing(row, ["identity_status"]),
+                "identity_candidates": first_existing(row, ["identity_candidates"]),
+                "llm_identity_opinion": first_existing(row, ["llm_identity_opinion"]),
+                "llm_name_identity_opinion": first_existing(row, ["llm_name_identity_opinion"]),
+                "llm_cas_identity_opinion": first_existing(row, ["llm_cas_identity_opinion"]),
+                "llm_identity_second_opinion": first_existing(row, ["llm_identity_second_opinion"]),
+                "llm_identity_trigger_status": first_existing(row, ["llm_identity_trigger_status"]),
+                "review_kind": review_kind or "classification_review",
+                "expected_category": first_existing(row, ["expected_category"]) or mapped_suggested_category,
+                "write_failure_reason": first_existing(row, ["write_failure_reason", "reason_raw"]),
+                "display_suggestion": display_summary["display_suggestion"] if write_verification else first_existing(row, ["display_suggestion"]) or display_summary["display_suggestion"],
+                "display_reason": display_summary["display_reason"] if write_verification else first_existing(row, ["display_reason"]) or display_summary["display_reason"],
+                "evidence_status": display_summary["evidence_status"] if write_verification else first_existing(row, ["evidence_status"]) or display_summary["evidence_status"],
+                "detail_summary": display_summary["detail_summary"] if write_verification else first_existing(row, ["detail_summary"]) or display_summary["detail_summary"],
+                "allow_suggestion_preselect": str(display_summary["allow_suggestion_preselect"])
+                if write_verification
+                else first_existing(row, ["allow_suggestion_preselect"]) or str(display_summary["allow_suggestion_preselect"]),
             }
         )
 
@@ -1837,15 +1882,27 @@ def confirm_review_item(payload: dict[str, Any], root_dir: Path = ROOT_DIR) -> d
 
     row = frame.loc[matched_index]
     memory = ReagentMemory.from_settings(settings, root_dir)
+    conflict_candidate = str(row.get("cas_name_conflict") or "").strip().lower() in {"1", "true", "yes", "y"}
+    original_erp_cas = best_review_text(row, ["original_erp_cas", "原ERP CAS号"], payload, "")
+    corrected_cas = best_review_text(row, ["corrected_cas", "修正CAS号"], payload, "")
+    memory_cas = corrected_cas if conflict_candidate and corrected_cas else best_review_text(
+        row, ["cas", "CAS号"], payload, "cas"
+    )
+    memory_reason = repair_display_text(payload.get("reason") or "人工复核确认后加入高可信试剂记忆库。")
+    if conflict_candidate and corrected_cas:
+        memory_reason = (
+            f"{memory_reason}\n名称身份优先修正已由人工确认：原 ERP CAS {original_erp_cas or '-'} "
+            f"→ {corrected_cas}；仅更新试剂记忆映射，不自动修改 ERP。"
+        ).strip()
     memory_added = memory.add_record(
         raw_name=best_review_text(row, ["试剂名称", "chemical_name", "reagent_name"], payload, "reagent_name"),
         cleaned_name=best_review_text(row, ["cleaned_name", "清洗后名称"], payload, "cleaned_name"),
         standard_name=best_review_text(row, ["standard_name", "标准化名称"], payload, "standard_name"),
-        cas=best_review_text(row, ["cas", "CAS号"], payload, "cas"),
+        cas=memory_cas,
         final_category=final_category,
         confidence=0.0 if non_writable_decision else 1.0,
-        reason=repair_display_text(payload.get("reason") or "人工复核确认后加入高可信试剂记忆库。"),
-        source="manual_review_web_ui",
+        reason=memory_reason,
+        source="manual_review_web_ui_name_priority_cas_correction" if conflict_candidate else "manual_review_web_ui",
         specification=best_review_text(row, ["specification", "规格"], payload, "specification"),
         unit=best_review_text(row, ["unit", "规格单位"], payload, "unit"),
         need_manual_review=False,
@@ -1860,6 +1917,7 @@ def confirm_review_item(payload: dict[str, Any], root_dir: Path = ROOT_DIR) -> d
         "confirmed_at": now,
         "confirmed_by": "web_ui",
         "memory_added": str(bool(memory_added)),
+            "cas_correction_applied": "true" if conflict_candidate and bool(memory_added) else str(row.get("cas_correction_applied") or ""),
     }.items():
         if column not in frame.columns:
             frame[column] = ""
@@ -1920,6 +1978,97 @@ def delete_review_item(payload: dict[str, Any], root_dir: Path = ROOT_DIR) -> di
     path.parent.mkdir(parents=True, exist_ok=True)
     frame.to_excel(path, index=False)
     return {"deleted": True, "message": "已删除该人工复核项。"}
+
+
+def generate_review_llm_advice(payload: dict[str, Any], root_dir: Path = ROOT_DIR) -> dict[str, Any]:
+    """Generate and cache one advisory-only LLM opinion for a pending review row."""
+    path = root_dir / "data" / "review_queue.xlsx"
+    with REVIEW_QUEUE_LOCK:
+        if not path.exists():
+            return {"generated": False, "message": "review_queue.xlsx does not exist."}
+        frame = canonicalize_review_queue_columns(pd.read_excel(path, dtype=str).fillna(""))
+        if frame.empty:
+            return {"generated": False, "message": "review_queue.xlsx is empty."}
+        frame["_review_key"] = frame.apply(review_queue_row_key, axis=1)
+        review_key = str(payload.get("review_key") or "").strip()
+        matched_index = None
+        if review_key:
+            matches = frame.index[frame["_review_key"].astype(str) == review_key].tolist()
+            matched_index = matches[-1] if matches else None
+        if matched_index is None:
+            matched_index = match_review_item_by_fields(frame, payload)
+        if matched_index is None:
+            return {"generated": False, "message": "没有找到对应的人工复核记录。"}
+        row = frame.loc[matched_index]
+        if str(row.get("used_llm_manual_review_advice") or "").strip().lower() in {"true", "1", "yes"}:
+            return {"generated": True, "cached": True, "message": "已返回缓存的 LLM 第二意见。"}
+
+        settings_path = root_dir / "config" / "settings.yaml"
+        settings = load_settings() if root_dir == ROOT_DIR else (yaml.safe_load(settings_path.read_text(encoding="utf-8")) or {})
+        rule_engine = RuleEngine.from_settings(settings, root_dir)
+        rule_path = root_dir / ((settings.get("paths", {}) or {}).get("structured_rules_excel", "config/rules_structured.xlsx"))
+        rules_fingerprint = hashlib.sha256(rule_path.read_bytes()).hexdigest()[:16] if rule_path.exists() else ""
+        identity_status = first_existing_value(row, ["identity_status"]).strip().lower()
+        reagent_info = {
+            "raw_name": first_existing_value(row, ["试剂名称", "chemical_name", "reagent_name"]),
+            "standard_name": first_existing_value(row, ["standard_name", "标准化名称"]),
+            "cleaned_name": first_existing_value(row, ["cleaned_name", "清洗后名称"]),
+            "english_name": first_existing_value(row, ["english_name", "英文名称"]),
+            "cas": first_existing_value(row, ["cas", "CAS号"]),
+            "specification": first_existing_value(row, ["specification", "规格"]),
+            "name_identity": first_existing_value(row, ["name_identity"]),
+            "cas_identity": first_existing_value(row, ["cas_identity"]),
+            "identity_status": identity_status,
+            "evidence": first_existing_value(row, ["property_summary", "detail_summary"]),
+            "web_source": first_existing_value(row, ["evidence_source_type"]),
+            "source_url": first_existing_value(row, ["source_url"]),
+            "current_rule_category": first_existing_value(row, ["suggested_category"]),
+            "manual_review_reason": first_existing_value(row, ["reason", "原因", "复核原因"]),
+            "rule_summary": [
+                {"rule_id": rule.rule_id, "category": rule.category, "condition": rule.condition}
+                for rule in rule_engine.rules if rule.rule_id
+            ],
+            "allowed_categories": list(erp_property_options(settings)),
+            "rules_fingerprint": rules_fingerprint,
+            "allow_model_knowledge": True,
+        }
+        extractor = LlmExtractor(settings=settings)
+        if identity_status in {"cas_missing", "conflict", "ambiguous", "unresolved"}:
+            advice = extractor.generate_identity_second_opinion(reagent_info)
+        else:
+            advice = extractor.generate_manual_review_advice(reagent_info)
+        updates = {
+            "used_llm_manual_review_advice": bool(advice.get("used_llm")),
+            "llm_advisory_category": advice.get("candidate_category", ""),
+            "llm_advisory_summary_cn": advice.get("physicochemical_summary_cn", ""),
+            "llm_advisory_reason_cn": advice.get("reason_cn", ""),
+            "llm_advisory_rule_cn": advice.get("matched_rule_summary_cn", ""),
+            "llm_advisory_uncertainties_cn": "；".join(advice.get("uncertainties_cn") or []),
+            "llm_advisory_confidence": advice.get("advisory_confidence", 0.0),
+            "llm_advisory_evidence_basis": advice.get("evidence_basis", "证据不足"),
+            "llm_advisory_only": True,
+            "llm_model": advice.get("model", ""),
+            "llm_provider": advice.get("provider", ""),
+            "llm_generated_at": advice.get("generated_at", ""),
+            "llm_rules_fingerprint": advice.get("rules_fingerprint", rules_fingerprint),
+            "llm_identity_opinion": advice.get("identity_opinion", ""),
+            "llm_name_identity_opinion": advice.get("name_identity_opinion", ""),
+            "llm_cas_identity_opinion": advice.get("cas_identity_opinion", ""),
+            "llm_identity_trigger_status": identity_status,
+            "evidence_source_type": "llm_manual_review_advice" if advice.get("used_llm") else first_existing_value(row, ["evidence_source_type"]),
+        }
+        for column, value in updates.items():
+            if column not in frame.columns:
+                frame[column] = ""
+            frame.at[matched_index, column] = "" if value is None else str(value)
+        frame = frame.drop(columns=["_review_key"], errors="ignore")
+        write_excel_atomic(frame, path)
+        return {
+            "generated": bool(advice.get("used_llm")),
+            "cached": False,
+            "message": advice.get("reason_cn") or "LLM 第二意见已生成并保存。",
+            "advice": advice,
+        }
 
 
 def match_review_item_by_fields(frame: pd.DataFrame, payload: dict[str, Any]) -> int | None:
@@ -2305,6 +2454,16 @@ def runtime_config_snapshot() -> dict[str, Any]:
         or llm.get("model", "")
         or provider_default_model(provider.id)
     )
+    requested_write_backend = normalize_erp_write_backend(
+        os.getenv("ERP_WRITE_BACKEND", str(approval.get("erp_write_backend", "web_ui")))
+    )
+    discovery_status = str(erp_api_discovery.get("status") or "disabled")
+    api_write_verified = bool(
+        erp_api.get("enabled_for_write") is True and discovery_status == "verified"
+    )
+    effective_write_backend = requested_write_backend
+    if requested_write_backend == "api_write_with_web_verify" and not api_write_verified:
+        effective_write_backend = "api_read_web_write"
     return {
         "app_version": app_version(),
         "app_frozen": bool(getattr(sys, "frozen", False)),
@@ -2339,16 +2498,12 @@ def runtime_config_snapshot() -> dict[str, Any]:
             "APPROVAL_WRITE_BATCH_SIZE",
             str(approval.get("write_batch_size", 3)),
         ),
-        "erp_write_backend": normalize_erp_write_backend(
-            os.getenv(
-                "ERP_WRITE_BACKEND",
-                str(approval.get("erp_write_backend", "web_ui")),
-            )
-        ),
+        "erp_write_backend": effective_write_backend,
+        "erp_write_backend_requested": requested_write_backend,
         "erp_write_backend_options": ERP_WRITE_BACKEND_LABELS,
-        "erp_api_discovery_status": str(erp_api_discovery.get("status") or "disabled"),
+        "erp_api_discovery_status": discovery_status,
         "erp_api_discovery_confidence": str(erp_api_discovery.get("confidence") or ""),
-        "erp_api_write_enabled": "true" if erp_api.get("enabled_for_write") is True else "false",
+        "erp_api_write_enabled": "true" if api_write_verified else "false",
         "approval_parallel_workers": os.getenv(
             "APPROVAL_PARALLEL_WORKERS",
             str(approval.get("parallel_workers", 3)),

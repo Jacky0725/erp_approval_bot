@@ -195,15 +195,102 @@ class ReagentPageMixin:
                 return False, True
 
             before_page = self.current_todo_page_number(page)
-            next_button.click()
-            self.wait_for_table_ready(page)
-            wait_until_table_stable(page, lambda: self.current_todo_page_number(page), before_page)
+            before_signature = self.todo_table_signature(page)
+            for attempt in range(2):
+                if attempt == 0:
+                    next_button.click(timeout=3000)
+                else:
+                    self.click_next_todo_page_by_dom(page)
+                if self.wait_for_todo_page_change(page, before_page, before_signature):
+                    return True, True
+                page.wait_for_timeout(300)
             after_page = self.current_todo_page_number(page)
-            moved = after_page != before_page or not after_page
+            after_signature = self.todo_table_signature(page)
+            moved = bool(after_page and before_page and after_page != before_page) or (
+                bool(after_signature) and bool(before_signature) and after_signature != before_signature
+            )
             return moved, moved
         except Error as error:
             print(f"Could not click next todo page: {error}")
             return False, False
+
+    def wait_for_todo_page_change(self, page: Page, before_page: str, before_signature: str) -> bool:
+        for _ in range(12):
+            try:
+                self.wait_for_table_ready(page)
+            except Error:
+                pass
+            page.wait_for_timeout(100)
+            after_page = self.current_todo_page_number(page)
+            if before_page and after_page and after_page != before_page:
+                return True
+            after_signature = self.todo_table_signature(page)
+            if before_signature and after_signature and after_signature != before_signature:
+                return True
+        return False
+
+    @staticmethod
+    def todo_table_signature(page: Page) -> str:
+        try:
+            return str(
+                page.evaluate(
+                    """
+                    () => {
+                      const visible = (node) => {
+                        const rect = node.getBoundingClientRect();
+                        const style = window.getComputedStyle(node);
+                        return rect.width > 0 && rect.height > 0
+                          && style.visibility !== 'hidden'
+                          && style.display !== 'none';
+                      };
+                      const wrappers = Array.from(document.querySelectorAll('.ant-table-wrapper')).filter(visible);
+                      const wrapper = wrappers[0];
+                      const body = wrapper ? wrapper.querySelector('.ant-table-tbody') : document.querySelector('.ant-table-tbody');
+                      if (!body) return '';
+                      return Array.from(body.querySelectorAll('tr.ant-table-row'))
+                        .filter(visible)
+                        .slice(0, 5)
+                        .map((row) => (row.innerText || row.textContent || '').replace(/\\s+/g, ' ').trim())
+                        .join('|')
+                        .slice(0, 800);
+                    }
+                    """
+                )
+                or ""
+            )
+        except Error:
+            return ""
+
+    @staticmethod
+    def click_next_todo_page_by_dom(page: Page) -> bool:
+        try:
+            return bool(
+                page.evaluate(
+                    """
+                    () => {
+                      const visible = (node) => {
+                        const rect = node.getBoundingClientRect();
+                        const style = window.getComputedStyle(node);
+                        return rect.width > 0 && rect.height > 0
+                          && style.visibility !== 'hidden'
+                          && style.display !== 'none';
+                      };
+                      const wrappers = Array.from(document.querySelectorAll('.ant-table-wrapper')).filter(visible);
+                      const button = wrappers[0]?.querySelector('.ant-pagination-next');
+                      if (!button || !visible(button)) return false;
+                      const cls = button.getAttribute('class') || '';
+                      if (cls.includes('ant-pagination-disabled') || button.getAttribute('aria-disabled') === 'true') {
+                        return false;
+                      }
+                      button.scrollIntoView({ block: 'center', inline: 'center' });
+                      button.click();
+                      return true;
+                    }
+                    """
+                )
+            )
+        except Error:
+            return False
 
     def todo_pagination(self, page: Page) -> Locator | None:
         candidates = [
@@ -240,11 +327,9 @@ class ReagentPageMixin:
 
         print(f"Opening first task detail: {first_task.get(list_number_key, '')}")
         detail_button.click()
-        self.wait_for_detail_ready(page, first_task)
-
-        detail_info = self.read_detail_info(page)
+        detail_info = self.wait_for_detail_ready(page, first_task)
         merged_info = {
-            "\u5f53\u524d\u6e05\u5355\u53f7": detail_info.get("\u5f53\u524d\u6e05\u5355\u53f7") or first_task.get(list_number_key, ""),
+            "\u5f53\u524d\u6e05\u5355\u53f7": detail_info.get("\u5f53\u524d\u6e05\u5355\u53f7", ""),
             customer_name_key: detail_info.get(customer_name_key) or first_task.get(customer_name_key, ""),
             "\u72b6\u6001": detail_info.get("\u72b6\u6001") or first_task.get(approval_state_key, ""),
             applicant_key: detail_info.get(applicant_key) or first_task.get(applicant_key, ""),
@@ -296,11 +381,9 @@ class ReagentPageMixin:
 
                 print(f"Opening target task detail from todo page {current_page}: {target_list_number}")
                 detail_button.click()
-                self.wait_for_detail_ready(page, target_task)
-
-                detail_info = self.read_detail_info(page)
+                detail_info = self.wait_for_detail_ready(page, target_task)
                 merged_info = {
-                    "\u5f53\u524d\u6e05\u5355\u53f7": detail_info.get("\u5f53\u524d\u6e05\u5355\u53f7") or target_task.get(list_number_key, ""),
+                    "\u5f53\u524d\u6e05\u5355\u53f7": detail_info.get("\u5f53\u524d\u6e05\u5355\u53f7", ""),
                     customer_name_key: detail_info.get(customer_name_key) or target_task.get(customer_name_key, ""),
                     "\u72b6\u6001": detail_info.get("\u72b6\u6001") or target_task.get(approval_state_key, ""),
                     applicant_key: detail_info.get(applicant_key) or target_task.get(applicant_key, ""),
@@ -1485,18 +1568,39 @@ class ReagentPageMixin:
             "\u6280\u672f\u5ba1\u6279\u5907\u6ce8",
         ]
 
-    def wait_for_detail_ready(self, page: Page, first_task: dict[str, str]) -> None:
-        list_number = first_task.get("\u8bd5\u5242\u6e05\u5355\u53f7", "")
+    def wait_for_detail_ready(
+        self,
+        page: Page,
+        first_task: dict[str, str],
+        timeout_ms: int = 15000,
+    ) -> dict[str, str]:
+        expected_list_number = self.extract_list_number(first_task.get("\u8bd5\u5242\u6e05\u5355\u53f7", ""))
+        if not expected_list_number:
+            raise RuntimeError("Cannot verify task detail because the selected todo row has no reagent list number.")
         try:
-            page.wait_for_load_state("networkidle", timeout=15000)
+            page.wait_for_load_state("networkidle", timeout=timeout_ms)
         except TimeoutError:
-            print("Network did not become idle after opening detail; continuing with current page.")
+            print("Network did not become idle after opening detail; verifying detail identity directly.")
 
-        if list_number:
+        deadline = time.monotonic() + timeout_ms / 1000
+        last_observed = ""
+        while time.monotonic() < deadline:
             try:
-                page.wait_for_selector(f"text={list_number}", timeout=15000)
-            except TimeoutError:
-                print(f"Detail list number was not confirmed: {list_number}")
+                detail_info = self.read_detail_info(page)
+            except Error:
+                detail_info = {}
+            observed = self.extract_list_number(detail_info.get("\u5f53\u524d\u6e05\u5355\u53f7", ""))
+            if observed == expected_list_number:
+                return detail_info
+            if observed:
+                last_observed = observed
+            page.wait_for_timeout(200)
+
+        observed_label = last_observed or "<missing>"
+        raise RuntimeError(
+            "Task detail identity verification failed: "
+            f"expected {expected_list_number}, observed {observed_label}."
+        )
 
     def read_detail_info(self, page: Page) -> dict[str, str]:
         return page.evaluate(

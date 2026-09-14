@@ -11,11 +11,23 @@ import pandas as pd
 
 REQUIRED_COLUMNS = {
     "categories": {"category", "priority", "default_manual_review", "enabled"},
-    "rules": {"rule_id", "category", "match_type", "field_scope", "pattern", "condition", "enabled"},
-    "examples": {"category", "example_name", "match_mode", "enabled"},
+    "rules": {"rule_id", "category", "match_type", "field_scope", "pattern", "condition", "confidence", "enabled"},
+    "examples": {"category", "example_name", "match_mode", "expected_final_category", "enabled"},
+    "aliases": {"alias", "standard_name", "cas", "confidence", "enabled"},
     "thresholds": {"threshold_id", "category", "field", "operator", "value", "unit", "enabled"},
 }
 VALID_OPERATORS = {"<", "<=", "=", "==", ">=", ">", "between", "contains", "any"}
+VALID_MATCH_TYPES = {"keyword", "exact", "equals", "regex"}
+VALID_FIELD_SCOPES = {
+    "name", "text", "evidence", "reagent_name", "chemical_name", "standard_name",
+    "cleaned_name", "english_name", "cas", "cas_no", "spec", "remark",
+    "flash_point", "boiling_point", "toxicity", "oxidizing", "flammable",
+    "water_reactive", "explosive_risk", "heavy_metal",
+}
+EXECUTABLE_THRESHOLD_FIELDS = {
+    "flash_point", "oral_ld50", "dermal_ld50",
+    "inhalation_lc50_gas", "inhalation_lc50_vapor", "inhalation_lc50_dust_mist",
+}
 
 
 @dataclass(frozen=True)
@@ -69,6 +81,52 @@ def validate_rule_workbook(path: str | Path) -> RuleWorkbookValidation:
     invalid_ops = sorted({str(value).strip() for value in thresholds["operator"] if str(value).strip() and str(value).strip() not in VALID_OPERATORS})
     if invalid_ops:
         errors.append(f"thresholds 存在未知 operator：{', '.join(invalid_ops)}")
+    invalid_match_types = sorted({
+        str(value).strip().lower() for value in rules["match_type"]
+        if str(value).strip() and str(value).strip().lower() not in VALID_MATCH_TYPES
+    })
+    if invalid_match_types:
+        errors.append(f"rules 存在执行器不支持的 match_type：{', '.join(invalid_match_types)}")
+    invalid_example_modes = sorted({
+        str(value).strip().lower() for value in examples["match_mode"]
+        if str(value).strip() and str(value).strip().lower() not in VALID_MATCH_TYPES | {"contains"}
+    })
+    if invalid_example_modes:
+        errors.append(f"examples 存在执行器不支持的 match_mode：{', '.join(invalid_example_modes)}")
+    invalid_scopes: set[str] = set()
+    for value in rules["field_scope"]:
+        invalid_scopes.update(
+            item.strip().lower() for item in str(value).replace("，", ",").split(",")
+            if item.strip() and item.strip().lower() not in VALID_FIELD_SCOPES
+        )
+    if invalid_scopes:
+        errors.append(f"rules 存在执行器不支持的 field_scope：{', '.join(sorted(invalid_scopes))}")
+    expected_categories = {str(value).strip() for value in examples["expected_final_category"] if str(value).strip()}
+    unknown_expected = sorted(expected_categories - category_names)
+    if unknown_expected:
+        errors.append(f"examples 的 expected_final_category 引用了未知类别：{', '.join(unknown_expected)}")
+    unsupported_threshold_fields = sorted({
+        str(value).strip().lower() for value in thresholds["field"]
+        if str(value).strip() and str(value).strip().lower() not in EXECUTABLE_THRESHOLD_FIELDS
+    })
+    if unsupported_threshold_fields:
+        errors.append(f"thresholds 存在执行器不支持的 field：{', '.join(unsupported_threshold_fields)}")
+    if "confidence" in rules.columns:
+        for index, value in rules["confidence"].items():
+            try:
+                confidence = float(str(value).strip())
+            except ValueError:
+                errors.append(f"rules 第 {index + 2} 行 confidence 不是数字")
+                continue
+            if not 0.0 <= confidence <= 1.0:
+                errors.append(f"rules 第 {index + 2} 行 confidence 超出 0-1")
+    concentration_conditions = [
+        str(value).strip().lower() for value in rules["condition"] if "concentration" in str(value).lower()
+    ]
+    if any("> 72" in value or ">72" in value for value in concentration_conditions) and not any(
+        "<= 72" in value or "<=72" in value for value in concentration_conditions
+    ):
+        warnings.append("浓度规则包含 >72 但没有 <=72，可能存在 72% 边界空洞")
     empty_rule_ids = int(rules["rule_id"].astype(str).str.strip().eq("").sum())
     if empty_rule_ids:
         errors.append(f"rules 存在 {empty_rule_ids} 条启用规则缺少 rule_id")

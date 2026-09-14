@@ -342,6 +342,31 @@ class ApprovalWriterDropdownBindingTest(unittest.TestCase):
             ApprovalWriter._row_property_selection_looks_committed(self.page, row_with_value, "强反应")
         )
 
+    def test_row_cancel_does_not_fall_back_to_another_rows_cancel_button(self) -> None:
+        self.page.set_content(
+            """
+            <style>
+              tr, button { display: block; width: 160px; height: 32px; }
+            </style>
+            <table><tbody>
+              <tr class="ant-table-row" data-row-key="row-1"><td>target row</td></tr>
+              <tr class="ant-table-row" data-row-key="row-2">
+                <td><button id="other-cancel">取消</button></td>
+              </tr>
+            </tbody></table>
+            <script>
+              window.otherCancelClicked = false;
+              document.getElementById("other-cancel").addEventListener("click", () => {
+                window.otherCancelClicked = true;
+              });
+            </script>
+            """
+        )
+        target_row = self.page.locator("tr[data-row-key='row-1']")
+
+        self.assertTrue(ApprovalWriter().cancel_edit(self.page, target_row))
+        self.assertFalse(self.page.evaluate("window.otherCancelClicked"))
+
 
 if __name__ == "__main__":
     unittest.main()

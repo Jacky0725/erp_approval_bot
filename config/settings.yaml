@@ -9,8 +9,8 @@ llm:
   provider: siliconflow
   base_url: https://api.siliconflow.cn/v1
   model: deepseek-ai/DeepSeek-V3.2
-  timeout_seconds: 45
-  max_retries: 1
+  timeout_seconds: 30
+  max_retries: 0
 chemical_search:
   query_priority:
   - cleaned_name
@@ -18,22 +18,35 @@ chemical_search:
   - english_name
   - aliases
   - cas_verification
-  max_name_queries: 4
+  max_name_queries: 1
   providers:
+  - chemsrc
+  - chemicalbook
   - pubchem
-  - comptox
   - nist
   requests_per_second: 2
   per_source_concurrency: 1
-  max_attempts: 3
-  read_timeout_seconds: 15
-  lookup_budget_seconds: 30
-  batch_budget_seconds: 180
+  max_attempts: 2
+  request_timeout_seconds: 8
+  read_timeout_seconds: 8
+  lookup_budget_seconds: 20
+  batch_budget_seconds: 60
+  batch_workers: 3
+  provider_budget_seconds:
+    chemsrc: 6
+    chemicalbook: 3
+    pubchem: 6
+    nist: 4
+  provider_negative_cache_seconds: 60
+  pubchem_batch_prefetch: false
   failure_circuit_break_threshold: 3
   failure_circuit_cooldown_seconds: 300
   stale_if_error_days: 180
-  chemsrc_enabled: false
-  chemicalbook_enabled: false
+  chemsrc_enabled: true
+  chemicalbook_enabled: true
+  pubchem_enabled: true
+  nist_enabled: true
+  enable_fallback_web_research: false
   fallback_timeout_seconds: 8
   fallback_max_queries: 4
   fallback_research_budget_seconds: 35
@@ -43,23 +56,68 @@ chemical_search:
     success_ttl_days: 30
     failure_ttl_days: 1
 erp_api:
-  base_url: ''
-  enabled_for_write: false
+  protocol: odoo_jsonrpc
+  base_url: https://xxpt.sh-tianhan.com:5500
+  enabled_for_write: true
   web_verify_after_api_write: true
+  verify_attempts: 3
+  verify_delays_seconds:
+  - 0.5
+  - 1
+  - 2
   discovery:
     enabled: true
     mode: capture_normal_approval_write
     required_write_samples: 2
     min_confidence: 0.9
-    status: pending_capture
+    status: verified
     candidate_path: data/logs/erp_api_candidate.yaml
     backup_dir: data/logs/erp_api_config_backups
     canary_on_next_run: true
+    last_result: ''
+    updated_at: '2026-09-12T12:48:05'
   endpoints:
     todo_tasks: ''
-    reagent_detail: ''
-    save_property: ''
-    verify_property: ''
+    reagent_detail: /api/dataset/cors_call_kw
+    save_property: /api/dataset/cors_call_kw
+    verify_property: /api/dataset/cors_call_kw
+  rpc:
+    endpoint: /api/dataset/cors_call_kw
+    models:
+      list_model: reagent.list
+      line_model: reagent.list.line
+      property_model: reagent.phchproperty
+    line_fields:
+    - id
+    - name
+    - cas_code
+    - box_num
+    - spec
+    - spec_unit_id
+    - type
+    - product_uom_qty
+    - phchproperty_id
+    - phchproperty_name
+    - sequence
+    - reagent_list_id
+    line_write_fields:
+    - id
+    - name
+    - cas_code
+    - box_num
+    - spec
+    - spec_unit_id
+    - type
+    - desc
+    - phchproperty_id
+    - refer_single_price
+    - approval_desc
+    - is_danger
+    - reagent_list_id
+    - price_approval_desc
+    - price_state
+    - phchproperty_name
+    - sequence
   pagination:
     list_number_param: listNumber
     page_param: pageNum
@@ -89,6 +147,7 @@ erp_api:
     CAS号:
     - cas
     - casNo
+    - cas_code
     规格单位:
     - unit
     - specUnit
@@ -98,6 +157,7 @@ erp_api:
     物化特性:
     - physicochemicalProperty
     - property
+    - phchproperty_name
     record_id:
     - id
     - recordId
@@ -135,6 +195,19 @@ paths:
 approval:
   default_action: manual_review
   enable_llm_manual_review_advice: true
+  llm_manual_review_advice_mode: on_demand
+  identity_conflict_policy:
+    mode: name_preferred_candidate
+    require_manual_confirmation: false
+    promote_confirmed_correction_to_memory: true
+    auto_update_erp_cas: false
+  llm_identity_review:
+    enabled: true
+    trigger_on_cas_missing: true
+    trigger_on_name_cas_conflict: true
+    allow_model_knowledge: true
+    advisory_only: true
+    max_calls_per_identity: 1
   write_mode: multi_page
   erp_write_backend: api_write_with_web_verify
   write_min_confidence: 0.7
@@ -171,20 +244,18 @@ enrichment_v2:
       max_concurrency: 2
       include_hazard_details: true
     nist:
-      enabled: false
+      enabled: true
       read_timeout_seconds: 8
     comptox:
       enabled: false
       api_key_env: EPA_CTX_API_KEY
   llm:
     enabled: false
-    # When enabled, it can only fill missing decision fields from supplied evidence text.
   chinese_alias_backfill:
     enabled: false
     sources:
-      - chemsrc
-      - chemicalbook
-    # Background candidate collection only; reviewer promotion is required.
+    - chemsrc
+    - chemicalbook
     auto_promote: false
 enrichment_metrics:
   enabled: true

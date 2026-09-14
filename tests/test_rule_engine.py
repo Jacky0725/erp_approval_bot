@@ -4,6 +4,8 @@ import sys
 import unittest
 from pathlib import Path
 
+import pandas as pd
+
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT_DIR / "src"))
@@ -22,6 +24,18 @@ class RuleEngineTest(unittest.TestCase):
         self.assertEqual(result["final_category"], "特殊酸")
         self.assertIn("特殊酸", result["matched_categories"])
         self.assertFalse(result["need_manual_review"])
+
+    def test_enabled_rows_accepts_same_on_value_as_workbook_validator(self) -> None:
+        frame = pd.DataFrame(
+            [
+                {"enabled": "on", "rule_id": "R1"},
+                {"enabled": "off", "rule_id": "R2"},
+            ]
+        )
+
+        enabled = RuleEngine._enabled_rows(frame)
+
+        self.assertEqual(enabled["rule_id"].tolist(), ["R1"])
 
     def test_common_mineral_acid_suppresses_special_acid_suggestion(self) -> None:
         engine = RuleEngine(

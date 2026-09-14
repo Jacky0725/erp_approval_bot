@@ -135,7 +135,15 @@ class EvidenceResolver:
                 value = (value - 32) * 5 / 9
             return round(value, 3), "degC", "observed"
         if field in {"corrosive", "oxidizing", "flammable", "water_reactive", "explosive_risk", "heavy_metal"}:
-            if any(token in lowered for token in ("not flammable", "non-flammable", "不易燃", "无腐蚀", "无氧化性")):
+            negative_tokens = {
+                "corrosive": ("not corrosive", "non-corrosive", "noncorrosive", "无腐蚀", "不腐蚀"),
+                "oxidizing": ("not oxidizing", "non-oxidizing", "nonoxidizing", "无氧化性", "非氧化性"),
+                "flammable": ("not flammable", "non-flammable", "nonflammable", "不易燃", "不可燃"),
+                "water_reactive": ("not water-reactive", "non-water-reactive", "不与水反应", "遇水不反应"),
+                "explosive_risk": ("not explosive", "non-explosive", "无爆炸危险", "不易爆"),
+                "heavy_metal": ("no heavy metal", "heavy-metal-free", "不含重金属", "无重金属"),
+            }
+            if any(token in lowered for token in negative_tokens[field]):
                 return False, "", "reported"
             tokens = {
                 "corrosive": ("corros", "腐蚀"),

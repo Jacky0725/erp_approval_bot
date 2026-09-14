@@ -29,6 +29,8 @@
 | evidence/baseline.json | 当前源文件哈希、规模、Git 状态及静态契约清单 |
 | evidence/baseline-tests.txt | 本轮实际运行的测试及结果 |
 
+仓库执行过程中补充的完整全项目阶段方案位于 `docs/PROJECT_REFACTOR_PHASED_PLAN_20260910.md`；执行包内的 `05_PHASE_TASKS.md` 是早期压缩版，以完整方案为准。
+
 ## 核心建议
 
 保留 FastAPI + Jinja + 原生 JavaScript；复用已存在的模板片段和 CSS tokens。先建立隔离验证环境，处理执行结果语义和请求可靠性，再进行页面级优化。暂不引入 React/Vue、独立前端构建、云端部署或数据库迁移。
@@ -36,3 +38,5 @@
 现有 V2 补全方案是本项目的在建子项目，应整合而非重做。本包不批准 V2 生产接管、自动规则晋升或真实 ERP 写入。
 
 本包可以复制到其他机器，但执行者必须重新发现可用 skills 和 Python 环境。不要把本机插件缓存路径写进产品代码或安装包。
+- `08_PROJECT_REFACTOR_PHASED_PLAN_20260910.md`：全项目 P0–P8 分阶段方案、兼容策略、验证和回退。
+- `09_REFACTOR_REVIEW_20260910.md`：基于代码与测试证据的审查结果、处置和剩余风险。

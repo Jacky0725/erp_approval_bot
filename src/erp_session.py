@@ -84,11 +84,40 @@ class ErpSessionMixin:
                     headless=self.effective_browser_headless(browser_settings),
                     slow_mo=int(browser_settings.get("slow_mo_ms", 0)),
                 )
-                context = browser.new_context(ignore_https_errors=True)
-                page = context.new_page()
-                page.set_default_timeout(int(browser_settings.get("timeout_ms", 30000)))
-
+                page = None
+                callback_started = False
                 try:
+                    context = browser.new_context(ignore_https_errors=True)
+                    page = context.new_page()
+                    # Keep the ERP session header in memory for authenticated API calls.
+                    # It must never be written to logs or discovery artifacts.
+                    runtime_headers: dict[str, str] = {}
+                    runtime_rpc_context: dict[str, Any] = {}
+
+                    def capture_runtime_headers(request: Any) -> None:
+                        try:
+                            session_id = str(request.headers.get("x-openerp-session-id") or "").strip()
+                        except Exception:
+                            return
+                        if session_id:
+                            runtime_headers["x-openerp-session-id"] = session_id
+                        try:
+                            payload = request.post_data_json
+                        except Exception:
+                            payload = None
+                        params = payload.get("params") if isinstance(payload, dict) else None
+                        kwargs = params.get("kwargs") if isinstance(params, dict) else None
+                        rpc_context = kwargs.get("context") if isinstance(kwargs, dict) else None
+                        if isinstance(rpc_context, dict):
+                            for key in ("lang", "tz", "uid"):
+                                value = rpc_context.get(key)
+                                if value not in (None, ""):
+                                    runtime_rpc_context[key] = value
+
+                    page.on("request", capture_runtime_headers)
+                    setattr(page, "_erp_runtime_headers", runtime_headers)
+                    setattr(page, "_erp_runtime_rpc_context", runtime_rpc_context)
+                    page.set_default_timeout(int(browser_settings.get("timeout_ms", 30000)))
                     stage_logger.event(f"Browser session attempt {attempt}/3")
                     with stage_logger.stage("open_login_page", erp_url):
                         self.open_login_page(page, erp_url)
@@ -99,6 +128,7 @@ class ErpSessionMixin:
                         self.wait_for_app_shell(page)
 
                     if after_login:
+                        callback_started = True
                         with stage_logger.stage(getattr(after_login, "__name__", "after_login")):
                             after_login(page)
 
@@ -109,20 +139,24 @@ class ErpSessionMixin:
                     print(f"Saved homepage screenshot: {screenshot_path}")
                     print(f"Saved homepage HTML: {html_path}")
                     self.print_page_structure(page)
-                    browser.close()
                     return
                 except (Error, RuntimeError) as error:
                     last_error = error
                     failure_screenshot_path = log_dir / f"browser_failure_attempt_{attempt}.png"
                     failure_html_path = log_dir / f"browser_failure_attempt_{attempt}.html"
                     try:
-                        page.screenshot(path=str(failure_screenshot_path), full_page=True)
-                        failure_html_path.write_text(page.content(), encoding="utf-8")
-                        print(f"Saved browser failure screenshot: {failure_screenshot_path}")
-                        print(f"Saved browser failure HTML: {failure_html_path}")
-                    except Error as capture_error:
+                        if page is not None:
+                            page.screenshot(path=str(failure_screenshot_path), full_page=True)
+                            failure_html_path.write_text(page.content(), encoding="utf-8")
+                            print(f"Saved browser failure screenshot: {failure_screenshot_path}")
+                            print(f"Saved browser failure HTML: {failure_html_path}")
+                    except (Error, OSError) as capture_error:
                         print(f"Could not capture browser failure page: {capture_error}")
                     print(f"Browser session failed: {error}")
+                    if callback_started:
+                        print("Business callback already started; automatic session replay is disabled.")
+                        raise
+                finally:
                     browser.close()
 
             if last_error:
@@ -327,27 +361,31 @@ class ErpSessionMixin:
         self.click_login_button(scope, login_selector, log_dir)
 
     def find_login_scope(self, page: Page, selectors: dict[str, str]) -> tuple[Any, str, str, str] | None:
-        scopes = [page, *page.frames]
+        # The ERP renders its login inputs after DOMContentLoaded. Poll the page
+        # briefly so a still-hydrating React form is not mistaken for a selector change.
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline:
+            scopes = [page, *page.frames]
+            for scope in scopes:
+                username_selector = self.first_usable_selector(
+                    scope,
+                    [selectors.get("username_input", ""), *USERNAME_SELECTORS],
+                    needs_editable=True,
+                )
+                password_selector = self.first_usable_selector(
+                    scope,
+                    [selectors.get("password_input", ""), *PASSWORD_SELECTORS],
+                    needs_editable=True,
+                )
+                login_selector = self.first_usable_selector(
+                    scope,
+                    [selectors.get("login_button", ""), *LOGIN_BUTTON_SELECTORS],
+                    needs_editable=False,
+                )
 
-        for scope in scopes:
-            username_selector = self.first_usable_selector(
-                scope,
-                [selectors.get("username_input", ""), *USERNAME_SELECTORS],
-                needs_editable=True,
-            )
-            password_selector = self.first_usable_selector(
-                scope,
-                [selectors.get("password_input", ""), *PASSWORD_SELECTORS],
-                needs_editable=True,
-            )
-            login_selector = self.first_usable_selector(
-                scope,
-                [selectors.get("login_button", ""), *LOGIN_BUTTON_SELECTORS],
-                needs_editable=False,
-            )
-
-            if username_selector and password_selector and login_selector:
-                return scope, username_selector, password_selector, login_selector
+                if username_selector and password_selector and login_selector:
+                    return scope, username_selector, password_selector, login_selector
+            page.wait_for_timeout(250)
 
         return None
 
@@ -454,7 +492,7 @@ class ErpSessionMixin:
                 except Error:
                     raise
 
-        print(f"Continuing after navigation failures. Last error: {last_error}")
+        raise RuntimeError(f"Could not open ERP login page after 3 navigation attempts: {last_error}") from last_error
 
     def wait_for_home(self, page: Page) -> None:
         try:
@@ -493,8 +531,12 @@ class ErpSessionMixin:
 
         try:
             page.wait_for_selector("text=\u8bd5\u5242\u7ba1\u7406, text=\u5e02\u573a\u7ba1\u7406", timeout=3000)
+            print("ERP shell detected by menu text.")
+            return
         except TimeoutError:
-            print("ERP shell menu text was not confirmed; continuing so target page click can retry/fail explicitly.")
+            raise RuntimeError(
+                "ERP login did not reach a verified application shell; the session may still be on the login page."
+            )
 
     def print_page_structure(self, page: Page) -> None:
         print("\n=== buttons ===")

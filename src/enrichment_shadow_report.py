@@ -56,7 +56,7 @@ def markdown_report(report: dict[str, Any]) -> str:
         f"- Provider 状态：{json.dumps(report['provider_statuses'], ensure_ascii=False, sort_keys=True)}",
         f"- LLM 调用：{report['llm_calls']}；状态：{json.dumps(report['llm_statuses'], ensure_ascii=False, sort_keys=True)}",
         "",
-        "此报告用于影子验收，不能作为正式切换依据；须结合已审核 benchmark 与高风险逐条复核。",
+        "此报告用于运行监控；正式模式下仍须结合人工复核记录和高风险样本持续观察。",
         "",
     ])
 

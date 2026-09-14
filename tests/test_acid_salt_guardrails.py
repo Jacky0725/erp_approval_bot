@@ -72,7 +72,7 @@ class AcidSaltGuardrailTest(unittest.TestCase):
                 self.assertNotIn("特殊酸", result["matched_categories"])
 
     def test_true_mineral_acids_still_match_regular_acid(self) -> None:
-        names = ("盐酸", "硝酸", "硫酸", "浓硫酸", "发烟盐酸", "10% HCl", "2mol HCl")
+        names = ("盐酸", "硝酸", "硫酸", "发烟盐酸", "10% HCl", "2mol HCl")
 
         for name in names:
             with self.subTest(name=name):

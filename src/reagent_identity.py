@@ -19,7 +19,7 @@ MIXTURE_MARKERS = (
     "清洗剂",
     "标准溶液",
 )
-IDENTITY_STATUSES = {"verified", "name_only", "ambiguous", "conflict", "unresolved"}
+IDENTITY_STATUSES = {"verified", "name_only", "cas_missing", "ambiguous", "conflict", "unresolved"}
 
 
 @dataclass(frozen=True)

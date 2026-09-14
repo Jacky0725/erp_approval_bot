@@ -2008,6 +2008,10 @@ h1 {
   margin: 16px auto 0;
 }
 
+.review-llm-advice {
+  white-space: nowrap;
+}
+
 .data-health-panel {
   width: min(1580px, 100%);
   margin: 16px auto 0;
@@ -2125,6 +2129,24 @@ h1 {
 
 .data-health-list div:nth-child(n + 3) strong {
   color: var(--amber);
+}
+
+@media (max-width: 820px) {
+  .data-health-list {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .data-health-list div {
+    border-bottom: 1px solid var(--line-soft);
+  }
+
+  .data-health-list div:nth-child(2n) {
+    border-right: 0;
+  }
+
+  .data-health-list div:nth-last-child(-n + 2) {
+    border-bottom: 0;
+  }
 }
 
 .badge,

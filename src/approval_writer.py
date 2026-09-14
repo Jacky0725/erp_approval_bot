@@ -116,7 +116,7 @@ class ApprovalWriter:
         clicked = False
         if row is not None:
             clicked = self._click_row_action(page, row, "\u53d6\u6d88")
-        if not clicked:
+        else:
             clicked = self._click_first_visible_action(page, "\u53d6\u6d88")
         if not clicked:
             try:
@@ -2024,9 +2024,6 @@ class ApprovalWriter:
                         if (aligned.length) {
                           return clickAction(aligned[0].node);
                         }
-                      }
-                      if (actions.length === 1) {
-                        return clickAction(actions[0]);
                       }
                       return false;
                     }

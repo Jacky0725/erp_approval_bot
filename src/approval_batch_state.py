@@ -15,9 +15,12 @@ def normalize_write_result(
     """Return a stable write-result shape for legacy and new writer paths."""
     if raw_result is None:
         raw_result = {}
+    handled = raw_result.get("handled")
+    if handled is None:
+        handled = {key_fn(suggestion) for suggestion in suggestions}
     return {
         "attempted": set(raw_result.get("attempted") or set()),
-        "handled": set(raw_result.get("handled") or {key_fn(suggestion) for suggestion in suggestions}),
+        "handled": set(handled),
         "failed": set(raw_result.get("failed") or set()),
         "deferred": set(raw_result.get("deferred") or set()),
     }

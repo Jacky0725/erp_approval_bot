@@ -45,6 +45,21 @@ class ApprovalBatchStateTest(unittest.TestCase):
         self.assertNotIn("1", state.pending_write_suggestions)
         self.assertEqual(set(state.pending_write_suggestions), {"2", "3"})
 
+    def test_explicit_empty_handled_keeps_deferred_candidate_pending(self) -> None:
+        suggestions = [{"id": "1"}]
+        state = MultiPageWriteState(max_attempts=2)
+        state.register_writable_suggestions(suggestions, key)
+        result = normalize_write_result({"handled": set(), "deferred": {"1"}}, suggestions, key)
+        delta = state.apply_write_result(result)
+        self.assertEqual(result["handled"], set())
+        self.assertEqual(delta["deferred"], {"1"})
+        self.assertEqual(state.handled_keys, set())
+        self.assertIn("1", state.pending_write_suggestions)
+
+    def test_missing_handled_preserves_legacy_compatibility(self) -> None:
+        result = normalize_write_result({}, [{"id": "1"}], key)
+        self.assertEqual(result["handled"], {"1"})
+
     def test_failed_key_becomes_terminal_after_retry_limit(self) -> None:
         state = MultiPageWriteState(max_attempts=2)
         state.register_writable_suggestions([{"id": "9"}], key)

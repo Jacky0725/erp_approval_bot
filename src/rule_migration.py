@@ -31,12 +31,12 @@ DEFAULT_PRIORITY = [
     "\u672a\u77e5\u7c7b",
 ]
 
-MANUAL_REVIEW_CATEGORIES = {"\u4e0d\u5efa\u8bae\u63a5\u6536\u7c7b", "\u5267\u6bd2\u54c1", "\u672a\u77e5\u7c7b"}
+MANUAL_REVIEW_CATEGORIES = {"\u5267\u6bd2\u54c1"}
 
 CATEGORY_DESCRIPTIONS = {
     "\u4e0d\u5efa\u8bae\u63a5\u6536\u7c7b": "\u62d2\u6536\u7c7b/\u4e0d\u5efa\u8bae\u63a5\u6536\u7c7b\uff1b\u65e0\u8bb8\u53ef\u8d44\u8d28\u3001\u65e0\u5904\u7f6e\u80fd\u529b\u6216\u89c4\u5219\u5217\u660e\u4e0d\u53ef\u63a5\u6536\u7684\u7206\u70b8\u7269\u3001\u533b\u7597\u5e9f\u7269\u3001\u653e\u5c04\u6027\u5143\u7d20\uff0c\u4ee5\u53ca\u542b\u94c5\u3001\u6c5e\u3001\u94ca\u3001\u94cd\u7b49\u8bd5\u5242\u3002",
     "\u5267\u6bd2\u54c1": "\u5267\u6bd2\u54c1\u4e13\u9879\u89c4\u5219\uff1b\u9700\u4eba\u5de5\u590d\u6838\uff0c\u4e0d\u4f5c\u4e3a ERP \u7269\u5316\u7279\u6027\u81ea\u52a8\u5199\u5165\u3002",
-    "\u672a\u77e5\u7c7b": "\u672a\u77e5\u3001\u65e0\u6807\u7b7e\u3001\u65e0 MSDS \u6216\u65e0\u6cd5\u8fa8\u8bc6\uff1b\u9700\u4eba\u5de5\u590d\u6838\u3002",
+    "\u672a\u77e5\u7c7b": "\u672a\u77e5\u3001\u65e0\u6807\u7b7e\u3001\u65e0 MSDS \u6216\u65e0\u6cd5\u8fa8\u8bc6\uff1b\u6309\u4e1a\u52a1\u7b56\u7565\u81ea\u52a8\u5199\u5165 ERP \u672a\u77e5\u7c7b\u3002",
 }
 
 SUPPLEMENTAL_EXAMPLES = [
@@ -80,7 +80,7 @@ SUPPLEMENTAL_EXAMPLES = [
 SUPPLEMENTAL_NOTES = [
     {
         "note_id": "NOTE-REJECT-001",
-        "note": "\u62d2\u6536\u7c7b\u662f\u4e1a\u52a1\u5904\u7f6e\u7ed3\u8bba\uff0c\u5728 ERP \u7269\u5316\u7279\u6027\u4e0b\u62c9\u4e2d\u65e0\u5bf9\u5e94\u53ef\u5199\u9009\u9879\uff1b\u7a0b\u5e8f\u6309\u201c\u4e0d\u5efa\u8bae\u63a5\u6536\u7c7b\u201d\u8bc6\u522b\u5e76\u8fdb\u5165\u4eba\u5de5\u590d\u6838/\u4e0d\u53ef\u81ea\u52a8\u5199\u5165\u3002",
+        "note": "\u62d2\u6536\u7c7b\u662f\u4e1a\u52a1\u5904\u7f6e\u7ed3\u8bba\uff1b\u7a0b\u5e8f\u6309\u201c\u4e0d\u5efa\u8bae\u63a5\u6536\u7c7b\u201d\u8bc6\u522b\uff0c\u4e0d\u9ed8\u8ba4\u8981\u6c42\u4eba\u5de5\u590d\u6838\uff0c\u6ee1\u8db3\u901a\u7528\u81ea\u52a8\u5199\u5165\u95e8\u69db\u65f6\u53ef\u5199\u5165 ERP \u62d2\u6536\u7c7b\u3002",
         "source": "rules.xlsx",
         "enabled": True,
     }
@@ -137,9 +137,9 @@ SPECIAL_RULES = [
         "match_type": "keyword",
         "field_scope": "name,text,evidence",
         "pattern": "\u9ad8\u6c2f\u9178",
-        "condition": "concentration < 72%",
+        "condition": "concentration <= 72%",
         "confidence": 0.88,
-        "description": "perchloric acid below 72%",
+        "description": "perchloric acid at or below 72%",
         "enabled": True,
     },
 ]
@@ -175,6 +175,19 @@ THRESHOLD_ROWS = [
         "description": "oral LD50 high toxicity threshold",
         "enabled": True,
     },
+    {"threshold_id": "T-ACU-DERM-001", "category": "\u5267\u6bd2\u54c1", "field": "dermal_ld50", "operator": "<=", "value": 50, "unit": "mg/kg", "description": "dermal LD50 acute poison threshold", "enabled": True},
+    {"threshold_id": "T-TOX-DERM-001", "category": "\u9ad8\u6bd2\u7c7b", "field": "dermal_ld50", "operator": "between", "value": "50<x<=200", "unit": "mg/kg", "description": "dermal LD50 high toxicity threshold above 50 through 200 mg/kg", "enabled": True},
+    {"threshold_id": "T-TOX-INH-GAS-001", "category": "\u9ad8\u6bd2\u7c7b", "field": "inhalation_lc50_gas", "operator": "<=", "value": 500, "unit": "ppm", "description": "gas inhalation LC50 high toxicity threshold", "enabled": True},
+    {"threshold_id": "T-TOX-INH-VAPOR-001", "category": "\u9ad8\u6bd2\u7c7b", "field": "inhalation_lc50_vapor", "operator": "<=", "value": 2.0, "unit": "mg/L", "description": "vapor inhalation LC50 high toxicity threshold", "enabled": True},
+    {"threshold_id": "T-TOX-INH-DUST-001", "category": "\u9ad8\u6bd2\u7c7b", "field": "inhalation_lc50_dust_mist", "operator": "<=", "value": 0.5, "unit": "mg/L", "description": "dust or mist inhalation LC50 high toxicity threshold", "enabled": True},
+]
+
+STRUCTURED_BOOLEAN_RULES = [
+    {"rule_id": "STRUCT-EXP-BOOL-001", "category": "易爆类", "match_type": "equals", "field_scope": "explosive_risk", "pattern": "true", "condition": "any", "confidence": 0.90, "description": "结构化爆炸风险为真", "enabled": True},
+    {"rule_id": "STRUCT-REA-BOOL-001", "category": "强反应性", "match_type": "equals", "field_scope": "water_reactive", "pattern": "true", "condition": "any", "confidence": 0.90, "description": "结构化遇水反应为真", "enabled": True},
+    {"rule_id": "STRUCT-OXI-BOOL-001", "category": "氧化剂", "match_type": "equals", "field_scope": "oxidizing", "pattern": "true", "condition": "any", "confidence": 0.90, "description": "结构化氧化性为真", "enabled": True},
+    {"rule_id": "STRUCT-HMT-BOOL-001", "category": "重金属类", "match_type": "equals", "field_scope": "heavy_metal", "pattern": "true", "condition": "any", "confidence": 0.88, "description": "结构化重金属标记为真", "enabled": True},
+    {"rule_id": "STRUCT-FLA-BOOL-001", "category": "易燃液体", "match_type": "equals", "field_scope": "flammable", "pattern": "true", "condition": "requires_liquid_context", "confidence": 0.88, "description": "结构化易燃标记为真且有液体语境", "enabled": True},
 ]
 
 
@@ -248,7 +261,7 @@ def _categories_sheet(priority: list[str]) -> pd.DataFrame:
 
 
 def _rules_sheet(legacy: LegacyRules, priority: list[str]) -> pd.DataFrame:
-    rows = list(SPECIAL_RULES)
+    rows = [*SPECIAL_RULES, *STRUCTURED_BOOLEAN_RULES]
     seen = {(row["category"], row["pattern"], row["condition"]) for row in rows}
 
     for category in priority:
@@ -320,7 +333,17 @@ def _examples_sheet(legacy: LegacyRules, priority: list[str]) -> pd.DataFrame:
                 "notes": notes,
             }
         )
-    return pd.DataFrame(rows)
+    frame = pd.DataFrame(rows)
+    if frame.empty:
+        frame["expected_final_category"] = pd.Series(dtype=str)
+        return frame
+    rank = {category: index for index, category in enumerate(priority)}
+    expected_by_name = {
+        name: min(group["category"], key=lambda category: rank.get(category, len(rank)))
+        for name, group in frame.groupby("example_name", sort=False)
+    }
+    frame["expected_final_category"] = frame["example_name"].map(expected_by_name)
+    return frame
 
 
 def _notes_sheet(notes: list[str]) -> pd.DataFrame:
