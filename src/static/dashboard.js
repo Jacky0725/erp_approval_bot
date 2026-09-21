@@ -1,3 +1,27 @@
+    const csrfToken = document.querySelector('meta[name="reagent-csrf"]')?.content || "";
+    const nativeFetch = window.fetch.bind(window);
+    window.fetch = (input, init = {}) => {
+      const method = String(init.method || (input instanceof Request ? input.method : "GET")).toUpperCase();
+      const url = new URL(input instanceof Request ? input.url : String(input), window.location.href);
+      if (["POST", "PUT", "PATCH", "DELETE"].includes(method) && url.origin === window.location.origin) {
+        const headers = new Headers(init.headers || (input instanceof Request ? input.headers : undefined));
+        headers.set("X-Reagent-CSRF", csrfToken);
+        init = {...init, headers};
+      }
+      return nativeFetch(input, init);
+    };
+
+    async function operationTicket(operation, options = {}) {
+      const response = await fetch(`/api/${operation}/prepare`, {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify(options),
+      });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.detail || "无法确认危险操作");
+      return payload.ticket;
+    }
+
     const runForm = document.querySelector("#runForm");
     const settingsForm = document.querySelector("#settingsForm");
     const reviewState = {
@@ -145,8 +169,10 @@
 
     setSelectValue(runForm, "approval_write_mode", initialRuntime.approval_write_mode);
     setSelectValue(runForm, "erp_write_backend", initialRuntime.erp_write_backend);
+    setSelectValue(runForm, "pipeline_version", initialRuntime.approval_pipeline_version);
     setSelectValue(settingsForm, "approval_write_mode", initialRuntime.approval_write_mode);
     setSelectValue(settingsForm, "erp_write_backend", initialRuntime.erp_write_backend);
+    setSelectValue(settingsForm, "approval_pipeline_version", initialRuntime.approval_pipeline_version);
     setCheckbox(runForm, "process_all_todos", initialRuntime.process_all_todos);
     setCheckbox(runForm, "auto_pass", initialRuntime.auto_pass);
     setCheckbox(settingsForm, "process_all_todos", initialRuntime.process_all_todos);
@@ -168,6 +194,44 @@
     setCheckbox(settingsForm, "memory_sync_check_remote_on_startup", initialRuntime.memory_sync_check_remote_on_startup);
     setSelectValue(settingsForm, "scheduler_mode", initialRuntime.scheduler_mode);
     setSelectValue(settingsForm, "scheduler_approval_write_mode", initialRuntime.scheduler_approval_write_mode);
+    function initV3Settings() {
+      const addressMode = settingsForm?.querySelector('[name="v3_address_mode"]');
+      const modelChoice = settingsForm?.querySelector('[name="v3_model_choice"]');
+      if (!addressMode || !modelChoice) return;
+      const recommended = initialRuntime.v3_recommended_models || ["qwen3.7-plus", "qwen3.7-flash", "qwen3.7-max", "qwen3.8-flash", "qwen3.8-max"];
+      const savedModel = initialRuntime.v3_model || "qwen3.7-plus";
+      modelChoice.innerHTML = "";
+      recommended.forEach((model) => {
+        const option = document.createElement("option");
+        option.value = model;
+        option.textContent = model;
+        modelChoice.appendChild(option);
+      });
+      const custom = document.createElement("option");
+      custom.value = "custom";
+      custom.textContent = "自定义模型";
+      modelChoice.appendChild(custom);
+      modelChoice.value = recommended.includes(savedModel) ? savedModel : "custom";
+      const customModel = settingsForm.querySelector('[name="v3_custom_model"]');
+      if (customModel && !recommended.includes(savedModel)) customModel.value = savedModel;
+      setSelectValue(settingsForm, "v3_address_mode", initialRuntime.v3_address_mode || "shared_beijing");
+      const updateAddress = () => {
+        const value = addressMode.value;
+        settingsForm.querySelectorAll("[data-v3-address]").forEach((field) => {
+          field.hidden = field.dataset.v3Address !== value;
+        });
+      };
+      const updateModel = () => {
+        const field = settingsForm.querySelector('[data-v3-model="custom"]');
+        if (field) field.hidden = modelChoice.value !== "custom";
+      };
+      addressMode.addEventListener("change", updateAddress);
+      modelChoice.addEventListener("change", updateModel);
+      updateAddress();
+      updateModel();
+    }
+    initV3Settings();
+    setSelectValue(settingsForm, "v3_retrieval_mode", initialRuntime.v3_retrieval_mode || "model_first");
     setText("#writeModeText", approvalWriteModeLabel(initialRuntime.approval_write_mode));
     setText("#erpApiDiscoveryText", erpApiDiscoveryLabel(initialRuntime.erp_api_discovery_status));
     updateDryRunUi(initialRuntime.app_dry_run);
@@ -198,6 +262,36 @@
       } catch (error) {
         setText("#logCopyState", "复制失败");
       }
+    });
+
+    document.querySelectorAll(".v3-invalid-retry").forEach((button) => {
+      button.addEventListener("click", async () => {
+        const eventId = button.dataset.eventId || "";
+        const state = document.querySelector("#v3InvalidRetryState");
+        if (!eventId || !state) return;
+        button.disabled = true;
+        state.textContent = "正在启动原试剂的 V3 重跑...";
+        try {
+          const prepare = await fetch("/api/v3/invalid_results/prepare", {
+            method: "POST",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({event_id: eventId}),
+          });
+          const prepared = await prepare.json();
+          if (!prepare.ok) throw new Error(prepared.detail || "无法准备重跑");
+          const response = await fetch("/api/v3/invalid_results/retry", {
+            method: "POST",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({event_id: eventId, operation_ticket: prepared.ticket}),
+          });
+          const payload = await response.json();
+          if (!response.ok || !payload.started) throw new Error(payload.detail || payload.message || "无法启动重跑");
+          state.textContent = "已启动重跑；ERP 写入保持禁用。";
+        } catch (error) {
+          state.textContent = error.message || "重跑失败";
+          button.disabled = false;
+        }
+      });
     });
 
     document.querySelectorAll("[data-log-filter]").forEach((button) => {
@@ -248,11 +342,21 @@
       }
     });
 
+    function buildRunRequestData(form, action, selectedNumbers) {
+      const data = new FormData(form);
+      data.set("action", action);
+      data.set("target_list_numbers", selectedNumbers.join(","));
+      data.set("process_all_todos", data.has("process_all_todos") ? "true" : "false");
+      data.set("auto_pass", data.has("auto_pass") ? "true" : "false");
+      return data;
+    }
+
     document.querySelectorAll("button[data-action]").forEach((button) => {
       button.addEventListener("click", async () => {
-        const data = new FormData(runForm);
-        data.set("action", button.dataset.action);
-        data.set("target_list_numbers", selectedTodoNumbers().join(","));
+        const data = buildRunRequestData(runForm, button.dataset.action, selectedTodoNumbers());
+        const options = Object.fromEntries(data.entries());
+        const ticket = await operationTicket("run", options);
+        data.set("operation_ticket", ticket);
         const response = await fetch("/api/run", { method: "POST", body: data });
         const payload = await response.json();
         await refreshStatus();
@@ -298,7 +402,12 @@
       if (!confirm(`确认下载并安装 ${lastUpdateInfo.latest_version}？程序会自动退出并启动安装器。`)) return;
       setUpdateMessage("正在下载更新包并启动安装器，请稍候...");
       setDisabled("#installUpdateButton", true);
-      const response = await fetch("/api/update/install", { method: "POST" });
+      const ticket = await operationTicket("update", {});
+      const response = await fetch("/api/update/install", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({operation_ticket: ticket}),
+      });
       const payload = await response.json();
       if (!response.ok || !payload.started) {
         setUpdateMessage(payload.detail || payload.message || "更新未启动。");
@@ -419,6 +528,44 @@
         ? `已读取 ${payload.models.length} 个模型。`
         : (payload.error || "没有读取到模型列表，已保留默认模型。");
     });
+
+    async function testV3(mode) {
+      const button = document.querySelector(mode === "web" ? "#testV3ConnectionButton" : "#testV3ModelButton");
+      const status = document.querySelector("#v3TestStatus");
+      const addressMode = settingsForm?.querySelector('[name="v3_address_mode"]');
+      const modelChoice = settingsForm?.querySelector('[name="v3_model_choice"]');
+      const customModel = settingsForm?.querySelector('[name="v3_custom_model"]');
+      const apiKey = settingsForm?.querySelector('[name="v3_api_key"]');
+      const effectiveModel = modelChoice?.value === "custom" ? customModel?.value.trim() : modelChoice?.value;
+      button.disabled = true;
+      status.textContent = mode === "web" ? "正在测试 Responses 联网能力..." : "正在测试 Responses 模型能力...";
+      try {
+        const response = await fetch("/api/v3/test", {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({
+            v3_address_mode: addressMode?.value,
+            v3_workspace_id: settingsForm?.querySelector('[name="v3_workspace_id"]')?.value || "",
+            v3_custom_base_url: settingsForm?.querySelector('[name="v3_custom_base_url"]')?.value || "",
+            v3_effective_model: effectiveModel || "",
+            v3_api_key: apiKey?.value || "",
+            test_mode: mode,
+          }),
+        });
+        const payload = await response.json();
+        if (!response.ok) throw new Error(payload.detail || "测试失败");
+        status.textContent = mode === "web"
+          ? `联网可用：${payload.model}，${payload.elapsed_ms} ms，${payload.source_count} 个来源。`
+          : `模型可用：${payload.model}，${payload.elapsed_ms} ms，已通过 JSON 输出检查。`;
+      } catch (error) {
+        status.textContent = `测试失败：${error.message || error}`;
+      } finally {
+        button.disabled = false;
+      }
+    }
+    on("#testV3ModelButton", "click", () => testV3("model"));
+    on("#testV3ConnectionButton", "click", () => testV3("web"));
+
 
     function initSectionNav() {
       const links = Array.from(document.querySelectorAll('nav a[href^="#"]'));
@@ -556,6 +703,7 @@
       state.className = "save-state saved";
       settingsForm.querySelector('[name="erp_password"]').value = "";
       settingsForm.querySelector('[name="llm_api_key"]').value = "";
+      settingsForm.querySelector('[name="v3_api_key"]').value = "";
       settingsForm.querySelector('[name="dingtalk_stream_client_secret"]').value = "";
       settingsForm.querySelector('[name="dingtalk_stream_api_token"]').value = "";
       settingsForm.querySelector('[name="memory_sync_password"]').value = "";
@@ -842,7 +990,8 @@
       const suggestion = row.display_suggestion || row.suggested_category || "暂无可靠建议";
       const reason = row.display_reason || row.review_advice || "需人工核对物化特性。";
       const evidenceStatus = row.evidence_status || reviewEvidenceLabel(row);
-      const detail = localizeReviewDetailText(row.detail_summary || row.property_summary || "");
+      const withoutAddresses = (value) => String(value || "").replace(/https?:\/\/[^\s，；,)]+/g, "[来源]");
+      const detail = localizeReviewDetailText(withoutAddresses(row.detail_summary || row.property_summary || ""));
       const properties = [
         ["闪点", row.flash_point],
         ["沸点", row.boiling_point],
@@ -861,6 +1010,7 @@
       };
       const identityResolution = parseJson(row.identity_resolution);
       const sourceEvidenceItems = parseJson(row.source_evidence_items) || [];
+      const propertyEnrichment = parseJson(row.property_enrichment) || {};
       const nameIdentity = parseJson(row.name_identity) || identityResolution?.name_identity;
       const casIdentity = parseJson(row.cas_identity) || identityResolution?.cas_identity;
       const identityStatus = row.identity_status || identityResolution?.status || "";
@@ -869,12 +1019,13 @@
       const candidateText = (candidate) => {
         if (!candidate) return "";
         const label = candidate.name || candidate.query || candidate.cid || "未知";
-        return candidate.url ? `${escapeHtml(label)} <a href="${escapeHtml(candidate.url)}" target="_blank" rel="noreferrer">来源</a>` : escapeHtml(label);
+        return escapeHtml(withoutAddresses(label));
       };
       const identityBlock = (identityStatus || hasNameIdentity || hasCasIdentity) ? `
         <div class="review-detail-section"><strong>身份确认：</strong>
           ${identityStatus ? `状态：${escapeHtml(identityStatus)}；` : ""}
-          ${row.cas ? `ERP CAS：${escapeHtml(row.cas)}；` : ""}
+          ${row.cas ? `ERP CAS：${escapeHtml(row.cas)}；` : "ERP CAS：未提供；"}
+          ${row.candidate_cas ? `网页候选 CAS：${escapeHtml(row.candidate_cas)}；需人工确认后才能作为正式 CAS。` : ""}
           ${hasNameIdentity ? `名称身份：${candidateText(nameIdentity)}；` : ""}
           ${hasCasIdentity ? `CAS 身份：${candidateText(casIdentity)}` : ""}
         </div>` : "";
@@ -886,16 +1037,21 @@
           名称对应 CAS：${escapeHtml(row.corrected_cas || "-")}；
           判定依据：${escapeHtml(row.identity_decision_basis || "名称身份")}。
           ${row.cas_correction_source ? `来源：${escapeHtml(row.cas_correction_source)}；` : ""}
-          ${row.cas_correction_url ? `<a href="${escapeHtml(row.cas_correction_url)}" target="_blank" rel="noreferrer">来源链接</a>` : ""}
           <div class="review-detail-advisory">人工确认后才写入试剂记忆库；不自动修改 ERP CAS。</div>
         </div>` : "";
       const evidenceItemsBlock = Array.isArray(sourceEvidenceItems) && sourceEvidenceItems.length ? `
         <div class="review-detail-section"><strong>来源与物化证据：</strong>
-          <ul>${sourceEvidenceItems.map((item) => `<li>${escapeHtml(item.field || "属性")}：${escapeHtml(formatReviewEvidenceValue(item.value || "-", item.unit || ""))}；来源：${escapeHtml(item.source || "-")}${item.source_url ? `；<a href="${escapeHtml(item.source_url)}" target="_blank" rel="noreferrer">查看来源</a>` : ""}${item.conflict ? "；存在来源冲突" : ""}</li>`).join("")}</ul>
+          <ul>${sourceEvidenceItems.map((item) => `<li>${escapeHtml(item.field || "属性")}：${escapeHtml(formatReviewEvidenceValue(item.value || "-", item.unit || ""))}；状态：${escapeHtml(item.status || "unknown")}；来源：${escapeHtml(item.source || "-")}${item.source_updated_at ? `；来源时间：${escapeHtml(item.source_updated_at)}` : ""}${item.selected ? "；当前采用" : ""}${item.conflict ? `；存在来源冲突${item.selection_basis ? `（${escapeHtml(item.selection_basis)}）` : ""}` : ""}</li>`).join("")}</ul>
+        </div>` : "";
+      const enrichmentBlock = Object.keys(propertyEnrichment).length ? `
+        <div class="review-detail-section"><strong>物性补全：</strong>
+          已发起 ${escapeHtml(propertyEnrichment.requests ?? 0)} 次请求；耗时 ${escapeHtml(propertyEnrichment.elapsed_ms ?? 0)} ms；
+          ${Array.isArray(propertyEnrichment.missing_fields) && propertyEnrichment.missing_fields.length ? `仍缺失：${escapeHtml(propertyEnrichment.missing_fields.join(", "))}。` : "字段已覆盖或无待补字段。"}
+          ${Array.isArray(propertyEnrichment.diagnostics) && propertyEnrichment.diagnostics.length ? `<div class="review-detail-advisory">${escapeHtml(propertyEnrichment.diagnostics.map((item) => `${item.provider || "来源"}: ${item.status || "unknown"}`).join("；"))}</div>` : ""}
         </div>` : "";
       const ruleBlock = (row.matched_rule_ids || row.rule_version) ? `
         <div class="review-detail-section"><strong>规则判定：</strong>
-          命中规则：${escapeHtml(row.matched_rule_ids || "-")}；规则版本/指纹：${escapeHtml(row.rule_version || "-")}；正式结果：${escapeHtml(row.suggested_category || "需人工复核")}；复核原因：${escapeHtml(row.reason_full || row.reason || "-")}。
+          命中规则：${escapeHtml(row.matched_rule_ids || "-")}；规则版本/指纹：${escapeHtml(row.rule_version || "-")}；正式结果：${escapeHtml(row.suggested_category || "需人工复核")}；复核原因：${escapeHtml(withoutAddresses(row.reason_full || row.reason || "-"))}。
         </div>` : "";
       const identityOpinion = [
         row.llm_name_identity_opinion ? `名称身份意见：${row.llm_name_identity_opinion}` : "",
@@ -909,7 +1065,7 @@
         row.llm_advisory_uncertainties_cn ? `不确定性：${row.llm_advisory_uncertainties_cn}` : "",
       ].filter(Boolean).join("；");
       const opinionBlock = identityOpinion ? `
-        <div class="review-detail-section"><strong>LLM 第二意见：</strong>${escapeHtml(identityOpinion)}
+          <div class="review-detail-section"><strong>LLM 第二意见：</strong>${escapeHtml(withoutAddresses(identityOpinion))}
           <div class="review-detail-advisory">仅供人工参考，不作为自动审批依据；依据类型：${escapeHtml(row.llm_advisory_evidence_basis || "证据不足")}；置信度：${escapeHtml(row.llm_advisory_confidence || "-")}；模型：${escapeHtml(row.llm_provider || "-")} / ${escapeHtml(row.llm_model || "-")}；生成时间：${escapeHtml(row.llm_generated_at || "-")}；规则指纹：${escapeHtml(row.llm_rules_fingerprint || "-")}。</div>
         </div>` : "";
       return `
@@ -920,15 +1076,16 @@
           </div>
           <p><strong>建议：</strong>${escapeHtml(suggestion)}</p>
           <p><strong>原因：</strong>${escapeHtml(reason)}</p>
-          ${(detail || properties.length || identityBlock || opinionBlock) ? `
+          ${(detail || properties.length || identityBlock || enrichmentBlock || opinionBlock) ? `
             <details class="review-evidence-detail">
               <summary>查看详情</summary>
               ${identityBlock}
               ${correctionBlock}
               ${evidenceItemsBlock}
+              ${enrichmentBlock}
               ${ruleBlock}
               ${detail ? `<p>${escapeHtml(detail)}</p>` : ""}
-              ${properties.length ? `<p>${properties.map((item) => `${escapeHtml(item[0])}：${escapeHtml(localizeReviewDetailText(item[1]))}`).join(" · ")}</p>` : ""}
+              ${properties.length ? `<p>${properties.map((item) => `${escapeHtml(item[0])}：${escapeHtml(localizeReviewDetailText(withoutAddresses(item[1])))}`).join(" · ")}</p>` : ""}
               ${opinionBlock}
             </details>
           ` : ""}
@@ -1039,9 +1196,10 @@
             <strong>${escapeHtml(row.reagent_name || "-")}</strong>
             <span>${escapeHtml(row.standard_name || "-")}</span>
           </td>
-          <td class="review-cas-status-cell">
-            <span>${escapeHtml(row.cas || "-")}</span>
-            <span class="status-badge status-warning">${escapeHtml(row.status || "待复核")}</span>
+         <td class="review-cas-status-cell">
+           <span>${escapeHtml(row.cas || "-")}</span>
+            ${row.candidate_cas ? `<span>候选：${escapeHtml(row.candidate_cas)}</span>` : ""}
+           <span class="status-badge status-warning">${escapeHtml(row.status || "待复核")}</span>
           </td>
           <td class="reason-cell" title="${escapeHtml(row.reason_full || row.reason)}">
             <div>${escapeHtml(row.reason)}</div>
@@ -1051,16 +1209,18 @@
             <select class="review-category">${options}</select>
             <span class="review-selected">未选择</span>
           </td>
-          <td class="review-action-cell">
-            <button type="button" class="review-llm-advice review-secondary-action">${String(row.used_llm_manual_review_advice || "").toLowerCase() === "true" ? "查看第二意见" : "生成LLM第二意见"}</button>
-            <button type="button" class="review-confirm review-primary-action" disabled>确认入库</button>
+         <td class="review-action-cell">
+            ${row.candidate_cas ? `<input type="text" class="review-confirmed-cas" placeholder="确认 CAS（候选 ${escapeHtml(row.candidate_cas)}）" inputmode="text" />` : ""}
+           ${String(row.used_llm_manual_review_advice || "").toLowerCase() === "true" || row.llm_advisory_summary_cn || row.llm_advisory_reason_cn || row.llm_identity_opinion || row.llm_name_identity_opinion || row.llm_cas_identity_opinion ? "" : '<button type="button" class="review-llm-advice review-secondary-action">生成LLM第二意见</button>'}
+            <button type="button" class="review-confirm review-primary-action" disabled>确认分类并加入记忆库</button>
             <button type="button" class="review-delete review-danger-action">删除</button>
             <span class="review-row-message"></span>
           </td>
         `;
         const categorySelect = tr.querySelector(".review-category");
         const selectedText = tr.querySelector(".review-selected");
-        const confirmButton = tr.querySelector(".review-confirm");
+       const confirmButton = tr.querySelector(".review-confirm");
+        const confirmedCasInput = tr.querySelector(".review-confirmed-cas");
         const adviceButton = tr.querySelector(".review-llm-advice");
         const deleteButton = tr.querySelector(".review-delete");
         const rowMessage = tr.querySelector(".review-row-message");
@@ -1073,7 +1233,7 @@
         };
         categorySelect.addEventListener("change", updateReviewSelection);
         updateReviewSelection();
-        adviceButton.addEventListener("click", async () => {
+        adviceButton?.addEventListener("click", async () => {
           adviceButton.disabled = true;
           rowMessage.textContent = "正在生成 LLM 第二意见...";
           rowMessage.className = "review-row-message";
@@ -1122,8 +1282,9 @@
               list_number: row.list_number,
               sequence: row.sequence,
               reagent_name: row.reagent_name,
-              cas: row.cas,
-              standard_name: row.standard_name,
+             cas: row.cas,
+              confirmed_cas: confirmedCasInput ? confirmedCasInput.value.trim() : "",
+             standard_name: row.standard_name,
               cleaned_name: row.cleaned_name,
               specification: row.specification,
               unit: row.unit,
@@ -1138,7 +1299,7 @@
             confirmButton.disabled = false;
             return;
           }
-          rowMessage.textContent = payload.message || "已确认入库。";
+          rowMessage.textContent = payload.message || "已确认分类并加入试剂记忆库；ERP 写入将在已验证的自动化链路中执行。";
           rowMessage.className = "review-row-message ok";
           await Promise.all([refreshStatus(), refreshReviewQueue({force: true})]);
         });
@@ -1809,9 +1970,10 @@
         const payload = await readDashboardJSON("/api/enrichment_shadow");
         const comparisons = Number(payload.shadow_comparisons || 0);
         const matched = Number(payload.same_category_count || 0);
-        setText("#enrichmentShadowStatus", comparisons ? "正在积累影子验收数据" : "尚无真实影子样本");
+        const formal = Boolean(payload.enabled) && !Boolean(payload.shadow_mode);
+        setText("#enrichmentShadowStatus", formal ? "正在按 V2 正式模式运行" : (comparisons ? "正在积累影子对照数据" : "尚无真实影子样本"));
         setText("#enrichmentShadowMode", payload.shadow_mode ? "已启用" : "未启用");
-        setText("#enrichmentProductionMode", payload.enabled ? "已启用" : "保持关闭");
+        setText("#enrichmentProductionMode", formal ? "已启用" : "保持关闭");
         setText("#enrichmentShadowComparisons", comparisons);
         setText("#enrichmentShadowMatchRate", comparisons ? `${((matched / comparisons) * 100).toFixed(1)}%` : "-");
         setText("#enrichmentProviderCalls", Number(payload.provider_calls || 0));
@@ -1926,6 +2088,11 @@
       setText("#runLlmSkips", safe(runSummary.llm_skip_count, "-"));
       setText("#runDuplicateSearchReuse", safe(runSummary.duplicate_search_reuse_count, "-"));
       setText("#runDuplicateLlmReuse", safe(runSummary.duplicate_llm_reuse_count, "-"));
+      setText("#runIdentityEnrichmentCalls", safe(runSummary.identity_enrichment_call_count, "-"));
+      setText("#runIdentityEnrichmentEnglish", safe(runSummary.identity_enrichment_english_candidate_count, "-"));
+      setText("#runIdentityEnrichmentCas", safe(runSummary.identity_enrichment_cas_candidate_count, "-"));
+      setText("#runIdentityEnrichmentVerified", safe(runSummary.identity_enrichment_verified_count, "-"));
+      setText("#runIdentityEnrichmentFailures", safe(runSummary.identity_enrichment_failure_count, "-"));
       setText("#runManualReviewQueued", safe(runSummary.manual_review_queued_count, "-"));
       setText("#runManualReviewUpdated", safe(runSummary.manual_review_updated_count, "-"));
       setText("#runManualReviewFlushes", safe(runSummary.manual_review_batch_flush_count, "-"));
@@ -1935,6 +2102,7 @@
       setText("#runApiWriteAttempt", safe(runSummary.api_write_attempt_count, "-"));
       setText("#runApiWriteSuccess", safe(runSummary.api_write_success_count, "-"));
       setText("#runApiVerifyFailure", safe(runSummary.api_verify_failure_count, "-"));
+      setText("#runApiPageStaleWarning", safe(runSummary.api_page_stale_warning_count, "-"));
       setText("#runApiFallbackWebWrite", safe(runSummary.api_fallback_web_write_count, "-"));
       setText("#runWriteSuccess", safe(runSummary.write_success_count, "-"));
       setText("#runWriteFailure", safe(runSummary.write_failure_count, "-"));

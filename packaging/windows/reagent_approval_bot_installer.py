@@ -11,8 +11,15 @@ import textwrap
 import time
 import zipfile
 import ctypes
+import hashlib
+import json
 from queue import Empty, Queue
 from typing import Any
+
+try:
+    from secure_update import atomic_json, safe_extract_zip, sha256_file, stage_version, switch_current
+except ImportError:  # The legacy installer remains usable when built without the secure updater module.
+    atomic_json = safe_extract_zip = sha256_file = stage_version = switch_current = None
 
 
 APP_NAME = "ReagentApprovalBot"
@@ -163,6 +170,11 @@ def payload_zip() -> Path:
     if not path.exists():
         raise FileNotFoundError(f"Installer payload not found: {path}")
     return path
+
+
+def secure_payload_dir() -> Path | None:
+    path = bundled_root() / "payload"
+    return path if (path / "release-manifest.json").is_file() else None
 
 
 def install_dir() -> Path:
@@ -467,6 +479,10 @@ def perform_install(progress: ProgressReporter, state: dict[str, Path]) -> Path:
     progress.update("Checking install directory permissions...", str(target))
     ensure_install_dir_writable(target)
 
+    secure_payload = secure_payload_dir()
+    if secure_payload is not None:
+        return perform_versioned_install(progress, state, target, runtime, log_path, secure_payload)
+
     with tempfile.TemporaryDirectory(prefix="ReagentApprovalBotInstall_") as tmp:
         temp_root = Path(tmp)
         extracted = temp_root / "payload"
@@ -499,6 +515,57 @@ def perform_install(progress: ProgressReporter, state: dict[str, Path]) -> Path:
         create_shortcuts(target)
 
     write_install_log(log_path, "Installation complete.")
+    return target
+
+
+def perform_versioned_install(
+    progress: ProgressReporter,
+    state: dict[str, Path],
+    target: Path,
+    runtime: Path,
+    log_path: Path,
+    payload: Path,
+) -> Path:
+    if not all((atomic_json, safe_extract_zip, sha256_file, stage_version, switch_current)):
+        raise RuntimeError("Secure installer payload is incomplete.")
+    manifest = json.loads((payload / "release-manifest.json").read_text(encoding="utf-8"))
+    version = str(manifest.get("release_version") or "")
+    assets = {str(item.get("kind") or ""): item for item in manifest.get("assets") or []}
+    core = assets.get("core")
+    browser = assets.get("browser")
+    if not version or not core or not browser:
+        raise RuntimeError("Secure installer manifest is missing core or browser assets.")
+    core_path = payload / str(core.get("name") or "")
+    browser_path = payload / str(browser.get("name") or "")
+    for item, path in ((core, core_path), (browser, browser_path)):
+        expected = str(item.get("sha256") or "").lower()
+        if not path.is_file() or sha256_file(path).lower() != expected:
+            raise RuntimeError("Installer payload checksum verification failed.")
+
+    if target.exists():
+        progress.update("Migrating local data...", str(runtime))
+        migrate_legacy_data(target, runtime, log_path)
+    target.mkdir(parents=True, exist_ok=True)
+    bootstrap = payload / "ReagentApprovalBotBootstrap.exe"
+    updater = payload / "ReagentApprovalBotUpdater.exe"
+    if not bootstrap.is_file() or not updater.is_file():
+        raise RuntimeError("Secure installer is missing bootstrap or updater executable.")
+    progress.update("Installing stable launcher...", str(target))
+    shutil.copy2(bootstrap, target / "ReagentApprovalBot.exe")
+    shutil.copy2(updater, target / "ReagentApprovalBotUpdater.exe")
+    revision = str(browser.get("browser_revision") or "")
+    browser_dir = target / "shared" / "browsers" / revision
+    if not browser_dir.exists():
+        progress.update("Installing browser runtime...", revision)
+        safe_extract_zip(browser_path, browser_dir)
+    progress.update("Installing application version...", version)
+    stage_version(core_path, target, version)
+    switch_current(target, version, revision)
+    atomic_json(target / "browser-current.json", {"revision": revision, "path": f"shared/browsers/{revision}"})
+    atomic_json(target / "install.json", {"schema": 2, "version": version, "runtime": str(runtime)})
+    write_uninstaller(target)
+    create_shortcuts(target)
+    write_install_log(log_path, f"Versioned installation complete: {version}")
     return target
 
 

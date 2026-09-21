@@ -15,6 +15,28 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
 const source = fs.readFileSync('src/static/dashboard.js', 'utf8');
+const runDataHelper = source.slice(source.indexOf('    function buildRunRequestData('),
+                                   source.indexOf('    document.querySelectorAll("button[data-action]")'));
+class FakeFormData {
+  constructor(form) { this.values = new Map(form.entries || []); }
+  has(key) { return this.values.has(key); }
+  set(key, value) { this.values.set(key, value); }
+  get(key) { return this.values.get(key); }
+  entries() { return this.values.entries(); }
+}
+const runContext = vm.createContext({FormData: FakeFormData});
+vm.runInContext(runDataHelper, runContext);
+const unchecked = runContext.buildRunRequestData(
+  {entries: [['approval_write_mode', 'multi_page']]}, 'suggestions', ['SJ1']
+);
+assert.equal(unchecked.get('process_all_todos'), 'false');
+assert.equal(unchecked.get('auto_pass'), 'false');
+assert.equal(unchecked.get('target_list_numbers'), 'SJ1');
+const checked = runContext.buildRunRequestData(
+  {entries: [['process_all_todos', 'true'], ['auto_pass', 'true']]}, 'suggestions', []
+);
+assert.equal(checked.get('process_all_todos'), 'true');
+assert.equal(checked.get('auto_pass'), 'true');
 const helper = source.slice(source.indexOf('    let statusRefreshPromise = null;'),
                             source.indexOf('    async function readAndRenderStatus('));
 let finish, calls = 0, label = '', timeout, cleared = 0;

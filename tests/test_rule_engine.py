@@ -256,6 +256,56 @@ class RuleEngineTest(unittest.TestCase):
         self.assertTrue(result["need_manual_review"])
         self.assertNotEqual(result["final_category"], "易燃液体")
 
+    def test_flash_point_greater_than_value_does_not_borrow_following_temperature(self) -> None:
+        result = self.engine.classify(
+            {
+                "reagent_name": "乙酸钠(色谱级)",
+                "standard_name": "乙酸钠",
+                "cas": "127-09-3",
+                "text": (
+                    "Sodium acetate Density 1.45 Boiling Point 117.1ºC at 760 mmHg "
+                    "Melting Point 324 °C Molecular Formula C2H3NaO2 "
+                    "Flash Point >250 °C Exact Mass 82.003075 PSA 40.13000 "
+                    "Vapour Pressure 13.9mmHg at 25°C Index of Refraction 1.464 (20ºC)"
+                ),
+                "allow_default_normal": True,
+            }
+        )
+
+        self.assertEqual(result["final_category"], "普通类")
+        self.assertNotIn("易燃液体", result["matched_categories"])
+        self.assertFalse(result["need_manual_review"])
+
+    def test_sodium_salt_low_flash_point_does_not_auto_classify_as_flammable(self) -> None:
+        result = self.engine.classify(
+            {
+                "reagent_name": "乙酸钠",
+                "standard_name": "乙酸钠",
+                "cas": "127-09-3",
+                "text": "乙酸钠溶液。Flash Point 25 °C.",
+                "flash_point": "25 °C",
+                "allow_default_normal": True,
+            }
+        )
+
+        self.assertTrue(result["need_manual_review"])
+        self.assertNotEqual(result["final_category"], "易燃液体")
+        self.assertIn("钠盐", result["reason"])
+
+    def test_salt_requires_explicit_flammable_liquid_statement_for_flammable(self) -> None:
+        result = self.engine.classify(
+            {
+                "reagent_name": "测试酸钠盐溶液",
+                "standard_name": "测试酸钠盐",
+                "text": "Supplier SDS Section 2: Flammable liquid. Flash Point 25 °C. liquid solution.",
+                "flash_point": "25 °C",
+                "allow_default_normal": True,
+            }
+        )
+
+        self.assertEqual(result["final_category"], "易燃液体")
+        self.assertFalse(result["need_manual_review"])
+
     def test_flammable_suggestion_alone_does_not_classify(self) -> None:
         result = self.engine.classify(
             {

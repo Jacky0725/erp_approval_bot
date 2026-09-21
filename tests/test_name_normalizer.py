@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import json
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 import yaml
 
@@ -50,6 +52,48 @@ class NameNormalizerTest(unittest.TestCase):
         self.assertEqual(result["concentration"], "0.1mol/L")
         self.assertFalse(result["need_manual_review"])
 
+    def test_specification_and_package_metadata_do_not_affect_identity(self) -> None:
+        result = self.normalizer.normalize(
+            raw_name="氢氧化钠",
+            specification="0.1mol/L",
+            unit="瓶",
+            包装方式="箱装",
+        )
+
+        self.assertEqual(result["standard_name"], "氢氧化钠")
+        self.assertEqual(result["concentration"], "")
+
+    def test_llm_name_request_excludes_specification_unit_and_package_metadata(self) -> None:
+        captured: dict[str, object] = {}
+
+        class FakeCompletions:
+            def create(self, **kwargs: object) -> SimpleNamespace:
+                captured.update(kwargs)
+                return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=json.dumps({
+                    "standard_name": "测试化合物",
+                    "english_name": "test compound",
+                    "confidence": 0.8,
+                    "reason": "fixture",
+                }, ensure_ascii=False)))])
+
+        normalizer = NameNormalizer(root_dir=ROOT_DIR, enable_llm=True)
+        normalizer._has_api_key = lambda: True  # type: ignore[method-assign]
+        normalizer._client = lambda: SimpleNamespace(chat=SimpleNamespace(completions=FakeCompletions()))  # type: ignore[method-assign]
+
+        normalizer.normalize(
+            raw_name="待标准化名称",
+            specification="500 mL",
+            unit="瓶",
+            包装方式="箱装",
+        )
+
+        messages = captured["messages"]
+        assert isinstance(messages, list)
+        payload = json.loads(messages[1]["content"])
+        self.assertNotIn("specification", payload)
+        self.assertNotIn("unit", payload)
+        self.assertNotIn("extra_fields", payload)
+
     def test_unmatched_name_needs_manual_review_without_llm(self) -> None:
         result = self.normalizer.normalize(raw_name="客户自编号未知混合液 1M")
 
@@ -80,6 +124,12 @@ class NameNormalizerTest(unittest.TestCase):
         self.assertEqual(result["english_name"], "Silver diethyldithiocarbamate")
         self.assertEqual(result["cas"], "1470-61-7")
         self.assertFalse(result["need_manual_review"])
+
+    def test_trailing_purity_grade_is_removed_with_or_without_space(self) -> None:
+        for raw_name in ("硫酸 AR", "硫酸AR", "硫酸 GR", "硫酸GR", "硫酸 CP", "硫酸CP"):
+            with self.subTest(raw_name=raw_name):
+                result = self.normalizer.normalize(raw_name=raw_name)
+                self.assertEqual(result["cleaned_name"], "硫酸")
 
     def test_update_aliases_after_approval(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

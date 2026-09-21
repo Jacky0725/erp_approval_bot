@@ -75,6 +75,7 @@ SUPPLEMENTAL_EXAMPLES = [
     ("\u6c27\u5316\u5242", "\u91cd\u94ec\u9178\u94be", "contains", "\u6807\u51c6\u5316\u6c27\u5316\u5242\u793a\u4f8b\uff1a\u91cd\u94ec\u9178\u76d0"),
     ("\u6c27\u5316\u5242", "\u91cd\u94ec\u9178\u94a0", "contains", "\u6807\u51c6\u5316\u6c27\u5316\u5242\u793a\u4f8b\uff1a\u91cd\u94ec\u9178\u76d0"),
     ("\u6c27\u5316\u5242", "\u91cd\u94ec\u9178\u76d0", "contains", "\u6807\u51c6\u5316\u6c27\u5316\u5242\u793a\u4f8b\uff1a\u91cd\u94ec\u9178\u76d0"),
+    ("\u5f3a\u53cd\u5e94\u6027", "\u4e94\u6c27\u5316\u4e8c\u78f7", "contains", "\u6807\u51c6\u5316\u5f3a\u53cd\u5e94\u6027\u793a\u4f8b\uff1a\u4e94\u6c27\u5316\u4e8c\u78f7"),
 ]
 
 SUPPLEMENTAL_NOTES = [
@@ -140,6 +141,50 @@ SPECIAL_RULES = [
         "condition": "concentration <= 72%",
         "confidence": 0.88,
         "description": "perchloric acid at or below 72%",
+        "enabled": True,
+    },
+    {
+        "rule_id": "SPECIAL-REA-001",
+        "category": "\u5f3a\u53cd\u5e94\u6027",
+        "match_type": "keyword",
+        "field_scope": "name,text,evidence",
+        "pattern": "\u4e94\u6c27\u5316\u4e8c\u78f7",
+        "condition": "any",
+        "confidence": 0.92,
+        "description": "phosphorus pentoxide strong reactivity",
+        "enabled": True,
+    },
+    {
+        "rule_id": "IRR-GHS-SKIN",
+        "category": "\u523a\u6fc0\u6027",
+        "match_type": "regex",
+        "field_scope": "text,evidence",
+        "pattern": r"(?:\bH\s*315\b|\u9020\u6210\u76ae\u80a4\u523a\u6fc0|\u5f15\u8d77\u76ae\u80a4\u523a\u6fc0|causes?\s+skin\s+irritation)",
+        "condition": "any",
+        "confidence": 0.82,
+        "description": "\u4ec5\u6839\u636e\u53ef\u9760 SDS/GHS \u76ae\u80a4\u6216\u773c\u523a\u6fc0\u8bc1\u636e\u5206\u7c7b\uff1bH314/H318/H317/H335 \u4e0d\u7528\u4e8e\u81ea\u52a8\u5224\u5b9a\u3002",
+        "enabled": True,
+    },
+    {
+        "rule_id": "IRR-GHS-EYE",
+        "category": "\u523a\u6fc0\u6027",
+        "match_type": "regex",
+        "field_scope": "text,evidence",
+        "pattern": r"(?:\bH\s*319\b|\u9020\u6210\u4e25\u91cd\u773c\u523a\u6fc0|\u5f15\u8d77\u4e25\u91cd\u773c\u523a\u6fc0|causes?\s+serious\s+eye\s+irritation)",
+        "condition": "any",
+        "confidence": 0.82,
+        "description": "\u4ec5\u6839\u636e\u53ef\u9760 SDS/GHS \u76ae\u80a4\u6216\u773c\u523a\u6fc0\u8bc1\u636e\u5206\u7c7b\uff1bH314/H318/H317/H335 \u4e0d\u7528\u4e8e\u81ea\u52a8\u5224\u5b9a\u3002",
+        "enabled": True,
+    },
+    {
+        "rule_id": "IRR-LACH",
+        "category": "\u523a\u6fc0\u6027",
+        "match_type": "regex",
+        "field_scope": "text,evidence",
+        "pattern": r"(?:\u50ac\u6cea|lachrymatory)",
+        "condition": "any",
+        "confidence": 0.80,
+        "description": "\u4ec5\u5f53\u6765\u6e90\u660e\u786e\u8bb0\u8f7d\u50ac\u6cea\u6027\u65f6\u5206\u4e3a\u523a\u6fc0\u6027\u3002",
         "enabled": True,
     },
 ]
@@ -270,6 +315,12 @@ def _rules_sheet(legacy: LegacyRules, priority: list[str]) -> pd.DataFrame:
         explanations = legacy.grouped.loc[category, "explanation"]
         for explanation_index, explanation in enumerate(explanations, start=1):
             for keyword in _keywords_from_text(explanation):
+                if category == "\u523a\u6fc0\u6027" and keyword in {
+                    "\u5bf9\u76ae\u80a4",
+                    "\u773c\u775b\u7b49\u5177\u6709\u5f3a\u523a\u6fc0\u6027",
+                    "\u50ac\u6cea",
+                }:
+                    continue
                 condition = _condition_for(category, keyword, explanation)
                 key = (category, keyword, condition)
                 if key in seen:

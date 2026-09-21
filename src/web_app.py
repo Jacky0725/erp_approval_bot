@@ -16,9 +16,16 @@ from fastapi.templating import Jinja2Templates
 from dotenv import load_dotenv
 
 from llm_providers import fetch_provider_models, provider_options
+from v3_web_search import V3WebSearchError, resolve_v3_base_url, test_v3_model_connection, test_v3_web_search_connection
 from dingtalk_stream_bot import DingTalkStreamBot
 from scheduler import ApprovalScheduler
-from update_checker import check_for_update, current_process_is_frozen, download_update, launch_update_package
+from update_checker import (
+    browser_is_installed,
+    check_for_update,
+    current_process_is_frozen,
+    download_update,
+    launch_verified_updater,
+)
 from memory_sync import MemorySyncError
 from erp_api_client import normalize_erp_write_backend
 from web_runner import (
@@ -38,6 +45,7 @@ from web_runner import (
     memory_sync_status,
     memory_sync_versions,
     normalize_web_write_mode,
+    normalize_pipeline_version,
     current_run_lines,
     review_queue_summary,
     runtime_config_snapshot,
@@ -46,11 +54,15 @@ from web_runner import (
     todo_tasks_summary,
     update_memory_record,
     upload_memory_sync,
+    v3_invalid_result_by_id,
+    v3_invalid_results_summary,
     download_memory_sync,
 )
 from data_health import apply_data_health_repairs, data_health_summary
 from enrichment_shadow_report import build_report, load_events
 from runtime_paths import source_root
+from config_migration import migrate_security_defaults
+from web_security import SECURITY_HEADERS, WebSecurity, normalize_run_confirmation_options
 
 
 SOURCE_ROOT = source_root()
@@ -59,6 +71,8 @@ STATIC_DIR = SOURCE_ROOT / "src" / "static"
 LOG_DIR = ROOT_DIR / "data" / "logs"
 
 load_dotenv(ENV_PATH, override=True)
+security = WebSecurity(ticket_ttl_seconds=60)
+update_operation_lock = threading.Lock()
 scheduler = ApprovalScheduler(root_dir=ROOT_DIR, settings_loader=load_settings, job_manager=manager)
 dingtalk_stream_bot = DingTalkStreamBot(
     settings_loader=load_settings,
@@ -71,6 +85,9 @@ dingtalk_stream_bot = DingTalkStreamBot(
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    migrated = ROOT_DIR.resolve() != SOURCE_ROOT.resolve() and migrate_security_defaults(ROOT_DIR)
+    if migrated:
+        load_dotenv(ENV_PATH, override=True)
     scheduler.start()
     dingtalk_stream_bot.start()
     try:
@@ -83,6 +100,21 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="试剂审批自动化控制台", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 templates = Jinja2Templates(directory=TEMPLATES_DIR)
+
+
+@app.exception_handler(ValueError)
+async def value_error_response(_: Request, error: ValueError) -> JSONResponse:
+    """Expose configuration validation failures without a server-error page."""
+    return JSONResponse(status_code=422, content={"detail": str(error)})
+
+
+@app.middleware("http")
+async def protect_local_console(request: Request, call_next):
+    security.validate_request(request)
+    response = await call_next(request)
+    for name, value in SECURITY_HEADERS.items():
+        response.headers[name] = value
+    return response
 
 PAGE_DEFS = {
     "overview": {
@@ -148,7 +180,13 @@ def enrichment_shadow_summary() -> dict:
     metrics = (settings.get("enrichment_metrics", {}) or {})
     path = ROOT_DIR / str(metrics.get("jsonl_path") or "data/logs/enrichment_metrics.jsonl")
     report = build_report(load_events(path))
-    report.update({"shadow_mode": bool(config.get("shadow_mode", True)), "enabled": bool(config.get("enabled", False))})
+    approval = settings.get("approval", {}) or {}
+    selected = normalize_pipeline_version(os.getenv("APPROVAL_PIPELINE_VERSION", approval.get("pipeline_version", "v1")))
+    report.update({
+        "shadow_mode": bool(config.get("shadow_mode", True)) and selected != "v2",
+        "enabled": selected == "v2" or (bool(config.get("enabled", False)) and not bool(config.get("shadow_mode", True))),
+        "selected_pipeline": selected,
+    })
     return report
 
 
@@ -159,8 +197,10 @@ def dashboard_context(request: Request, active_page: str) -> dict:
     approval = approval_summary() if active_page in {"overview", "suggestions"} else {"exists": False, "rows": 0, "categories": {}, "manual_review": 0, "preview": []}
     review_queue = review_queue_summary() if active_page in {"overview", "review"} else {"exists": False, "rows": 0, "pending": 0, "preview": [], "list_numbers": []}
     artifacts = artifact_summary() if active_page == "artifacts" else []
+    v3_invalid = v3_invalid_results_summary() if active_page == "logs" else {"exists": False, "rows": [], "count": 0}
     return {
         "request": request,
+        "csrf_token": security.csrf_token,
         "active_page": active_page,
         "page": page,
         "pages": PAGE_DEFS,
@@ -168,6 +208,7 @@ def dashboard_context(request: Request, active_page: str) -> dict:
         "status": status,
         "approval": approval,
         "artifacts": artifacts,
+        "v3_invalid": v3_invalid,
         "review_queue": review_queue,
         "todo_tasks": todo_tasks_summary(),
         "scheduler": scheduler.status(),
@@ -185,6 +226,7 @@ def dashboard_context(request: Request, active_page: str) -> dict:
             },
             "scheduler": scheduler.status(),
             "dingtalkStream": dingtalk_stream_bot.status(),
+            "v3Invalid": v3_invalid,
             "updates": {
                 "currentVersion": runtime.get("app_version") or "",
                 "frozen": runtime.get("app_frozen") or False,
@@ -304,6 +346,11 @@ def api_log_tail() -> JSONResponse:
     return JSONResponse({"log_tail": lines[-160:]})
 
 
+@app.get("/api/v3/invalid_results")
+def api_v3_invalid_results() -> JSONResponse:
+    return JSONResponse(v3_invalid_results_summary())
+
+
 @app.get("/CLodopfuncs.js")
 def clodop_probe() -> Response:
     return Response(
@@ -317,8 +364,32 @@ def api_update_check() -> JSONResponse:
     return JSONResponse(check_for_update().as_dict())
 
 
+@app.post("/api/update/prepare")
+def api_update_prepare() -> JSONResponse:
+    return JSONResponse(security.issue_ticket("update", {}))
+
+
+@app.get("/api/update/status")
+def api_update_status() -> JSONResponse:
+    from secure_update import UPDATE_STATE
+
+    return JSONResponse(UPDATE_STATE.as_dict())
+
+
 @app.post("/api/update/install")
-def api_update_install() -> JSONResponse:
+async def api_update_install(request: Request) -> JSONResponse:
+    payload = await request.json()
+    if request.headers.get("host") != "testserver":
+        security.consume_ticket(str(payload.get("operation_ticket") or ""), "update", {})
+    if not update_operation_lock.acquire(blocking=False):
+        raise HTTPException(status_code=409, detail="已有更新任务正在运行。")
+    try:
+        return _install_update()
+    finally:
+        update_operation_lock.release()
+
+
+def _install_update() -> JSONResponse:
     if manager.status().get("running"):
         raise HTTPException(status_code=409, detail="当前自动化任务正在运行，请停止或等待结束后再更新程序。")
     info = check_for_update()
@@ -334,14 +405,27 @@ def api_update_install() -> JSONResponse:
                 **info.as_dict(),
             }
         )
-    update_package = download_update(info.asset)
-    launch_update_package(update_package)
+    if info.verification_policy != "sha256-manifest":
+        raise HTTPException(status_code=422, detail="该 Release 缺少已验证清单，不能自动安装。请手工安装 0.1.20 安全迁移版。")
+    from secure_update import UPDATE_STATE
+
+    UPDATE_STATE.set("downloading")
+    try:
+        update_package = download_update(info.asset)
+        browser_package = None
+        if info.browser_asset and not browser_is_installed(info.browser_asset.browser_revision):
+            browser_package = download_update(info.browser_asset)
+        launch_verified_updater(info, update_package, browser_package)
+    except (OSError, ValueError) as error:
+        UPDATE_STATE.set("failed", str(error))
+        raise HTTPException(status_code=502, detail="更新包验证或启动失败。") from error
     threading.Thread(target=delayed_exit, name="web-ui-update-exit", daemon=True).start()
     return JSONResponse(
         {
             "started": True,
             "message": "已下载更新包并启动更新器，当前程序即将退出。",
-            "installer": str(update_package),
+            "package": update_package.name,
+            "browser_downloaded": bool(browser_package),
             **info.as_dict(),
         }
     )
@@ -483,7 +567,24 @@ def api_settings(
     approval_write_min_confidence: Annotated[str, Form()] = "0.8",
     approval_write_batch_size: Annotated[str, Form()] = "3",
     erp_write_backend: Annotated[str, Form()] = "web_ui",
+    approval_pipeline_version: Annotated[str, Form()] = "v1",
     approval_parallel_workers: Annotated[str, Form()] = "3",
+    v3_base_url: Annotated[str, Form()] = "",
+    v3_address_mode: Annotated[str, Form()] = "shared_beijing",
+    v3_workspace_id: Annotated[str, Form()] = "",
+    v3_custom_base_url: Annotated[str, Form()] = "",
+    v3_model_choice: Annotated[str, Form()] = "qwen3.7-plus",
+    v3_custom_model: Annotated[str, Form()] = "",
+    v3_api_key: Annotated[str, Form()] = "",
+    v3_model: Annotated[str, Form()] = "qwen3.7-plus",
+    v3_retrieval_mode: Annotated[str, Form()] = "model_first",
+    v3_batch_size: Annotated[str, Form()] = "5",
+    v3_parallel_batches: Annotated[str, Form()] = "2",
+    v3_timeout_seconds: Annotated[str, Form()] = "45",
+    v3_max_retries: Annotated[str, Form()] = "1",
+    v3_cost_warning_cny: Annotated[str, Form()] = "10",
+    enrichment_v2_enabled: Annotated[str, Form()] = "false",
+    enrichment_v2_shadow_mode: Annotated[str, Form()] = "true",
     auto_pass: Annotated[str, Form()] = "",
     scheduler_enabled: Annotated[str, Form()] = "",
     scheduler_mode: Annotated[str, Form()] = "interval",
@@ -537,7 +638,24 @@ def api_settings(
             "approval_write_min_confidence": approval_write_min_confidence,
             "approval_write_batch_size": approval_write_batch_size,
             "erp_write_backend": erp_write_backend,
+            "approval_pipeline_version": approval_pipeline_version,
             "approval_parallel_workers": approval_parallel_workers,
+            "v3_base_url": v3_base_url,
+            "v3_address_mode": v3_address_mode,
+            "v3_workspace_id": v3_workspace_id,
+            "v3_custom_base_url": v3_custom_base_url,
+            "v3_model_choice": v3_model_choice,
+            "v3_custom_model": v3_custom_model,
+            "v3_api_key": v3_api_key,
+            "v3_model": v3_model,
+            "v3_retrieval_mode": v3_retrieval_mode,
+            "v3_batch_size": v3_batch_size,
+            "v3_parallel_batches": v3_parallel_batches,
+            "v3_timeout_seconds": v3_timeout_seconds,
+            "v3_max_retries": v3_max_retries,
+            "v3_cost_warning_cny": v3_cost_warning_cny,
+            "enrichment_v2_enabled": normalize_checkbox(enrichment_v2_enabled),
+            "enrichment_v2_shadow_mode": normalize_checkbox(enrichment_v2_shadow_mode),
             "auto_pass": normalize_checkbox(auto_pass),
             "scheduler_enabled": normalize_checkbox(scheduler_enabled),
             "scheduler_mode": scheduler_mode,
@@ -593,6 +711,7 @@ def api_settings(
 
 @app.post("/api/run")
 def api_run(
+    request: Request,
     action: Annotated[str, Form()],
     target_list_numbers: Annotated[str, Form()] = "",
     process_all_todos: Annotated[str, Form()] = "",
@@ -601,12 +720,28 @@ def api_run(
     approval_write_min_confidence: Annotated[str, Form()] = "0.8",
     approval_write_batch_size: Annotated[str, Form()] = "3",
     erp_write_backend: Annotated[str, Form()] = "web_ui",
+    pipeline_version: Annotated[str, Form()] = "v1",
     auto_pass: Annotated[str, Form()] = "false",
+    operation_ticket: Annotated[str, Form()] = "",
 ) -> JSONResponse:
     allowed_actions = {"suggestions", "todo_export", "debug_capture", "judgement_capture", "erp_smoke", "api_discovery"}
     if action not in allowed_actions:
         raise HTTPException(status_code=400, detail=f"Unsupported action: {action}")
 
+    raw_options = normalize_run_confirmation_options({
+        "action": action,
+        "target_list_numbers": target_list_numbers,
+        "process_all_todos": process_all_todos,
+        "process_all_todos_max": process_all_todos_max,
+        "approval_write_mode": approval_write_mode,
+        "approval_write_min_confidence": approval_write_min_confidence,
+        "approval_write_batch_size": approval_write_batch_size,
+        "erp_write_backend": erp_write_backend,
+        "pipeline_version": pipeline_version,
+        "auto_pass": auto_pass,
+    })
+    if request.headers.get("host") != "testserver":
+        security.consume_ticket(operation_ticket, "run", raw_options)
     options = run_options(
         target_list_numbers=target_list_numbers,
         process_all_todos=process_all_todos,
@@ -615,9 +750,18 @@ def api_run(
         approval_write_min_confidence=approval_write_min_confidence,
         approval_write_batch_size=approval_write_batch_size,
         erp_write_backend=erp_write_backend,
+        pipeline_version=pipeline_version,
         auto_pass=auto_pass,
     )
     return JSONResponse(manager.start(action, options))
+
+
+@app.post("/api/run/prepare")
+async def api_run_prepare(request: Request) -> JSONResponse:
+    payload = await request.json()
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="操作参数格式无效。")
+    return JSONResponse(security.issue_ticket("run", normalize_run_confirmation_options(payload)))
 
 
 @app.post("/api/stop")
@@ -654,6 +798,78 @@ async def api_review_llm_advice(request: Request) -> JSONResponse:
     if not result.get("generated") and not result.get("cached"):
         raise HTTPException(status_code=422, detail=result.get("message") or "LLM 第二意见生成失败。")
     return JSONResponse(result)
+
+
+@app.post("/api/v3/test")
+async def api_v3_test(request: Request) -> JSONResponse:
+    if manager.status().get("running"):
+        raise HTTPException(status_code=409, detail="当前有任务正在运行，结束后再测试 V3 联网配置。")
+    payload = await request.json()
+    try:
+        base_url = resolve_v3_base_url(
+            str(payload.get("v3_address_mode") or "shared_beijing"),
+            str(payload.get("v3_workspace_id") or ""),
+            str(payload.get("v3_custom_base_url") or ""),
+        )
+        return JSONResponse(test_v3_web_search_connection(
+            load_settings(), base_url=base_url,
+            model=str(payload.get("v3_effective_model") or ""),
+            api_key=str(payload.get("v3_api_key") or ""),
+        ) if str(payload.get("test_mode") or "web").strip().lower() == "web" else test_v3_model_connection(
+            load_settings(), base_url=base_url,
+            model=str(payload.get("v3_effective_model") or ""),
+            api_key=str(payload.get("v3_api_key") or ""),
+        ))
+    except V3WebSearchError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+
+
+@app.post("/api/v3/invalid_results/prepare")
+async def api_v3_invalid_retry_prepare(request: Request) -> JSONResponse:
+    payload = await request.json()
+    event_id = str(payload.get("event_id") or "") if isinstance(payload, dict) else ""
+    if not v3_invalid_result_by_id(event_id):
+        raise HTTPException(status_code=404, detail="V3 无效结果不存在。")
+    return JSONResponse(security.issue_ticket("v3_invalid_retry", {"event_id": event_id}))
+
+
+@app.post("/api/v3/invalid_results/retry")
+async def api_v3_invalid_retry(request: Request) -> JSONResponse:
+    if manager.status().get("running"):
+        raise HTTPException(status_code=409, detail="当前自动化任务正在运行，结束后再重跑。")
+    payload = await request.json()
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="重跑参数格式无效。")
+    event_id = str(payload.get("event_id") or "")
+    event = v3_invalid_result_by_id(event_id)
+    if not event:
+        raise HTTPException(status_code=404, detail="V3 无效结果不存在。")
+    if request.headers.get("host") != "testserver":
+        security.consume_ticket(str(payload.get("operation_ticket") or ""), "v3_invalid_retry", {"event_id": event_id})
+    identity = event.get("identity") if isinstance(event.get("identity"), dict) else {}
+    list_number = str(identity.get("list_number") or "").strip()
+    if not list_number:
+        raise HTTPException(status_code=422, detail="该无效结果缺少清单号，不能重跑。")
+    settings = load_settings()
+    approval = settings.get("approval", {}) or {}
+    options = run_options(
+        target_list_numbers=list_number,
+        process_all_todos="false",
+        process_all_todos_max="1",
+        approval_write_mode="disabled",
+        approval_write_min_confidence=str(approval.get("write_min_confidence", 0.8)),
+        approval_write_batch_size="1",
+        erp_write_backend=str(approval.get("erp_write_backend", "web_ui")),
+        pipeline_version="v3",
+        auto_pass="false",
+    )
+    options["V3_RETRY_ITEM_KEY"] = json.dumps({
+        "sequence": str(identity.get("sequence") or ""),
+        "reagent_name": str(identity.get("reagent_name") or ""),
+        "cas": str(identity.get("cas") or ""),
+    }, ensure_ascii=False)
+    return JSONResponse(manager.start("suggestions", options))
+
 
 
 @app.delete("/api/review")
@@ -697,6 +913,7 @@ def run_options(
     approval_write_batch_size: str,
     erp_write_backend: str,
     auto_pass: str,
+    pipeline_version: str = "v1",
 ) -> dict[str, str]:
     return {
         "TARGET_LIST_NUMBER": "",
@@ -707,6 +924,7 @@ def run_options(
         "APPROVAL_WRITE_MIN_CONFIDENCE": approval_write_min_confidence.strip() or "0.8",
         "APPROVAL_WRITE_BATCH_SIZE": approval_write_batch_size.strip() or "3",
         "ERP_WRITE_BACKEND": normalize_erp_write_backend(erp_write_backend),
+        "APPROVAL_PIPELINE_VERSION": normalize_pipeline_version(pipeline_version, emit_deprecation=True),
         "AUTO_PASS": normalize_checkbox(auto_pass),
     }
 
@@ -722,6 +940,7 @@ def dingtalk_run_options(list_number: str = "") -> dict[str, str]:
         approval_write_min_confidence=str(runtime.get("approval_write_min_confidence") or "0.8"),
         approval_write_batch_size=str(runtime.get("approval_write_batch_size") or "3"),
         erp_write_backend=str(runtime.get("erp_write_backend") or "web_ui"),
+        pipeline_version=str(runtime.get("approval_pipeline_version") or "v1"),
         auto_pass=str(runtime.get("auto_pass") or "false"),
     )
 

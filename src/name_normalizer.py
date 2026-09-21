@@ -31,6 +31,12 @@ NOISE_PATTERN = re.compile(
     r"(?:≥|>=|≤|<=)?\s*\d+(?:\.\d+)?\s*%?\s*(?:纯度|含量|浓度)?|"
     r"(?:纯度|含量|浓度|规格|包装|原装|进口|国产|现货|危化品|易制毒|易制爆)"
 )
+# `\b` does not split Chinese characters from ASCII letters because both are
+# word characters to Python's regex engine.  Keep this suffix-only pattern
+# case-sensitive so a legitimate word ending in "ar" is never truncated.
+TRAILING_PURITY_SUFFIX_PATTERN = re.compile(
+    r"(?:\s*)(?:AR|GR|CP|HPLC|ACS|GC|LCMS|UPLC)$"
+)
 NON_INFORMATIVE_NAME_PATTERNS = (
     "没写",
     "未写",
@@ -88,7 +94,10 @@ class NameNormalizer:
     ) -> dict[str, Any]:
         raw_name = str(raw_name or "").strip()
         cas_no = self._extract_cas(cas) or self._extract_cas(raw_name)
-        concentration = self._extract_concentration(" ".join([raw_name, str(specification or ""), str(unit or "")]))
+        # Specifications, units, package details, and other ERP line metadata
+        # are not chemical identity evidence.  Only retain concentration when it
+        # is explicitly part of the reagent name itself.
+        concentration = self._extract_concentration(raw_name)
         cleaned_name = self._clean_name(raw_name)
         non_informative_reason = self._non_informative_name_reason(raw_name, cleaned_name)
         aliases: list[str] = []
@@ -160,9 +169,6 @@ class NameNormalizer:
                 cleaned_name=cleaned_name,
                 cas=cas_no,
                 concentration=concentration,
-                specification=specification,
-                unit=unit,
-                extra_fields=extra_fields,
             )
             if llm_result:
                 if non_informative_reason:
@@ -328,9 +334,6 @@ class NameNormalizer:
         cleaned_name: str,
         cas: str,
         concentration: str,
-        specification: str,
-        unit: str,
-        extra_fields: dict[str, Any],
     ) -> dict[str, Any] | None:
         if not self.enable_llm or not self._has_api_key():
             return None
@@ -368,9 +371,6 @@ class NameNormalizer:
                                 "cleaned_name": cleaned_name,
                                 "cas": cas,
                                 "concentration": concentration,
-                                "specification": specification,
-                                "unit": unit,
-                                "extra_fields": extra_fields,
                                 "required_json_fields": [
                                     "standard_name",
                                     "english_name",
@@ -500,6 +500,7 @@ class NameNormalizer:
             text = pattern.sub(" ", text)
         text = PACKAGING_PATTERN.sub(" ", text)
         text = PURITY_PATTERN.sub(" ", text)
+        text = TRAILING_PURITY_SUFFIX_PATTERN.sub(" ", text)
         text = NOISE_PATTERN.sub(" ", text)
         text = BRACKET_PATTERN.sub(" ", text)
         text = re.sub(r"[，,;；:：|]+", " ", text)

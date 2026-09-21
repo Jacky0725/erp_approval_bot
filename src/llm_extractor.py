@@ -48,6 +48,9 @@ Rules:
 - Use only the provided raw_text. Do not invent facts.
 - Use empty strings, null, or empty arrays for uncertain fields.
 - Boolean fields must be true, false, or null.
+- "Not available", blank fields, a missing page section, or a failed lookup mean
+  unknown: do not convert them into false or "not applicable". Only an explicit
+  "Not applicable" / "不适用" source statement may be retained as such evidence.
 - suggested_categories are tentative risk labels based on source material, not
   an approval decision.
 - evidence should contain short source-backed snippets.

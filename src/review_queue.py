@@ -21,6 +21,7 @@ REVIEW_EVIDENCE_COLUMNS = [
     "evidence_quality",
     "source_url",
     "source_evidence_items",
+    "property_enrichment",
     "matched_rule_ids",
     "rule_version",
     "flash_point",
@@ -55,6 +56,10 @@ REVIEW_EVIDENCE_COLUMNS = [
     "reason_raw",
     "review_advice",
     "original_erp_cas",
+    "candidate_cas",
+    "confirmed_cas",
+    "erp_write_status",
+    "erp_write_note",
     "corrected_cas",
     "cas_name_conflict",
     "cas_correction_candidate",
@@ -329,13 +334,16 @@ class ReviewQueueMixin:
 
         list_number = detail_info.get("\u5f53\u524d\u6e05\u5355\u53f7", "")
         chemical_name = reagent.get("\u8bd5\u5242\u540d\u79f0", "")
-        cas = (
-            (search_result or {}).get("corrected_cas")
-            or name_result.get("corrected_cas")
-            or (search_result or {}).get("cas")
-            or name_result.get("cas")
-            or reagent.get("CAS\u53f7", "")
-        )
+        erp_cas = str(reagent.get("CAS\u53f7", "") or "").strip()
+        corrected_cas = str((search_result or {}).get("corrected_cas") or name_result.get("corrected_cas") or "").strip()
+        # A name-search CAS remains a candidate while the ERP row has no CAS. Keeping
+        # the primary CAS blank prevents candidate identity from entering memory by default.
+        cas = corrected_cas if erp_cas and corrected_cas else erp_cas
+        candidate_cas = str(
+            (search_result or {}).get("candidate_cas")
+            or name_result.get("candidate_cas")
+            or (((search_result or {}).get("cas") or name_result.get("cas") or "") if not erp_cas else "")
+        ).strip()
         sequence = reagent.get("\u5e8f\u53f7", "")
         specification = reagent.get("\u89c4\u683c", "")
         unit = reagent.get("\u89c4\u683c\u5355\u4f4d", "")
@@ -419,6 +427,7 @@ class ReviewQueueMixin:
             "chemical_name": chemical_name,
             "\u8bd5\u5242\u540d\u79f0": chemical_name,
             "cas": cas,
+            "candidate_cas": candidate_cas,
             "quantity": reagent.get("\u8bd5\u5242\u6570\u91cf", ""),
             "specification": reagent.get("\u89c4\u683c", ""),
             "unit": reagent.get("\u89c4\u683c\u5355\u4f4d", ""),
@@ -586,6 +595,7 @@ class ReviewQueueMixin:
             "evidence_quality": search_result.get("evidence_quality", ""),
             "source_url": search_result.get("url") or search_result.get("fallback_url") or "",
             "source_evidence_items": json.dumps(search_result.get("evidence_items") or [], ensure_ascii=False),
+            "property_enrichment": json.dumps(search_result.get("property_enrichment") or {}, ensure_ascii=False),
             "matched_rule_ids": ", ".join(classification.get("matched_rule_ids") or []),
             "rule_version": classification.get("rule_version", ""),
             "flash_point": extracted.get("flash_point", ""),
@@ -628,6 +638,7 @@ class ReviewQueueMixin:
             "llm_rules_fingerprint": search_result.get("llm_rules_fingerprint", ""),
             "review_advice": advice,
             "original_erp_cas": search_result.get("original_erp_cas") or name_result.get("original_erp_cas") or "",
+            "candidate_cas": search_result.get("candidate_cas") or name_result.get("candidate_cas") or "",
             "corrected_cas": search_result.get("corrected_cas") or name_result.get("corrected_cas") or "",
             "cas_name_conflict": search_result.get("cas_name_conflict") or name_result.get("cas_name_conflict") or False,
             "cas_correction_candidate": search_result.get("cas_correction_candidate") or name_result.get("cas_correction_candidate") or False,

@@ -672,6 +672,74 @@ def test_discovery_analyzer_recognizes_verified_odoo_numeric_property_writes() -
     assert candidate.config["property_fields"] == ["phchproperty_id", "phchproperty_name"]
 
 
+def test_discovery_analyzer_accepts_missing_odoo_cas_for_verified_writes() -> None:
+    events = []
+    for sequence, line_id in (("1", 101), ("2", 102)):
+        events.append({
+            "method": "POST",
+            "origin": "https://erp.example.com",
+            "path": "/api/dataset/cors_call_kw",
+            "status": 200,
+            "in_save_window": True,
+            "web_save_verified": True,
+            "request_headers": {"content-type": "application/json"},
+            "request_payload": {
+                "params": {
+                    "model": "reagent.list",
+                    "method": "write",
+                    "args": [[88], {"reagent_list_line_ids": [[1, line_id, {
+                        "id": line_id,
+                        "name": f"试剂{sequence}",
+                        "cas_code": False,
+                        "sequence": int(sequence),
+                        "phchproperty_id": 25,
+                    }]]}],
+                }
+            },
+            "response_payload": {"result": True},
+            "save_context": {
+                "record_id": str(line_id),
+                "sequence": sequence,
+                "name": f"试剂{sequence}",
+                "cas": "-",
+                "expected_property": "普通类",
+            },
+        })
+
+    analyzer = ApiDiscoveryAnalyzer()
+
+    assert all(analyzer._is_verified_property_write(event) for event in events)
+
+
+def test_discovery_prefers_detail_response_with_identity_fields() -> None:
+    weak = {
+        "origin": "https://erp.example.com",
+        "status": 200,
+        "action_hint": "possible_detail_read",
+        "candidate_fields": {
+            "record_id_fields": ["id"],
+            "property_fields": ["phchproperty_id"],
+            "sequence_fields": [],
+            "name_fields": [],
+            "cas_fields": [],
+        },
+    }
+    complete = {
+        "origin": "https://erp.example.com",
+        "status": 200,
+        "action_hint": "possible_write_or_save",
+        "candidate_fields": {
+            "record_id_fields": ["id"],
+            "property_fields": ["phchproperty_id"],
+            "sequence_fields": ["sequence"],
+            "name_fields": ["name"],
+            "cas_fields": [],
+        },
+    }
+
+    assert ApiDiscoveryAnalyzer._detail_event([weak, complete], "https://erp.example.com") is complete
+
+
 def test_discovery_recorder_keeps_save_context_until_late_response() -> None:
     callbacks: dict[str, object] = {}
 

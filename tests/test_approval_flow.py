@@ -213,6 +213,86 @@ class ApprovalFlowPropertyMatchTest(unittest.TestCase):
             memory = ReagentMemory.from_settings(bot.settings, bot.root_dir)
             self.assertIsNone(memory.lookup(raw_name="低置信试剂"))
 
+    def test_verified_v3_write_promotes_reliable_cas_only_to_memory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            bot = Bot()
+            bot.root_dir = Path(tmp)
+            bot.settings = {
+                "paths": {"reagent_memory_sqlite": "data/memory.sqlite"},
+                "memory": {"min_confidence": 0.8},
+            }
+            suggestion = {
+                "序号": "7", "试剂名称": "乙醇", "清洗后名称": "乙醇",
+                "标准化名称": "乙醇", "CAS号": "-", "网页候选CAS": "64-17-5",
+                "V3候选CAS可靠": True, "V3可核验直写": True,
+                "最终建议类别": "易燃类", "规则原因": "液体闪点 13℃",
+                "置信度": 0.9, "需人工复核": False,
+                "查询来源": "aliyun_bailian_v3_web_search",
+                "查询URL": "https://source.example", "_erp_record_id": "123",
+            }
+            self.assertTrue(bot.remember_verified_approval_suggestion(suggestion, "易燃类"))
+            self.assertEqual(suggestion["CAS号"], "-")
+            memory = ReagentMemory.from_settings(bot.settings, bot.root_dir)
+            row = memory.lookup(raw_name="乙醇")
+            assert row is not None
+            self.assertEqual(row["cas"], "64-17-5")
+            self.assertIn('"erp_cas": "-"', (bot.root_dir / "data/logs/v3_candidate_cas_audit.jsonl").read_text(encoding="utf-8"))
+
+    def test_api_saved_but_uncertain_never_repeats_via_webpage(self) -> None:
+        from erp_api_client import ApiWriteResult
+
+        class ApiClient:
+            def configuration_status(self) -> dict[str, object]:
+                return {"configured": True, "write_enabled": True}
+
+            def fetch_reagent_detail(self, list_number: str) -> list[dict[str, str]]:
+                return [{"序号": "7", "试剂名称": "乙醇", "_erp_record_id": "123"}]
+
+            def resolve_reagent_record_id(self, suggestion: dict[str, object], records: list[dict[str, str]]):
+                return "123", records[0]
+
+            def save_physicochemical_property(self, suggestion: dict[str, object], category: str, *, allow_canary: bool):
+                return ApiWriteResult(True, True, False, "API saved but initial read-back was old", True, "123")
+
+            def confirm_property_twice_by_id(self, record_id: str, category: str, identity: dict[str, object]) -> bool:
+                return False
+
+        class ApiBot(Bot):
+            def __init__(self, root_dir: Path):
+                self.root_dir = root_dir
+                self.settings = {"app": {"dry_run": False}, "approval": {"write_mode": "multi_page", "write_min_confidence": 0.7},
+                                 "reagent": {"physicochemical_property_options": ["易燃类"]}}
+                self.save_results = []
+                self.manual_failures = []
+
+            def high_confidence_write_candidates(self, rows):
+                return rows
+
+            def queue_low_confidence_write_skips(self, rows, *, min_confidence: float) -> None:
+                return None
+
+            def erp_write_backend(self):
+                return "api_write_with_web_verify"
+
+            def erp_api_discovery_settings(self):
+                return {"enabled": False, "status": "verified"}
+
+            def current_detail_list_number(self):
+                return "SJ1"
+
+            def add_manual_review_item_from_write_failure(self, suggestion, reason):
+                self.manual_failures.append(reason)
+
+        suggestion = {"试剂清单号": "SJ1", "序号": "7", "试剂名称": "乙醇", "CAS号": "-",
+                      "最终建议类别": "易燃类", "置信度": 0.9, "需人工复核": False}
+        with tempfile.TemporaryDirectory() as tmp:
+            bot = ApiBot(Path(tmp))
+            with patch.dict(os.environ, {}, clear=True), patch("approval_flow.ErpApiClient", return_value=ApiClient()):
+                result = bot.apply_approval_write_mode(object(), [suggestion])
+        self.assertEqual(result["failed"], {bot.suggestion_work_key(suggestion)})
+        self.assertEqual(result["handled"], set())
+        self.assertEqual(len(bot.manual_failures), 1)
+
 
 class ApprovalSuggestionExportTest(unittest.TestCase):
     def test_save_outputs_keep_latest_list_specific_and_aggregate_files(self) -> None:
@@ -723,7 +803,8 @@ class ApprovalFlowTodoLoopTest(unittest.TestCase):
             "需人工复核": True,
             "置信度": 0.0,
             "LLM辅助意见仅供复核": True,
-            "明确未知名称规则命中": True,
+            "V3模型未核实": True,
+            "身份验证状态": "unresolved",
         }
 
         with patch.dict(os.environ, {}, clear=True):
@@ -742,7 +823,6 @@ class ApprovalFlowTodoLoopTest(unittest.TestCase):
             "最终建议类别": "未知类",
             "需人工复核": True,
             "置信度": 0.0,
-            "明确未知名称规则命中": True,
         }
         ReviewGuardBot().queue_manual_review_if_suggestion_requires_it(
             {"试剂名称": "未知样品"},
@@ -752,7 +832,7 @@ class ApprovalFlowTodoLoopTest(unittest.TestCase):
         self.assertFalse(suggestion["需人工复核"])
         self.assertEqual(suggestion["置信度"], 1.0)
 
-    def test_unknown_without_explicit_name_evidence_requires_manual_review(self) -> None:
+    def test_unknown_without_explicit_name_evidence_is_auto_write(self) -> None:
         suggestion = {
             "最终建议类别": "未知类",
             "需人工复核": False,
@@ -763,8 +843,9 @@ class ApprovalFlowTodoLoopTest(unittest.TestCase):
 
         Bot().apply_unknown_auto_write_policy(suggestion)
 
-        self.assertTrue(suggestion["需人工复核"])
-        self.assertEqual(suggestion["未知类判定状态"], "证据不足，需人工确认")
+        self.assertFalse(suggestion["需人工复核"])
+        self.assertEqual(suggestion["置信度"], 1.0)
+        self.assertEqual(suggestion["未知类判定状态"], "统一自动写入")
 
     def test_high_confidence_candidate_maps_rule_category_to_erp_property(self) -> None:
         bot = Bot()
@@ -787,7 +868,7 @@ class ApprovalFlowTodoLoopTest(unittest.TestCase):
         self.assertEqual(result[0]["\u6700\u7ec8\u5efa\u8bae\u7c7b\u522b"], "\u6613\u71c3\u7c7b")
         self.assertEqual(result[0]["\u89c4\u5219\u5224\u5b9a\u7c7b\u522b"], "\u6613\u71c3\u6db2\u4f53")
 
-    def test_not_recommended_category_maps_to_reject_property_for_write(self) -> None:
+    def test_not_recommended_category_maps_to_reject_property_for_direct_write(self) -> None:
         bot = Bot()
         bot.settings = {
             "approval": {"write_min_confidence": 0.7},
@@ -800,8 +881,10 @@ class ApprovalFlowTodoLoopTest(unittest.TestCase):
         }
         suggestion = {
             "\u6700\u7ec8\u5efa\u8bae\u7c7b\u522b": "\u4e0d\u5efa\u8bae\u63a5\u6536\u7c7b",
-            "\u9700\u4eba\u5de5\u590d\u6838": False,
-            "\u7f6e\u4fe1\u5ea6": 0.9,
+            "\u9700\u4eba\u5de5\u590d\u6838": True,
+            "\u7f6e\u4fe1\u5ea6": 0.95,
+            "\u8eab\u4efd\u72b6\u6001": "verified",
+            "\u547d\u4e2d\u89c4\u5219ID": "BUS-REJECT-TEST-001",
         }
 
         with patch.dict(os.environ, {}, clear=True):
@@ -809,6 +892,44 @@ class ApprovalFlowTodoLoopTest(unittest.TestCase):
 
         self.assertEqual(result[0]["\u6700\u7ec8\u5efa\u8bae\u7c7b\u522b"], "\u62d2\u6536\u7c7b")
         self.assertEqual(result[0]["\u89c4\u5219\u5224\u5b9a\u7c7b\u522b"], "\u4e0d\u5efa\u8bae\u63a5\u6536\u7c7b")
+
+    def test_not_recommended_category_bypasses_manual_review_despite_missing_evidence(self) -> None:
+        result = Bot()._suggestion_needs_manual_review(
+            search_result={"need_manual_review": True},
+            name_result={"need_manual_review": True},
+            extracted={"evidence": ["LLM extraction failed"]},
+            classification={"final_category": "不建议接收类", "need_manual_review": True},
+        )
+
+        self.assertFalse(result)
+
+    def test_not_recommended_category_is_not_added_to_manual_review_queue(self) -> None:
+        class ReviewGuardBot(Bot):
+            def add_manual_review_item_from_suggestion(self, *_args: object, **_kwargs: object) -> None:
+                raise AssertionError("terminal reject must not enter the manual review queue")
+
+        suggestion = {
+            "最终建议类别": "不建议接收类",
+            "需人工复核": True,
+            "身份状态": "verified",
+            "命中规则ID": "BUS-REJECT-TEST-001",
+        }
+        ReviewGuardBot().queue_manual_review_if_suggestion_requires_it({"试剂名称": "爆炸物"}, suggestion)
+
+        self.assertFalse(suggestion["需人工复核"])
+        self.assertEqual(suggestion["ERP写入状态"], "eligible_for_auto_write")
+
+    def test_not_recommended_low_confidence_result_is_not_queued_for_review(self) -> None:
+        class ReviewGuardBot(Bot):
+            def add_manual_review_item_from_low_confidence_suggestion(self, *_args: object, **_kwargs: object) -> None:
+                raise AssertionError("terminal reject must not be queued as a low-confidence write skip")
+
+        bot = ReviewGuardBot()
+        bot.settings = {"reagent": {"physicochemical_property_options": ["拒收类"]}}
+        bot.queue_low_confidence_write_skips(
+            [{"最终建议类别": "不建议接收类", "需人工复核": False, "置信度": 0.0}],
+            min_confidence=0.8,
+        )
 
     def test_trusted_name_preferred_identity_conflict_can_be_written(self) -> None:
         bot = Bot()
@@ -2098,11 +2219,11 @@ class ApprovalFlowTodoLoopTest(unittest.TestCase):
             },
         )
 
-        self.assertEqual(suggestion["CAS\u53f7"], "376584-63-3")
+        self.assertEqual(suggestion["CAS\u53f7"], "724710-02-5")
         self.assertEqual(suggestion["\u67e5\u8be2\u6765\u6e90"], "reagent_memory")
         self.assertEqual(suggestion["\u67e5\u8be2URL"], "https://www.chemsrc.com/en/cas/376584-63-3_727612.html")
-        self.assertIn("724710-02-5", suggestion["\u89c4\u5219\u539f\u56e0"])
-        self.assertIn("376584-63-3", suggestion["\u89c4\u5219\u539f\u56e0"])
+        self.assertNotIn("724710-02-5", suggestion["\u89c4\u5219\u539f\u56e0"])
+        self.assertNotIn("376584-63-3", suggestion["\u89c4\u5219\u539f\u56e0"])
 
     def test_manual_verified_flammable_memory_match_is_safe(self) -> None:
         bot = Bot()

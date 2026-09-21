@@ -17,5 +17,32 @@
           </div>
         </div>
         <pre id="logBox">暂无可显示日志。运行任务后会显示最近一次输出。</pre>
-      </section>
     </section>
+    <section class="panel" id="v3InvalidResults">
+      <div class="panel-title">
+        <div>
+          <h2>V3 无效结果</h2>
+          <p>以下记录未进入人工复核或 ERP 写入，可按原试剂重新联网检索。</p>
+        </div>
+      </div>
+      {% if v3_invalid.rows %}
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>时间</th><th>清单</th><th>序号</th><th>试剂</th><th>原因</th><th>尝试</th><th>操作</th></tr></thead>
+            <tbody>
+              {% for row in v3_invalid.rows %}
+                <tr>
+                  <td>{{ row.at }}</td><td>{{ row.list_number }}</td><td>{{ row.sequence }}</td><td>{{ row.reagent_name }}</td>
+                  <td>{{ row.failure_reason }}</td><td>{{ row.attempts }}</td>
+                  <td><button type="button" class="v3-invalid-retry" data-event-id="{{ row.event_id }}">重跑</button></td>
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      {% else %}
+        <p class="empty-state">暂无 V3 无效结果。</p>
+      {% endif %}
+      <p id="v3InvalidRetryState" class="field-note" aria-live="polite"></p>
+    </section>
+  </section>

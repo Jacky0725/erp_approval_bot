@@ -15,6 +15,7 @@ import urllib.request
 
 from app_info import app_repository, app_version
 from runtime_paths import runtime_root
+from secure_update import ManifestAsset, attach_asset_urls, parse_manifest, verified_download
 
 
 GITHUB_API = "https://api.github.com/repos/{repo}/releases/latest"
@@ -32,6 +33,11 @@ class ReleaseAsset:
     name: str
     url: str
     size: int
+    sha256: str = ""
+    kind: str = "legacy"
+    arch: str = "amd64"
+    asset_version: str = ""
+    browser_revision: str = ""
 
 
 @dataclass(frozen=True)
@@ -43,6 +49,12 @@ class UpdateInfo:
     release_url: str = ""
     asset: ReleaseAsset | None = None
     error: str = ""
+    browser_asset: ReleaseAsset | None = None
+    expected_sha256: str = ""
+    asset_version: str = ""
+    arch: str = "amd64"
+    browser_revision: str = ""
+    verification_policy: str = "sha256-manifest-required"
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -53,6 +65,12 @@ class UpdateInfo:
             "release_url": self.release_url,
             "asset": None if self.asset is None else self.asset.__dict__,
             "error": self.error,
+            "browser_asset": None if self.browser_asset is None else self.browser_asset.__dict__,
+            "expected_sha256": self.expected_sha256,
+            "asset_version": self.asset_version,
+            "arch": self.arch,
+            "browser_revision": self.browser_revision,
+            "verification_policy": self.verification_policy,
         }
 
 
@@ -184,6 +202,39 @@ def fetch_latest_release_public(timeout_seconds: int = 20) -> dict[str, object]:
     }
 
 
+def _verified_assets(release: dict[str, object], latest: str, timeout_seconds: int) -> tuple[ReleaseAsset, ReleaseAsset | None] | None:
+    assets = list(release.get("assets") or [])
+    manifest_meta = next((item for item in assets if str(item.get("name") or "") == "release-manifest.json"), None)
+    if manifest_meta is None:
+        return None
+    url = str(manifest_meta.get("browser_download_url") or "")
+    request = urllib.request.Request(url, headers=github_headers())
+    with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
+        payload = json.loads(response.read(2 * 1024 * 1024).decode("utf-8"))
+    manifest = attach_asset_urls(
+        parse_manifest(payload, expected_repository=app_repository(), expected_version=latest),
+        assets,
+    )
+    core = manifest.asset("core")
+    browser = manifest.asset("browser")
+    if core is None:
+        return None
+
+    def convert(asset: ManifestAsset) -> ReleaseAsset:
+        return ReleaseAsset(
+            name=asset.name,
+            url=asset.url,
+            size=asset.size,
+            sha256=asset.sha256,
+            kind=asset.kind,
+            arch=asset.arch,
+            asset_version=latest,
+            browser_revision=asset.browser_revision,
+        )
+
+    return convert(core), convert(browser) if browser else None
+
+
 def check_for_update(current_version: str | None = None, timeout_seconds: int = 20) -> UpdateInfo:
     current = normalize_tag(current_version or app_version())
     public_error: Exception | None = None
@@ -199,13 +250,23 @@ def check_for_update(current_version: str | None = None, timeout_seconds: int = 
             api_release = fetch_latest_release(timeout_seconds=timeout_seconds)
             public_latest = normalize_tag(str(release.get("tag_name") or release.get("name") or ""))
             api_latest = normalize_tag(str(api_release.get("tag_name") or api_release.get("name") or ""))
-            if is_newer_version(api_latest, public_latest):
+            if api_latest == public_latest or is_newer_version(api_latest, public_latest):
                 release = api_release
         except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError):
             pass
 
     latest = normalize_tag(str(release.get("tag_name") or release.get("name") or ""))
-    asset = choose_update_asset(list(release.get("assets") or []))
+    browser_asset = None
+    verification_error = ""
+    try:
+        verified = _verified_assets(release, latest, timeout_seconds)
+    except (ValueError, urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError) as error:
+        verified = None
+        verification_error = f"Release manifest verification failed: {error}"
+    if verified:
+        asset, browser_asset = verified
+    else:
+        asset = choose_update_asset(list(release.get("assets") or []))
     return UpdateInfo(
         ok=True,
         current_version=current,
@@ -213,7 +274,13 @@ def check_for_update(current_version: str | None = None, timeout_seconds: int = 
         update_available=bool(latest and is_newer_version(latest, current) and asset),
         release_url=str(release.get("html_url") or ""),
         asset=asset,
-        error="" if asset else "No Windows x64 portable or setup asset was found in the latest release.",
+        error=verification_error or ("" if asset else "No Windows x64 core asset was found in the latest release."),
+        browser_asset=browser_asset,
+        expected_sha256=asset.sha256 if asset else "",
+        asset_version=latest if asset else "",
+        arch=asset.arch if asset else "amd64",
+        browser_revision=browser_asset.browser_revision if browser_asset else "",
+        verification_policy="sha256-manifest" if asset and asset.sha256 else "unverified-legacy-blocked",
     )
 
 
@@ -224,21 +291,69 @@ def updates_dir() -> Path:
 
 
 def download_update(asset: ReleaseAsset, timeout_seconds: int = 600) -> Path:
-    destination = updates_dir() / asset.name
-    tmp = destination.with_suffix(destination.suffix + ".download")
-    request = urllib.request.Request(asset.url, headers=github_headers())
-    with urllib.request.urlopen(request, timeout=timeout_seconds) as response, tmp.open("wb") as file:
-        while True:
-            chunk = response.read(1024 * 1024)
-            if not chunk:
-                break
-            file.write(chunk)
-    tmp.replace(destination)
-    return destination
+    if not asset.sha256 or asset.kind not in {"core", "browser"}:
+        raise ValueError("Legacy update assets are not trusted. Install version 0.1.20 manually.")
+    manifest_asset = ManifestAsset(
+        name=asset.name,
+        kind=asset.kind,
+        arch=asset.arch,
+        size=asset.size,
+        sha256=asset.sha256,
+        url=asset.url,
+        browser_revision=asset.browser_revision,
+    )
+    return verified_download(manifest_asset, updates_dir(), headers=github_headers(), timeout_seconds=timeout_seconds)
 
 
 def current_process_is_frozen() -> bool:
     return bool(getattr(sys, "frozen", False))
+
+
+def versioned_install_root() -> Path:
+    executable = Path(sys.executable).resolve()
+    # Versioned applications run from <root>/versions/<version>/ReagentApprovalBot.exe.
+    if executable.parent.parent.name == "versions":
+        return executable.parent.parent.parent
+    return executable.parent
+
+
+def browser_is_installed(revision: str) -> bool:
+    return bool(revision and (versioned_install_root() / "shared" / "browsers" / revision).is_dir())
+
+
+def launch_verified_updater(info: UpdateInfo, core: Path, browser: Path | None = None) -> None:
+    if not info.asset or not info.asset.sha256 or not info.asset_version:
+        raise ValueError("A verified release manifest is required for updates.")
+    root = versioned_install_root()
+    updater = root / "ReagentApprovalBotUpdater.exe"
+    if not updater.is_file():
+        raise FileNotFoundError("Secure updater is missing. Install version 0.1.20 manually.")
+    command = [
+        str(updater),
+        "--install-root", str(root),
+        "--core", str(core),
+        "--version", info.asset_version,
+        "--core-sha256", info.asset.sha256,
+        "--wait-pid", str(os.getpid()),
+    ]
+    if browser and info.browser_asset:
+        command.extend([
+            "--browser", str(browser),
+            "--browser-sha256", info.browser_asset.sha256,
+            "--browser-revision", info.browser_asset.browser_revision,
+        ])
+    creationflags = 0
+    if os.name == "nt":
+        creationflags = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
+    subprocess.Popen(
+        command,
+        cwd=str(root),
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        creationflags=creationflags,
+        close_fds=True,
+    )
 
 
 def update_launch_copy(update_path: Path) -> Path:

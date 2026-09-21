@@ -448,7 +448,9 @@ class WorkflowSummaryTest(unittest.TestCase):
                 "[api_record_resolve] sequence=1 record_id=r1",
                 "[api_record_resolve] sequence=2 failed=missing id",
                 "[api_property_save] sequence=1 record_id=r1 saved=True verified=True detail=ok",
-                "[api_property_verify] sequence=3 failed=ERP API verified, but webpage row shows -",
+                "[api_property_confirmed] sequence=1 record_id=r1 category=易燃类",
+                "[api_property_verify] sequence=1 warning=stable_id_confirmed_page_stale page_value=-; no duplicate save",
+                "[api_property_verify] sequence=3 failed=stable record ID double read failed",
                 "[api_fallback_web_write] sequence=2 reason=ERP API save_property endpoint is not configured.",
             ],
             action="suggestions",
@@ -464,6 +466,7 @@ class WorkflowSummaryTest(unittest.TestCase):
         self.assertEqual(summary["api_write_attempt_count"], 1)
         self.assertEqual(summary["api_write_success_count"], 1)
         self.assertEqual(summary["api_verify_failure_count"], 1)
+        self.assertEqual(summary["api_page_stale_warning_count"], 1)
         self.assertEqual(summary["api_fallback_web_write_count"], 1)
 
     def test_run_summary_counts_search_time_and_batched_review_writes(self) -> None:
@@ -485,6 +488,26 @@ class WorkflowSummaryTest(unittest.TestCase):
         self.assertEqual(summary["manual_review_queued_count"], 1)
         self.assertEqual(summary["manual_review_updated_count"], 1)
         self.assertEqual(summary["manual_review_batch_flush_count"], 1)
+
+    def test_run_summary_counts_missing_cas_identity_enrichment(self) -> None:
+        summary = run_summary(
+            [
+                "Chemical identity enrichment: status=resolved english_candidate=true cas_candidates=2 elapsed_ms=422",
+                "Chemical identity enrichment: status=failure english_candidate=false cas_candidates=0 elapsed_ms=10000",
+                "Chemical identity enrichment verified: source=PubChem candidate_cas=64-17-5",
+            ],
+            action="suggestions",
+            options={},
+            running=False,
+            success=True,
+            error="",
+        )
+
+        self.assertEqual(summary["identity_enrichment_call_count"], 2)
+        self.assertEqual(summary["identity_enrichment_english_candidate_count"], 1)
+        self.assertEqual(summary["identity_enrichment_cas_candidate_count"], 2)
+        self.assertEqual(summary["identity_enrichment_failure_count"], 1)
+        self.assertEqual(summary["identity_enrichment_verified_count"], 1)
 
     def test_run_summary_counts_legacy_llm_seconds(self) -> None:
         summary = run_summary(

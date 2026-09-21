@@ -315,6 +315,22 @@ class ErpApiClient:
                 return True
         return False
 
+    def confirm_property_twice_by_id(self, record_id: str, expected: str, identity: dict[str, Any]) -> bool:
+        """Require two independent stable-id reads before accepting an API save."""
+        if self.protocol != "odoo_jsonrpc":
+            return self.verify_physicochemical_property(record_id, expected, identity) and self.verify_physicochemical_property(record_id, expected, identity)
+        expected_id = self._odoo_property_id(expected)
+        for attempt in range(2):
+            record = self._read_odoo_line_property(record_id)
+            if not record or not record.get("sequence") or not record.get("name") or not self.identity_matches_record(identity, record):
+                return False
+            actual_id, actual_name = self._odoo_property_identity(record)
+            if actual_id != expected_id or (actual_name and self._text(actual_name) != self._text(expected)):
+                return False
+            if attempt == 0:
+                time.sleep(0.5)
+        return True
+
     def _read_odoo_line_property(self, record_id: str) -> dict[str, Any] | None:
         """Read one ERP line by stable id; verification must not scan the full list."""
         try:

@@ -15,6 +15,8 @@ ROOT_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT_DIR / "src"))
 
 from chemical_searcher import ChemicalSearcher  # noqa: E402
+from chemical_search_cache import ChemicalSearchCache  # noqa: E402
+from approval_flow import ApprovalFlowMixin  # noqa: E402
 from web_researcher import ResearchPage  # noqa: E402
 
 
@@ -141,6 +143,113 @@ class ChemicalSearcherTest(unittest.TestCase):
         self.assertEqual(result["name_normalization"]["standard_name"], "氢氧化钠")
         self.assertEqual(result["name_normalization"]["english_name"], "sodium hydroxide")
         self.assertEqual(result["name_normalization"]["concentration"], "0.1mol/L")
+
+    def test_missing_cas_uses_enrichment_only_after_name_lookup_fails(self) -> None:
+        class EnrichmentSearcher(ChemicalSearcher):
+            def __init__(self, *args: Any, **kwargs: Any) -> None:
+                super().__init__(*args, **kwargs)
+                self.queries: list[str] = []
+
+            def _search_chemsrc(self, name: str, cas: str, query: str, validation_names=None):  # type: ignore[no-untyped-def]
+                self.queries.append(query)
+                if query != "ethanol":
+                    return None
+                result = self._result(
+                    name=name,
+                    cas="64-17-5",
+                    source="PubChem",
+                    url="https://pubchem.example/ethanol",
+                    raw_text="Ethanol CAS 64-17-5",
+                )
+                result.update({"relevance_passed": True, "name_similarity": 0.98, "matched_site_name": "Ethanol"})
+                return result
+
+            def _search_chemicalbook(self, *args: Any, **kwargs: Any) -> None:
+                return None
+
+        class Resolver:
+            def __init__(self, **kwargs: Any) -> None:
+                pass
+
+            def resolve(self, **kwargs: Any) -> dict[str, Any]:
+                return {
+                    "attempted": True, "status": "resolved", "english_name": "ethanol",
+                    "resolved_standard_name": "乙醇", "candidate_cas": ["64-17-5"],
+                    "name_type": "single_compound", "confidence": 0.9, "reason": "fixture",
+                }
+
+        settings = {"approval": {"identity_enrichment": {"enabled": True}}, "chemical_search": {"providers": ["chemsrc"], "chemsrc_enabled": True}}
+        with tempfile.TemporaryDirectory() as tmp, patch("chemical_searcher.ChemicalIdentityResolver", Resolver):
+            result = EnrichmentSearcher(root_dir=Path(tmp), settings=settings).search("乙醇非标准写法")
+
+        self.assertIn("乙醇非标准写法", result["query_plan"]["queries_attempted"])
+        self.assertEqual(result["identity_status"], "verified_by_enrichment")
+        self.assertEqual(result["candidate_cas"], "64-17-5")
+        self.assertFalse(result["need_manual_review"])
+        self.assertTrue(result["identity_enrichment"]["attempted"])
+
+    def test_enrichment_candidate_without_external_cas_match_stays_manual_review(self) -> None:
+        class MismatchSearcher(ChemicalSearcher):
+            def _search_chemsrc(self, name: str, cas: str, query: str, validation_names=None):  # type: ignore[no-untyped-def]
+                if query != "ethanol":
+                    return None
+                result = self._result(name=name, cas="67-56-1", source="PubChem", url="https://pubchem.example/methanol", raw_text="Methanol CAS 67-56-1")
+                result.update({"relevance_passed": True, "name_similarity": 0.98, "matched_site_name": "Methanol"})
+                return result
+
+            def _search_chemicalbook(self, *args: Any, **kwargs: Any) -> None:
+                return None
+
+        class Resolver:
+            def __init__(self, **kwargs: Any) -> None:
+                pass
+
+            def resolve(self, **kwargs: Any) -> dict[str, Any]:
+                return {
+                    "attempted": True, "status": "resolved", "english_name": "ethanol",
+                    "candidate_cas": ["64-17-5"], "name_type": "single_compound", "confidence": 0.9, "reason": "fixture",
+                }
+
+        settings = {"approval": {"identity_enrichment": {"enabled": True}}, "chemical_search": {"providers": ["chemsrc"], "chemsrc_enabled": True}}
+        with tempfile.TemporaryDirectory() as tmp, patch("chemical_searcher.ChemicalIdentityResolver", Resolver):
+            result = MismatchSearcher(root_dir=Path(tmp), settings=settings).search("乙醇非标准写法")
+
+        self.assertTrue(result["need_manual_review"])
+        self.assertEqual(result["identity_status"], "unresolved")
+
+    def test_identity_conflict_source_does_not_block_missing_cas_enrichment(self) -> None:
+        class WrongMetalSearcher(ChemicalSearcher):
+            def _search_chemsrc(self, name: str, cas: str, query: str, validation_names=None):  # type: ignore[no-untyped-def]
+                result = self._result(
+                    name=name,
+                    cas="13759-92-7",
+                    source="Chemsrc",
+                    url="https://example.invalid/europium",
+                    raw_text="Product Name: Europium(III) chloride hexahydrate CAS Number: 13759-92-7",
+                )
+                result.update({"relevance_passed": True, "name_similarity": 0.98, "matched_site_name": "Europium(III) chloride hexahydrate"})
+                return result
+
+            def _search_chemicalbook(self, *args: Any, **kwargs: Any) -> None:
+                return None
+
+        class Resolver:
+            calls = 0
+
+            def __init__(self, **kwargs: Any) -> None:
+                pass
+
+            def resolve(self, **kwargs: Any) -> dict[str, Any]:
+                type(self).calls += 1
+                return {"attempted": True, "status": "unresolved", "candidate_cas": [], "english_name": ""}
+
+        settings = {"approval": {"identity_enrichment": {"enabled": True}}, "chemical_search": {"providers": ["chemsrc"], "chemsrc_enabled": True}}
+        with tempfile.TemporaryDirectory() as tmp, patch("chemical_searcher.ChemicalIdentityResolver", Resolver):
+            result = WrongMetalSearcher(root_dir=Path(tmp), settings=settings).search("氯化铁三水")
+
+        self.assertEqual(Resolver.calls, 1)
+        self.assertEqual(result["identity_status"], "unresolved")
+        self.assertTrue(result["need_manual_review"])
 
     def test_trusted_web_result_upgrades_unknown_alias_by_cas(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -489,6 +598,41 @@ abbreviations: {}
         self.assertEqual(second_searcher.queries, [])
         self.assertFalse(second["need_manual_review"])
 
+    def test_compatible_success_cache_reuses_exact_name_after_settings_change(self) -> None:
+        """A parser-version change must not discard a recent trusted name result."""
+        settings = {
+            "chemical_search": {
+                "cache": {"enabled": True, "success_ttl_days": 30, "failure_ttl_days": 1},
+            }
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = ChemicalSearchCache(root_dir=Path(tmp), settings=settings)
+            cache.put(
+                {
+                    "source": "chemical_search",
+                    "normalized_name": "亚甲基蓝三水合物",
+                    "cas": "",
+                    "search_mode": "legacy_web",
+                    "parser_version": "legacy-v1",
+                    "settings_version": "legacy-settings",
+                },
+                {
+                    "name": "亚甲基蓝三水合物",
+                    "cas": "7220-79-3",
+                    "source": "Chemsrc",
+                    "url": "https://example.test/829401",
+                    "source_confidence": 0.92,
+                    "failure_reason": "",
+                },
+            )
+
+            reused = cache.get_compatible_success(normalized_name="亚甲基蓝三水合物", cas="")
+
+        self.assertIsNotNone(reused)
+        assert reused is not None
+        self.assertEqual(reused["source"], "Chemsrc")
+        self.assertEqual(reused["cas"], "7220-79-3")
+
     def test_source_circuit_breaker_skips_only_network_failed_source(self) -> None:
         settings = {"chemical_search": {"failure_circuit_break_threshold": 1, "per_source_concurrency": 2}}
         class NetworkFailingSearcher(RecordingSearcher):
@@ -517,6 +661,7 @@ abbreviations: {}
             query="64-17-5",
             validation_names=["ethanol"],
         )
+
         query_count = len(searcher.queries)
         second = searcher._run_provider(
             searcher._search_chemsrc,
@@ -537,6 +682,11 @@ abbreviations: {}
         self.assertIsNone(second)
         self.assertIsNone(third)
         self.assertEqual(len(searcher.queries), query_count + 1)
+
+    def test_hydrate_notation_adds_supplier_query_variant_without_changing_identity(self) -> None:
+        variants = ChemicalSearcher._hydrate_name_query_variants("亚甲基蓝·三水", "亚甲基蓝三水")
+
+        self.assertEqual(variants, ["亚甲基蓝三水合物"])
 
     def test_no_result_does_not_trip_source_circuit_breaker(self) -> None:
         settings = {"chemical_search": {"failure_circuit_break_threshold": 1, "per_source_concurrency": 2}}
@@ -668,6 +818,31 @@ abbreviations: {}
         )
 
         self.assertFalse(relevance["passed"])
+
+    def test_relevance_rejects_different_metal_even_when_salt_words_are_similar(self) -> None:
+        searcher = ChemicalSearcher(root_dir=ROOT_DIR)
+        relevance = searcher._result_relevance(
+            "Product Name: Europium(III) chloride hexahydrate CAS Number: 13759-92-7",
+            name="氯化铁三水",
+            cas="",
+            validation_names=["氯化铁三水", "Iron(III) chloride hexahydrate"],
+        )
+
+        self.assertFalse(relevance["passed"])
+        self.assertEqual(relevance["identity_conflict_reason"], "核心元素不一致")
+
+    def test_relevance_rejects_hydrate_count_conflict(self) -> None:
+        searcher = ChemicalSearcher(root_dir=ROOT_DIR)
+        relevance = searcher._result_relevance(
+            "Product Name: Iron(III) chloride hexahydrate CAS Number: 10025-77-1",
+            name="氯化铁三水",
+            cas="",
+            preferred_name="Iron(III) chloride hexahydrate",
+            validation_names=["氯化铁三水"],
+        )
+
+        self.assertFalse(relevance["passed"])
+        self.assertEqual(relevance["identity_conflict_reason"], "水合数不一致")
 
     def test_relevance_rejects_cas_only_candidate_without_cas(self) -> None:
         searcher = ChemicalSearcher(root_dir=ROOT_DIR)
@@ -1078,6 +1253,74 @@ abbreviations: {}
         self.assertEqual(result["name_identity"]["cas"], "1310-73-2")
         self.assertEqual(result["cas_identity"]["cas"], "64-17-5")
 
+    def test_cas_authoritative_policy_records_name_conflict_without_blocking(self) -> None:
+        class CasAuthoritativeSearcher(ChemicalSearcher):
+            def _pubchem_cids(self, query: str) -> list[str]:
+                return ["180"] if query == "67-64-1" else []
+
+            def _fetch_json(self, url: str) -> dict[str, Any]:
+                if "/property/" in url:
+                    return {"PropertyTable": {"Properties": [{
+                        "CID": 180,
+                        "Title": "Acetone",
+                        "IUPACName": "propan-2-one",
+                        "MolecularFormula": "C3H6O",
+                        "MolecularWeight": "58.08",
+                    }]}}
+                if "/synonyms/JSON" in url:
+                    return {"InformationList": {"Information": [{"Synonym": ["acetone", "67-64-1"]}]}}
+                return {"Record": {"Section": []}}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            result = CasAuthoritativeSearcher(
+                root_dir=Path(tmp),
+                settings={"chemical_search": {"cas_authoritative": True}},
+            ).search("乙醇", cas="67-64-1")
+
+        self.assertEqual(result["cas"], "67-64-1")
+        self.assertEqual(result["identity_status"], "cas_verified")
+        self.assertEqual(result["identity_decision_basis"], "cas_identity")
+        self.assertTrue(result["cas_name_conflict"])
+        self.assertTrue(result["identity_conflict_recorded"])
+        self.assertFalse(result["need_manual_review"])
+        self.assertFalse(result["cas_correction_applied"])
+        self.assertNotIn("corrected_cas", result)
+        self.assertEqual(result["query_plan"]["queries_attempted"], ["CAS:67-64-1"])
+
+    def test_cas_checksum_validation_rejects_invalid_erp_cas_for_authoritative_lookup(self) -> None:
+        self.assertTrue(ChemicalSearcher._is_valid_cas("67-64-1"))
+        self.assertFalse(ChemicalSearcher._is_valid_cas("67-64-2"))
+        self.assertFalse(ChemicalSearcher._is_valid_cas("67-641"))
+
+    def test_cas_authoritative_policy_uses_name_fallback_without_cas_correction(self) -> None:
+        class NameFallbackSearcher(ChemicalSearcher):
+            def _pubchem_cids(self, query: str) -> list[str]:
+                return ["702"] if query == "ethanol" else []
+
+            def _fetch_json(self, url: str) -> dict[str, Any]:
+                if "/property/" in url:
+                    return {"PropertyTable": {"Properties": [{
+                        "CID": 702, "Title": "Ethanol", "IUPACName": "ethanol",
+                        "MolecularFormula": "C2H6O", "MolecularWeight": "46.07",
+                    }]}}
+                if "/synonyms/JSON" in url:
+                    return {"InformationList": {"Information": [{"Synonym": ["ethanol", "64-17-5"]}]}}
+                return {"Record": {"Section": []}}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            result = NameFallbackSearcher(
+                root_dir=Path(tmp),
+                settings={"chemical_search": {"cas_authoritative": True, "providers": ["pubchem"]}},
+            ).search("ethanol", cas="67-64-1")
+
+        self.assertEqual(result["identity_status"], "name_verified_pubchem")
+        self.assertEqual(result["identity_decision_basis"], "name_fallback_after_cas_unresolved")
+        self.assertEqual(result["original_erp_cas"], "67-64-1")
+        self.assertEqual(result["candidate_cas"], "64-17-5")
+        self.assertEqual(result["cas_lookup_status"], "unresolved_name_fallback")
+        self.assertFalse(result["cas_correction_applied"])
+        self.assertNotIn("corrected_cas", result)
+
     def test_pubchem_name_and_cas_converge_with_field_evidence(self) -> None:
         class FixturePubChemSearcher(ChemicalSearcher):
             def _fetch_json(self, url: str) -> dict[str, Any]:
@@ -1110,6 +1353,129 @@ abbreviations: {}
         self.assertEqual(result["retrieval_status"], "fresh")
         self.assertFalse(result["need_manual_review"])
         self.assertTrue(any(item["field"] == "flash_point" for item in result["evidence_items"]))
+
+    def test_property_enrichment_fetches_pubchem_physical_view_and_selects_field(self) -> None:
+        class PropertyFixtureSearcher(ChemicalSearcher):
+            def _fetch_json(self, url: str) -> dict[str, Any]:
+                self.last_url = url
+                return {"Record": {"Section": [{
+                    "TOCHeading": "Flash Point",
+                    "Information": [{"Name": "Flash Point", "Value": {"StringWithMarkup": [{"String": ">250 °C"}]}}],
+                }]}}
+
+        searcher = PropertyFixtureSearcher(root_dir=ROOT_DIR)
+        result = searcher._enrich_missing_official_fields({
+            "source": "PubChem", "cas": "64-17-5", "pubchem_cid": "702",
+            "evidence_items": [], "provider_results": [], "raw_text": "Ethanol",
+        })
+
+        self.assertIn("Chemical%20and%20Physical%20Properties", searcher.last_url)
+        selected = result["selected_property_evidence"]["flash_point"]
+        self.assertEqual(selected["value"], ">250 °C")
+        self.assertEqual(selected["status"], "measured")
+        self.assertEqual(result["property_enrichment"]["requests"], 2)
+
+    def test_property_evidence_distinguishes_not_applicable_unknown_and_latest_conflict(self) -> None:
+        not_applicable = ChemicalSearcher._decorate_property_item({"field": "flash_point", "value": "Not applicable"})
+        unavailable = ChemicalSearcher._decorate_property_item({"field": "flash_point", "value": "Not available"})
+        self.assertEqual(not_applicable["status"], "not_applicable")
+        self.assertEqual(unavailable["status"], "unknown")
+
+        merged = ChemicalSearcher._merge_property_evidence([
+            {"field": "flash_point", "value": "13 °C", "source_updated_at": "2025-01-01", "retrieved_at": "2025-01-01T00:00:00+00:00"},
+            {"field": "flash_point", "value": "15 °C", "source_updated_at": "2026-01-01", "retrieved_at": "2025-01-01T00:00:00+00:00"},
+        ])
+        selected = next(item for item in merged if item["selected"])
+        self.assertEqual(selected["value"], "15 °C")
+        self.assertTrue(selected["conflict"])
+        self.assertEqual(selected["selection_basis"], "latest_source_selected")
+
+    def test_property_enrichment_rejects_cross_domain_links_and_overrides_llm_field(self) -> None:
+        links = ChemicalSearcher._property_detail_links(
+            '<a href="/ChemicalProductProperty_EN_42.htm">Physical properties</a><a href="/MSDS.htm">MSDS</a>',
+            "https://www.chemicalbook.com/ChemicalProductProperty_EN_1.htm",
+            "ChemicalBook",
+        )
+        self.assertEqual(links[0], "https://www.chemicalbook.com/ChemicalProductProperty_EN_42.htm")
+        self.assertFalse(ChemicalSearcher._is_allowed_property_link(
+            "https://example.test/sds", "https://www.chemicalbook.com/ChemicalProductProperty_EN_1.htm", "ChemicalBook",
+        ))
+        extracted = ApprovalFlowMixin.apply_selected_property_evidence(
+            {"flash_point": "25 °C", "flammable": True, "evidence": []},
+            {"selected_property_evidence": {
+                "flash_point": {"status": "measured", "value": ">250 °C", "source": "PubChem"},
+                "flammable": {"status": "unknown", "value": "Not available", "source": "PubChem"},
+            }},
+        )
+        self.assertEqual(extracted["flash_point"], ">250 °C")
+        self.assertIsNone(extracted["flammable"])
+
+    def test_chemsrc_chinese_detail_page_is_derived_from_verified_detail_identity(self) -> None:
+        url = ChemicalSearcher._chemsrc_chinese_detail_url(
+            "https://www.chemsrc.com/en/baike/897661.html",
+            "64-17-5",
+            "Chemsrc",
+        )
+
+        self.assertEqual(url, "https://www.chemsrc.com/cas/64-17-5_897661.html")
+        self.assertEqual(
+            ChemicalSearcher._chemsrc_chinese_detail_url(
+                "https://www.chemsrc.com/en/baike/897661.html",
+                "",
+                "Chemsrc",
+            ),
+            "",
+        )
+        self.assertEqual(
+            ChemicalSearcher._chemsrc_chinese_detail_url(
+                "https://www.chemicalbook.com/ChemicalProductProperty_EN_1.htm",
+                "64-17-5",
+                "ChemicalBook",
+            ),
+            "",
+        )
+
+    def test_linked_property_page_uses_current_identity_validation_signature(self) -> None:
+        class PropertyLinkSearcher(ChemicalSearcher):
+            def _fetch(self, url: str) -> str:
+                self.last_url = url
+                return "Product Name: Ethanol CAS No. 64-17-5 Flash Point: 18 °C"
+
+        searcher = PropertyLinkSearcher(root_dir=ROOT_DIR)
+        items, diagnostic = searcher._linked_property_evidence(
+            url="https://www.chemsrc.com/cas/64-17-5_897661.html",
+            parent={
+                "source": "Chemsrc",
+                "url": "https://www.chemsrc.com/en/baike/897661.html",
+                "name": "Ethanol",
+                "matched_site_name": "Ethanol",
+            },
+            verified_cas="64-17-5",
+        )
+
+        self.assertEqual(searcher.last_url, "https://www.chemsrc.com/cas/64-17-5_897661.html")
+        self.assertEqual(diagnostic["status"], "success")
+        self.assertTrue(any(item["field"] == "flash_point" for item in items))
+
+    def test_chemsrc_chinese_detail_uses_structured_values_not_flattened_prose(self) -> None:
+        page = '''<script type="application/ld+json">{
+          "additionalProperty": [
+            {"name": "闪点", "value": "8.9±0.0 °C"},
+            {"name": "沸点", "value": "72.6±3.0 °C at 760 mmHg"},
+            {"name": "危害声明", "value": "H225-H319"}
+          ]
+        }</script>'''
+
+        items = ChemicalSearcher._chemsrc_chinese_property_evidence(
+            page,
+            source_url="https://www.chemsrc.com/cas/64-17-5_897661.html",
+        )
+
+        values = {(item["field"], item["value"]) for item in items}
+        self.assertIn(("flash_point", "8.9±0.0 °C"), values)
+        self.assertIn(("boiling_point", "72.6±3.0 °C at 760 mmHg"), values)
+        self.assertIn(("ghs_classification", "H225-H319"), values)
+        self.assertTrue(all(len(item["value"]) < 80 for item in items))
 
     def test_cas_only_hit_is_accepted_when_returned_name_exactly_validates_input(self) -> None:
         class CasFallbackSearcher(ChemicalSearcher):
@@ -1234,6 +1600,16 @@ Stable
         self.assertEqual(len(results), 2)
         self.assertEqual(len(searcher.queries), 2)
 
+    def test_search_many_deduplicates_different_package_metadata(self) -> None:
+        searcher = RecordingSearcher(root_dir=ROOT_DIR)
+        results = searcher.search_many([
+            {"name": "ethanol", "cas": "64-17-5", "规格": "500 mL", "规格单位": "瓶", "包装方式": "箱装"},
+            {"name": "ethanol", "cas": "64-17-5", "规格": "2.5 L", "规格单位": "桶", "包装方式": "散装"},
+        ])
+
+        self.assertEqual(len(results), 2)
+        self.assertEqual(len(searcher.queries), 2)
+
     def test_search_many_batches_pubchem_properties_by_cid(self) -> None:
         class BatchFixtureSearcher(ChemicalSearcher):
             def __init__(self, *args: Any, **kwargs: Any) -> None:
@@ -1331,6 +1707,48 @@ Stable
         self.assertTrue(result["cas_name_conflict"])
         self.assertEqual(result["original_erp_cas"], "64-17-5")
         self.assertNotIn("corrected_cas", result)
+
+
+    def test_name_lookup_cas_without_erp_cas_is_marked_as_candidate(self) -> None:
+        class CandidateCasSearcher(ChemicalSearcher):
+            def _search_chemsrc(
+                self,
+                name: str,
+                cas: str,
+                query: str,
+                validation_names: list[str] | None = None,
+            ) -> dict[str, Any] | None:
+                result = self._result(
+                    name=name,
+                    cas="540-69-2",
+                    source="Chemsrc",
+                    url="https://example.test/ammonium-formate",
+                    raw_text="\u7532\u9178\u94f5 CAS No. 540-69-2",
+                )
+                result.update(
+                    {
+                        "relevance_passed": True,
+                        "passed": True,
+                        "matched_site_name": "\u7532\u9178\u94f5",
+                        "name_similarity": 0.95,
+                    }
+                )
+                return result
+
+            def _search_chemicalbook(
+                self,
+                name: str,
+                cas: str,
+                query: str,
+                validation_names: list[str] | None = None,
+            ) -> dict[str, Any] | None:
+                return None
+
+        result = CandidateCasSearcher(root_dir=ROOT_DIR).search("\u7532\u9178\u94f5")
+
+        self.assertEqual(result["candidate_cas"], "540-69-2")
+        self.assertEqual(result["identity_status"], "cas_missing")
+        self.assertTrue(result["need_manual_review"])
 
 
 if __name__ == "__main__":

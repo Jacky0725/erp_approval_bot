@@ -85,6 +85,48 @@ class ChemicalSearchCache:
         result["failure_reason"] = "在线数据源暂不可用，使用过期成功缓存，需人工复核。"
         return result
 
+    def get_compatible_success(
+        self,
+        *,
+        normalized_name: str,
+        cas: str = "",
+        max_age_days: int = 30,
+    ) -> dict[str, Any] | None:
+        """Reuse a recent, successful exact-name lookup across parser revisions.
+
+        Persistent keys intentionally include the parser/settings version.  That
+        prevents stale structured fields from being silently reused, but used to
+        make an already verified Chemsrc/ChemicalBook result invisible after a
+        harmless parser or query-plan change.  This narrow fallback only returns
+        exact normalized-name matches with a usable URL and confidence.  The
+        caller still applies the normal identity/manual-review gates.
+        """
+        if not self.enabled or not str(normalized_name or "").strip():
+            return None
+        oldest = (datetime.now(timezone.utc) - timedelta(days=max(1, max_age_days))).isoformat(timespec="seconds")
+        with closing(self._connect()) as conn:
+            row = conn.execute(
+                """
+                SELECT payload_json
+                FROM chemical_search_cache
+                WHERE normalized_name = ?
+                  AND cas = ?
+                  AND failure_reason = ''
+                  AND url <> ''
+                  AND source_confidence >= 0.7
+                  AND created_at >= ?
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                (str(normalized_name).strip().lower(), str(cas or "").strip().lower(), oldest),
+            ).fetchone()
+        if row is None:
+            return None
+        try:
+            return copy.deepcopy(json.loads(row["payload_json"]))
+        except (TypeError, json.JSONDecodeError):
+            return None
+
     def put(self, cache_key: dict[str, str], result: dict[str, Any]) -> None:
         if not self.enabled:
             return
@@ -163,10 +205,16 @@ class ChemicalSearchCache:
         )
         return conn
 
-    def _ttl_days(self, result: dict[str, Any]) -> int:
+    def _ttl_days(self, result: dict[str, Any]) -> float:
         cache_settings = self._cache_settings()
         failure_reason = str(result.get("failure_reason") or "").strip()
         if result.get("need_manual_review") or failure_reason:
+            retry_minutes = cache_settings.get("failure_ttl_minutes")
+            if retry_minutes not in (None, ""):
+                try:
+                    return max(1.0, float(retry_minutes)) / (24 * 60)
+                except (TypeError, ValueError):
+                    pass
             return max(1, int(cache_settings.get("failure_ttl_days", 1) or 1))
         return max(1, int(cache_settings.get("success_ttl_days", 30) or 30))
 

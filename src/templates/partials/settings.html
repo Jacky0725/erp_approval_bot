@@ -24,6 +24,61 @@
         <section class="settings-section">
           <div class="settings-section-head">
             <div>
+              <h3>V3 百炼联网审批</h3>
+              <p>模型优先输出结构化物性；规则有结论时须类别一致，规则无结论时 CAS 一致的模型意见可写入，必要条目才联网补充。</p>
+            </div>
+          </div>
+          <div class="settings-grid settings-grid-llm">
+            <label>默认审批链路 <select name="approval_pipeline_version"><option value="v1">V1 当前查询链路</option><option value="v2">V2 物化信息链路</option><option value="v3">V3 百炼批量联网建议</option></select></label>
+            <label>百炼 API Key <input name="v3_api_key" type="password" placeholder="{% if runtime.v3_api_key_configured %}已配置，留空则不修改{% else %}留空则不修改{% endif %}"></label>
+            <label>接入地址 <select name="v3_address_mode" id="v3AddressMode"><option value="shared_beijing">北京共享地址（推荐）</option><option value="workspace_beijing">北京业务空间专属地址</option><option value="custom">自定义地址</option></select></label>
+            <label data-v3-address="workspace_beijing">业务空间 ID <input name="v3_workspace_id" value="{{ runtime.v3_workspace_id }}" placeholder="真实业务空间 ID"></label>
+            <label class="settings-field-wide" data-v3-address="custom">自定义 Responses Base URL <input name="v3_custom_base_url" value="{{ runtime.v3_custom_base_url }}" placeholder="https://.../compatible-mode/v1"></label>
+            <label>模型 <select name="v3_model_choice" id="v3ModelChoice"></select></label>
+            <label data-v3-model="custom">自定义模型 <input name="v3_custom_model" placeholder="支持 Responses + web_search 的模型 ID"></label>
+            <label>V3 检索方式 <select name="v3_retrieval_mode"><option value="model_first">模型优先，必要时联网补充</option><option value="always_web">每批均联网</option></select></label>
+            <label>每批试剂数 <input name="v3_batch_size" value="{{ runtime.v3_batch_size }}"></label>
+            <label>并行批次数 <input name="v3_parallel_batches" value="{{ runtime.v3_parallel_batches }}"></label>
+            <label>超时秒数 <input name="v3_timeout_seconds" value="{{ runtime.v3_timeout_seconds }}"></label>
+            <label>重试次数 <input name="v3_max_retries" value="{{ runtime.v3_max_retries }}"></label>
+            <label>任务费用提醒（元） <input name="v3_cost_warning_cny" value="{{ runtime.v3_cost_warning_cny }}"></label>
+          </div>
+          <div class="update-actions">
+            <button type="button" id="testV3ModelButton">测试模型</button>
+            <button type="button" id="testV3ConnectionButton">测试联网</button>
+            <span id="v3TestStatus" class="field-note">模型测试不联网；联网测试会产生少量搜索费用。两者都不会保存配置或启动 ERP 任务。</span>
+          </div>
+        </section>
+
+        <section class="settings-section">
+          <div class="settings-section-head">
+            <div>
+              <h3>V1 缺 CAS 名称补全</h3>
+              <p>仅在首轮名称检索无可信结果时调用百炼生成候选英文名/CAS；候选必须由外部化学来源核验，不会改写 ERP CAS。</p>
+            </div>
+          </div>
+          <div class="settings-grid settings-grid-llm">
+            <label class="check"><input type="checkbox" name="identity_enrichment_enabled" value="true" {% if runtime.identity_enrichment_enabled == 'true' %}checked{% endif %}> 启用 V1 缺 CAS 名称补全</label>
+            <label>补全模型 <input name="identity_enrichment_model" value="{{ runtime.identity_enrichment_model }}" placeholder="qwen3.7-flash"></label>
+            <label>单条超时秒数 <input name="identity_enrichment_timeout_seconds" value="{{ runtime.identity_enrichment_timeout_seconds }}"></label>
+            <label>每批上限 <input name="identity_enrichment_max_calls_per_batch" value="{{ runtime.identity_enrichment_max_calls_per_batch }}"></label>
+            <label>每日上限（0 为不限） <input name="identity_enrichment_max_calls_per_day" value="{{ runtime.identity_enrichment_max_calls_per_day }}"></label>
+          </div>
+          <p class="field-note">使用百炼 API Key：{% if runtime.identity_enrichment_api_key_configured %}已配置{% else %}未配置{% endif %}。主 LLM 仍使用下方的硅基流动配置。</p>
+        </section>
+
+        <section class="settings-section">
+          <div class="settings-section-head"><div><h3>V2 物化信息链路</h3><p>以身份解析、可追溯来源证据、物化信息和本地规则引擎形成结果。选择 V2 正式运行时，仅使用 V2 合格结果；失败记录转人工复核。</p></div></div>
+          <div class="settings-grid settings-grid-llm">
+            <label class="check"><input type="checkbox" name="enrichment_v2_enabled" value="true" {% if runtime.enrichment_v2_enabled == 'true' %}checked{% endif %}> 启用 V2 正式接管</label>
+            <label class="check"><input type="checkbox" name="enrichment_v2_shadow_mode" value="true" {% if runtime.enrichment_v2_shadow_mode == 'true' %}checked{% endif %}> 保持影子运行</label>
+          </div>
+          <p class="field-note">当前状态：{{ runtime.enrichment_v2_execution_status }}。单次运行选择“V2 物化信息链路”会进入正式 V2 判定和既有 ERP 写入/写后核验路径。</p>
+        </section>
+
+        <section class="settings-section">
+          <div class="settings-section-head">
+            <div>
               <h3>钉钉机器人</h3>
               <p>Stream 机器人负责接收群命令；通知开关用于任务成功或失败后向钉钉群发送简洁摘要。</p>
             </div>
@@ -160,8 +215,8 @@
               </select>
             </label>
             <label>默认最低置信度 <input name="approval_write_min_confidence" value="{{ runtime.approval_write_min_confidence }}"></label>
-            <label>每批写入条数 <input name="approval_write_batch_size" value="{{ runtime.approval_write_batch_size }}"></label>
-            <label>查询/LLM worker 数 <input name="approval_parallel_workers" value="{{ runtime.approval_parallel_workers }}"></label>
+            <label>ERP 每批写入条数 <input name="approval_write_batch_size" value="{{ runtime.approval_write_batch_size }}"></label>
+            <label>V1 查询/LLM worker 数 <input name="approval_parallel_workers" value="{{ runtime.approval_parallel_workers }}"></label>
           </div>
           <div class="switches settings-policy-strip">
             <label class="check"><input type="checkbox" name="process_all_todos" value="true"> 默认处理全部待办</label>

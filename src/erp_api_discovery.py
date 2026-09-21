@@ -452,7 +452,12 @@ class ApiDiscoveryAnalyzer:
                 (expected_name, values.get("name")),
                 (expected_cas, values.get("cas_code")),
             )
-            if any(expected and actual not in (None, "") and str(actual).strip() != expected for expected, actual in comparisons):
+            if any(
+                ApiDiscoveryAnalyzer._identity_text(expected)
+                and ApiDiscoveryAnalyzer._identity_text(actual)
+                and ApiDiscoveryAnalyzer._identity_text(actual) != ApiDiscoveryAnalyzer._identity_text(expected)
+                for expected, actual in comparisons
+            ):
                 continue
             base = f"params.args.1.reagent_list_line_ids.{index}"
             return {
@@ -463,6 +468,14 @@ class ApiDiscoveryAnalyzer:
                 "line_values": values,
             }
         return None
+
+    @staticmethod
+    def _identity_text(value: Any) -> str:
+        """Normalize missing ERP identity values before correlating a save request."""
+        if value is None or value is False:
+            return ""
+        text = str(value).strip()
+        return "" if text.lower() in {"", "-", "n/a", "none", "null", "false"} else text
 
     @classmethod
     def _flatten(cls, value: Any, prefix: str = "") -> list[tuple[str, Any]]:
@@ -528,7 +541,18 @@ class ApiDiscoveryAnalyzer:
                 continue
             if fields.get("record_id_fields") and fields.get("property_fields"):
                 candidates.append(event)
-        candidates.sort(key=lambda item: 0 if item.get("action_hint") == "possible_detail_read" else 1)
+        candidates.sort(
+            key=lambda item: (
+                0 if (item.get("candidate_fields") or {}).get("sequence_fields") else 1,
+                0
+                if (
+                    (item.get("candidate_fields") or {}).get("name_fields")
+                    or (item.get("candidate_fields") or {}).get("cas_fields")
+                )
+                else 1,
+                0 if item.get("action_hint") == "possible_detail_read" else 1,
+            )
+        )
         return candidates[0] if candidates else None
 
     @staticmethod

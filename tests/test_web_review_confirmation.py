@@ -483,6 +483,86 @@ class WebReviewConfirmationTest(unittest.TestCase):
             memory = ReagentMemory.from_settings({}, root)
             self.assertIsNone(memory.lookup(cas="123-45-6"))
 
+    def test_missing_erp_cas_candidate_is_not_promoted_without_explicit_confirmation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            data_dir = root / "data"
+            data_dir.mkdir(parents=True)
+            queue_path = data_dir / "review_queue.xlsx"
+            pd.DataFrame(
+                [
+                    {
+                        "timestamp": "2026-09-14T10:00:00",
+                        "试剂清单号": "SJ-CAS-1",
+                        "序号": "1",
+                        "试剂名称": "\u7532\u9178\u94f5",
+                        "cas": "",
+                        "candidate_cas": "540-69-2",
+                        "identity_status": "cas_missing",
+                        "standard_name": "\u7532\u9178\u94f5",
+                        "cleaned_name": "\u7532\u9178\u94f5",
+                        "reason": "ERP CAS missing",
+                        "status": "pending",
+                    }
+                ]
+            ).to_excel(queue_path, index=False)
+
+            review_key = review_queue_summary(root)["preview"][0]["review_key"]
+            result = confirm_review_item(
+                {"review_key": review_key, "final_category": "\u666e\u901a\u7c7b", "reason": "\u4eba\u5de5\u786e\u8ba4"},
+                root,
+            )
+
+            self.assertTrue(result["confirmed"])
+            memory = ReagentMemory.from_settings({}, root)
+            self.assertIsNone(memory.lookup(cas="540-69-2"))
+            self.assertIsNotNone(memory.lookup(raw_name="\u7532\u9178\u94f5"))
+            resolved = pd.read_excel(queue_path, dtype=str).fillna("")
+            self.assertEqual(resolved.loc[0, "cas"], "")
+            self.assertEqual(resolved.loc[0, "candidate_cas"], "540-69-2")
+
+    def test_missing_erp_cas_can_be_confirmed_with_valid_cas(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            data_dir = root / "data"
+            data_dir.mkdir(parents=True)
+            queue_path = data_dir / "review_queue.xlsx"
+            pd.DataFrame(
+                [
+                    {
+                        "timestamp": "2026-09-14T10:00:00",
+                        "试剂清单号": "SJ-CAS-2",
+                        "序号": "1",
+                        "试剂名称": "\u7532\u9178\u94f5",
+                        "cas": "",
+                        "candidate_cas": "540-69-2",
+                        "identity_status": "cas_missing",
+                        "standard_name": "\u7532\u9178\u94f5",
+                        "cleaned_name": "\u7532\u9178\u94f5",
+                        "reason": "ERP CAS missing",
+                        "status": "pending",
+                    }
+                ]
+            ).to_excel(queue_path, index=False)
+
+            review_key = review_queue_summary(root)["preview"][0]["review_key"]
+            result = confirm_review_item(
+                {
+                    "review_key": review_key,
+                    "final_category": "\u666e\u901a\u7c7b",
+                    "confirmed_cas": "540-69-2",
+                    "reason": "\u4eba\u5de5\u786e\u8ba4",
+                },
+                root,
+            )
+
+            self.assertTrue(result["confirmed"])
+            memory = ReagentMemory.from_settings({}, root)
+            self.assertIsNotNone(memory.lookup(cas="540-69-2"))
+            resolved = pd.read_excel(queue_path, dtype=str).fillna("")
+            self.assertEqual(resolved.loc[0, "cas"], "540-69-2")
+            self.assertEqual(resolved.loc[0, "confirmed_cas"], "540-69-2")
+
     def test_confirm_review_item_resolves_duplicate_pending_review_keys(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

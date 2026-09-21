@@ -30,6 +30,9 @@ DEFAULT_RULE_TO_ERP_ALIASES = {
     "未知类": ["未知类"],
 }
 
+# ``剧毒品`` remains an explicit human-controlled non-writable decision. A
+# structured ``不建议接收类`` rule maps to the ERP's ``拒收类`` option and is
+# written by the approval flow without entering manual review.
 NON_WRITABLE_RULE_CATEGORIES = {"剧毒品"}
 
 
@@ -173,11 +176,12 @@ def category_mapping_summary(settings: dict[str, Any] | None = None, root_dir: P
     non_writable: list[str] = []
 
     for category in rule_categories(settings, root_dir):
+        if is_non_writable_rule_category(category, settings, root_dir):
+            non_writable.append(category)
+            continue
         erp_value = to_erp_property(category, settings)
         if erp_value:
             mappings.append({"rule_category": category, "erp_property": erp_value})
-        elif category in NON_WRITABLE_RULE_CATEGORIES:
-            non_writable.append(category)
         else:
             unmapped.append(category)
 

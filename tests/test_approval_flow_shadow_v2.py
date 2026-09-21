@@ -59,7 +59,7 @@ class ApprovalFlowShadowV2Test(unittest.TestCase):
         self.assertTrue(suggestion["需人工复核"])
         self.assertTrue(suggestion["V2正式判定"])
 
-    def test_unknown_production_evaluation_without_name_evidence_requires_review(self) -> None:
+    def test_unknown_production_evaluation_without_name_evidence_is_auto_write(self) -> None:
         suggestion = {"最终建议类别": "普通类", "需人工复核": False, "置信度": 0.9}
         evaluation = {
             "identity": {"status": "unresolved"},
@@ -75,5 +75,6 @@ class ApprovalFlowShadowV2Test(unittest.TestCase):
         ApprovalFlowMixin.apply_enrichment_v2_evaluation_to_suggestion(suggestion, evaluation)
 
         self.assertEqual(suggestion["最终建议类别"], "未知类")
-        self.assertTrue(suggestion["需人工复核"])
-        self.assertEqual(suggestion["未知类判定状态"], "证据不足，需人工确认")
+        self.assertFalse(suggestion["需人工复核"])
+        self.assertEqual(suggestion["置信度"], 1.0)
+        self.assertEqual(suggestion["未知类判定状态"], "统一自动写入")

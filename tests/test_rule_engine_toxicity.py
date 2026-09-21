@@ -133,6 +133,58 @@ class RuleEngineToxicityTest(unittest.TestCase):
         self.assertEqual(result["final_category"], "剧毒品")
         self.assertFalse(result["need_manual_review"])
 
+    def test_ldlo_is_not_treated_as_ld50(self) -> None:
+        engine = RuleEngine(
+            rules=[
+                Rule(
+                    category="剧毒品",
+                    explanation="经口LD50≤5mg/kg、经皮LD50≤50mg/kg",
+                    examples="",
+                    explanation_keywords=("LD50", "mg/kg"),
+                    example_keywords=(),
+                )
+            ],
+            priority=["剧毒品", "普通类"],
+        )
+
+        result = engine.classify(
+            {
+                "reagent_name": "甲酸98-100%",
+                "toxicity": (
+                    "Human oral LDLo 2440 ug/kg; "
+                    "Rat oral LD50 1100 mg/kg; Mouse oral LD50 700 mg/kg"
+                ),
+                "allow_default_normal": True,
+            }
+        )
+
+        self.assertEqual(result["final_category"], "普通类")
+        self.assertNotIn("剧毒品", result["matched_categories"])
+
+    def test_ldlo_alone_does_not_trigger_acute_toxicity(self) -> None:
+        engine = RuleEngine(
+            rules=[
+                Rule(
+                    category="剧毒品",
+                    explanation="经口LD50≤5mg/kg",
+                    examples="",
+                    explanation_keywords=("LD50", "mg/kg"),
+                    example_keywords=(),
+                )
+            ],
+            priority=["剧毒品", "普通类"],
+        )
+
+        result = engine.classify(
+            {
+                "toxicity": "Human oral LDLo 2 mg/kg",
+                "allow_default_normal": True,
+            }
+        )
+
+        self.assertEqual(result["final_category"], "普通类")
+        self.assertNotIn("剧毒品", result["matched_categories"])
+
 
 if __name__ == "__main__":
     unittest.main()

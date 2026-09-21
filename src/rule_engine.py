@@ -257,7 +257,7 @@ class RuleEngine:
         reagent_info = properties.to_rule_input(name=name, cas=cas)
         result = dict(self.classify(reagent_info))
         warnings: list[str] = []
-        if identity_status != "verified":
+        if identity_status not in {"verified", "cas_verified", "name_verified_pubchem"}:
             warnings.append(f"identity_status:{identity_status or 'unresolved'}")
         conflicts = tuple(getattr(properties, "conflicts", ()) or ())
         if conflicts:
@@ -324,12 +324,21 @@ class RuleEngine:
                 example_hits=[],
                 score=10.0,
             )
-        suppress_special_acid_rule = (
-            self._is_mineral_acid_salt_like(reagent_info)
-            or self._is_ordinary_mineral_acid(reagent_info)
-        )
+        # Acid salts are never acids for this business classification.  Plain
+        # sulfuric/nitric acid must still reach their concentration-aware
+        # structured rules; whether it is ordinary or special is resolved by
+        # those rules rather than by the name-only fallback.
+        suppress_special_acid_rule = self._is_mineral_acid_salt_like(reagent_info)
         for rule in self.rules:
             if rule.category == "\u7279\u6b8a\u9178" and suppress_special_acid_rule:
+                continue
+            if rule.category == "\u5e38\u89c4\u9178" and self._is_mineral_acid_salt_like(reagent_info):
+                continue
+            # Imported legacy rows such as "\u6bd2\u6027" and "\u6c27\u5316\u6027" describe a
+            # hazard in general, not an acid identity.  They must not turn an
+            # otherwise unidentified chemical into a special acid.  Precise
+            # special-acid rules remain in the structured SPECIAL-SPA rows.
+            if rule.category == "\u7279\u6b8a\u9178" and str(rule.rule_id or "").startswith("LEGACY-SAC-"):
                 continue
 
             structured_rule_matched = False
@@ -355,7 +364,14 @@ class RuleEngine:
                 example_hits = self._flammable_example_hits(rule.example_keywords, reagent_info)
             else:
                 example_hits = self._specific_example_hits(rule.example_keywords, reagent_info)
-            category_hits = self._category_suggestion_hits(rule.category, reagent_info)
+            # A legacy material-name example cannot establish skin/eye
+            # irritation.  Auto classification requires an explicit GHS or
+            # lacrimation statement from the evidence fields.
+            if rule.category == IRRITANT_CATEGORY:
+                example_hits = []
+            # LLM/category suggestions are leads for review, never evidence of
+            # a skin/eye irritation endpoint.
+            category_hits = [] if rule.category == IRRITANT_CATEGORY else self._category_suggestion_hits(rule.category, reagent_info)
             halogen_hits = self._bromine_iodine_hits(rule.category, reagent_info)
             conditional_hits = self._conditional_rule_hits(rule.category, reagent_info)
             explanation_hits = list(
@@ -378,6 +394,8 @@ class RuleEngine:
 
             if not explanation_hits:
                 example_hits = self._exact_example_hits(rule.example_keywords, reagent_info)
+            if rule.category == IRRITANT_CATEGORY:
+                example_hits = []
 
             score = len(explanation_hits) * 2.0 + len(example_hits) * 0.8
             if score > 0:
@@ -438,12 +456,34 @@ class RuleEngine:
                 f"无法按刺激性自动判定：{irritation_exclusion}；该危害类别不能等同于皮肤/眼刺激，需人工确认对应业务类别。"
             )
 
+        flammable_issue = self.flammable_evidence_issue(reagent_info)
+        if flammable_issue and not matches:
+            return self._manual_result(f"无法自动判定易燃类：{flammable_issue}")
+
         if not matches and self._is_business_normal_name(reagent_info) and self._ordinary_auto_allowed(reagent_info):
             return {
                 "final_category": NORMAL_CATEGORY,
                 "matched_categories": [NORMAL_CATEGORY],
                 "reason": "未命中危险规则，且试剂名称命中普通类业务关键词或药物/API类名称规则，按普通类处理。",
                 "confidence": 0.95,
+                "need_manual_review": False,
+            }
+
+        if not matches and self._is_enzyme_or_culture_normal_name(reagent_info) and self._ordinary_auto_allowed(reagent_info):
+            return {
+                "final_category": NORMAL_CATEGORY,
+                "matched_categories": [NORMAL_CATEGORY],
+                "reason": "未命中危险规则，且试剂名称为明确酶类、生物酶制剂、培养基或培养液，按普通类处理。",
+                "confidence": 0.95,
+                "need_manual_review": False,
+            }
+
+        if not matches and self._is_common_low_risk_salt_name(reagent_info) and self._ordinary_auto_allowed(reagent_info):
+            return {
+                "final_category": NORMAL_CATEGORY,
+                "matched_categories": [NORMAL_CATEGORY],
+                "reason": "未命中危险规则，且试剂名称符合受控常见低风险无机盐规则，按普通类处理。",
+                "confidence": 0.9,
                 "need_manual_review": False,
             }
 
@@ -455,10 +495,6 @@ class RuleEngine:
                 "confidence": 0.9,
                 "need_manual_review": False,
             }
-
-        flammable_issue = self.flammable_evidence_issue(reagent_info)
-        if flammable_issue and not matches:
-            return self._manual_result(f"无法自动判定易燃类：{flammable_issue}")
 
         if not matches:
             if reagent_info.get("allow_default_normal") and self._ordinary_auto_allowed(reagent_info):
@@ -712,7 +748,11 @@ class RuleEngine:
                     if not concentration > RuleEngine._condition_number(condition, 72.0):
                         continue
             elif condition in {"requiresliquidcontext", "requires_liquid_context"}:
-                if not RuleEngine._has_liquid_context(reagent_info) or RuleEngine._has_flammable_blocking_context(reagent_info):
+                if (
+                    not RuleEngine._has_liquid_context(reagent_info)
+                    or RuleEngine._has_flammable_blocking_context(reagent_info)
+                    or RuleEngine._salt_like_name_blocks_auto_flammable(reagent_info)
+                ):
                     continue
             elif condition not in {"", "any"}:
                 # Toxicity and flash-point conditions are evaluated from the thresholds sheet
@@ -1325,6 +1365,11 @@ class RuleEngine:
             return ""
         if RuleEngine._has_auto_flammable_context(reagent_info):
             return ""
+        if RuleEngine._salt_like_name_blocks_auto_flammable(reagent_info):
+            return (
+                "检测到低闪点信息，但试剂名称属于钠盐/钾盐/铵盐/酸盐等盐类；"
+                "除非 SDS 明确标注为易燃液体，否则不自动判定易燃类。"
+            )
         if RuleEngine._has_flammable_blocking_context(reagent_info):
             return (
                 "检测到低闪点信息，但试剂名称或证据显示可能为固体、盐酸盐、聚合物、"
@@ -1347,9 +1392,26 @@ class RuleEngine:
         low_flash = any(celsius < 60.0 for celsius, _ in RuleEngine._flash_points_celsius(reagent_info))
         if not low_flash:
             return False
+        if RuleEngine._salt_like_name_blocks_auto_flammable(reagent_info):
+            return False
         if RuleEngine._has_flammable_blocking_context(reagent_info):
             return False
         return RuleEngine._has_liquid_context(reagent_info) or RuleEngine._has_common_flammable_liquid_example(reagent_info)
+
+    @staticmethod
+    def _salt_like_name_blocks_auto_flammable(reagent_info: dict[str, Any]) -> bool:
+        if not RuleEngine._is_mineral_acid_salt_like(reagent_info):
+            return False
+        return not RuleEngine._has_explicit_flammable_liquid_statement(reagent_info)
+
+    @staticmethod
+    def _has_explicit_flammable_liquid_statement(reagent_info: dict[str, Any]) -> bool:
+        text = RuleEngine._raw_reagent_text(reagent_info).lower()
+        return bool(
+            re.search(r"\bflammable\s+liquid\b", text, flags=re.I)
+            or re.search(r"\bhighly\s+flammable\s+liquid\b", text, flags=re.I)
+            or "易燃液体" in text
+        )
 
     @staticmethod
     def _has_liquid_context(reagent_info: dict[str, Any]) -> bool:
@@ -1522,14 +1584,20 @@ class RuleEngine:
 
         results: list[tuple[float, str]] = []
         temperature_pattern = re.compile(
-            r"(?P<prefix><|<=|>|>=|less\s+than|below|under|about|approximately|~)?\s*"
+            r"(?P<prefix><=|<|>=|>|less\s+than|below|under|about|approximately|~)?\s*"
             r"(?P<value>-?\d+(?:\.\d+)?)"
             r"(?:\s*(?:\+/-|\u00b1)\s*\d+(?:\.\d+)?)?\s*"
             r"(?P<unit>\u00b0\s*[CFK]|[CFK]\b|\u534e\u6c0f\u5ea6|\u6444\u6c0f\u5ea6|\u5f00\u5c14\u6587)",
             flags=re.I,
         )
         for snippet in snippets:
-            for match in temperature_pattern.finditer(snippet):
+            matches = list(temperature_pattern.finditer(snippet))
+            if require_flash_context and matches:
+                matches = matches[:1]
+            for match in matches:
+                prefix = re.sub(r"\s+", "", str(match.group("prefix") or "").lower())
+                if prefix in {">", ">="}:
+                    continue
                 value = float(match.group("value"))
                 unit = RuleEngine._normalize_temperature_unit(match.group("unit"))
                 celsius = RuleEngine._to_celsius(value, unit)
@@ -1663,6 +1731,111 @@ class RuleEngine:
         return any(RuleEngine._normalize_text(token) in name_text for token in tokens)
 
     @staticmethod
+    def _is_enzyme_or_culture_normal_name(reagent_info: dict[str, Any]) -> bool:
+        """Recognize explicit low-risk enzyme and culture-media names after hazard matching."""
+        name_values = RuleEngine._normalized_name_values(reagent_info)
+        if not name_values:
+            return False
+
+        excluded_tokens = (
+            "酶抑制剂",
+            "酶底物",
+            "酶标板",
+            "酶活检测试剂盒",
+            "enzymeinhibitor",
+            "enzymesubstrate",
+            "enzymeassaykit",
+        )
+        if any(token in name_text for name_text in name_values for token in excluded_tokens):
+            return False
+        if any("培养基" in name_text or "培养液" in name_text for name_text in name_values):
+            return True
+
+        enzyme_tokens = ("淀粉酶", "蛋白酶", "脂肪酶", "生物酶制剂")
+        if any(token in name_text for name_text in name_values for token in enzyme_tokens):
+            return True
+
+        # The generic enzyme rule only accepts a reagent whose substantive name is an enzyme.
+        return any(name_text.endswith("酶") for name_text in name_values)
+
+    @staticmethod
+    def _is_common_low_risk_salt_name(reagent_info: dict[str, Any]) -> bool:
+        """Conservative name-only fallback for a small set of common inorganic salts.
+
+        It deliberately does not treat every name containing “盐” as ordinary.  The rule
+        accepts only an allowed cation/anion pair and rejects common reactive salt families.
+        """
+        name_values = RuleEngine._normalized_name_values(reagent_info)
+        if not name_values:
+            return False
+
+        blocked_tokens = (
+            "未知",
+            "无标签",
+            "混合",
+            "混配",
+            "复配",
+            "溶液",
+            "试剂盒",
+            "硝酸",
+            "亚硝酸",
+            "氯酸",
+            "高氯酸",
+            "次氯酸",
+            "过氧",
+            "过硫酸",
+            "超氧",
+            "高锰酸",
+            "铬酸",
+            "重铬酸",
+            "叠氮",
+            "氰化",
+            "硫氰酸",
+            "硫化",
+            "磷化",
+            "硼氢化",
+            "连二亚硫酸",
+            "氟化",
+            "溴化",
+            "碘化",
+            "汞",
+            "镉",
+            "铬",
+            "砷",
+            "铅",
+            "镍",
+            "铍",
+            "银",
+            "钒",
+            "硒",
+            "钴",
+            "锡",
+        )
+        if any(token in name_text for name_text in name_values for token in blocked_tokens):
+            return False
+
+        allowed_cations = ("钠", "钾", "铵", "銨", "镁", "钙")
+        allowed_anions = ("氯化", "硫酸", "磷酸", "碳酸", "乙酸", "甲酸")
+        grade_suffix = re.compile(
+            r"(?:分析纯|优级纯|化学纯|ar|gr|cp|[·.]?(?:一|二|三|四|五|六|七|八|九|十|\d+)水(?:合物)?)$"
+        )
+        grade_parenthetical = re.compile(r"[\(（\[【](?:分析纯|优级纯|化学纯|ar|gr|cp)[\)）\]】]", re.I)
+
+        for original_name in name_values:
+            name_text = grade_parenthetical.sub("", original_name)
+            name_text = re.sub(r"^无水", "", name_text)
+            name_text = grade_suffix.sub("", name_text)
+            if re.fullmatch(r"(?:乙二胺四乙酸(?:二|四)?钠|乙二酸四乙酸钠|edta(?:二|四)?钠|disodiumedta)", name_text):
+                return True
+            if not name_text or not any(cation in name_text for cation in allowed_cations):
+                continue
+            if not any(anion in name_text for anion in allowed_anions):
+                continue
+            if any(name_text.startswith(cation) or name_text.endswith(cation) for cation in allowed_cations):
+                return True
+        return False
+
+    @staticmethod
     def _normalized_name_values(reagent_info: dict[str, Any]) -> list[str]:
         values = []
         for key in ("name", "reagent_name", "chemical_name", "standard_name", "cleaned_name", "english_name"):
@@ -1673,11 +1846,25 @@ class RuleEngine:
 
     @staticmethod
     def _is_mineral_acid_salt_like(reagent_info: dict[str, Any]) -> bool:
-        name_values = RuleEngine._normalized_name_values(reagent_info)
+        # Classification receives both the immutable ERP text and normalized
+        # fields.  Salt identity must rely on the latter whenever available:
+        # an attached purity grade such as "硫酸 AR" is not a salt suffix.
+        name_values = RuleEngine._acid_identity_name_values(reagent_info)
         if not name_values:
             return False
 
         return any(RuleEngine._looks_like_acid_salt_text(name_text) for name_text in name_values)
+
+    @staticmethod
+    def _acid_identity_name_values(reagent_info: dict[str, Any]) -> list[str]:
+        normalized = []
+        for key in ("standard_name", "cleaned_name", "english_name"):
+            value = RuleEngine._normalize_text(str(reagent_info.get(key) or ""))
+            if value:
+                normalized.append(value)
+        # Direct rule-engine calls and older queue rows can lack normalized
+        # fields; retain a backwards-compatible raw-name fallback for them.
+        return list(dict.fromkeys(normalized)) or RuleEngine._normalized_name_values(reagent_info)
 
     @staticmethod
     def _looks_like_acid_salt_text(name_text: str) -> bool:
@@ -1861,13 +2048,38 @@ class RuleEngine:
         values: list[tuple[float, str, str]] = []
         normalized = text.replace("μ", "u").replace("µ", "u")
         pattern = re.compile(r"(\d+(?:\.\d+)?)\s*(ug/kg|µg/kg|μg/kg|mg/kg|g/kg)", flags=re.I)
-        for match in pattern.finditer(normalized):
-            start = max(0, match.start() - 80)
-            end = min(len(normalized), match.end() + 80)
-            context = normalized[start:end].lower()
-            if not any(marker in context for marker in ("ld50", "ldlo", "lc50", "半数致死", "致死量")):
+        endpoint_pattern = re.compile(
+            r"ld50|lc50|ldlo|半数致死量?|致死量",
+            flags=re.I,
+        )
+        endpoints = list(endpoint_pattern.finditer(normalized))
+
+        # Bind each dose to the nearest preceding toxicity endpoint.  A broad
+        # context window can incorrectly attach an LDLo value to a later LD50
+        # (or leak an adjacent route such as dermal into an oral result).
+        for index, endpoint in enumerate(endpoints):
+            endpoint_name = endpoint.group(0).lower()
+            if endpoint_name not in {"ld50", "lc50"}:
                 continue
-            values.append((float(match.group(1)), match.group(2).lower(), context))
+
+            next_endpoint_start = (
+                endpoints[index + 1].start() if index + 1 < len(endpoints) else len(normalized)
+            )
+            value_match = pattern.search(
+                normalized,
+                pos=endpoint.end(),
+                endpos=min(next_endpoint_start, endpoint.end() + 120),
+            )
+            if not value_match:
+                continue
+
+            # Keep enough text before the endpoint for forms like
+            # "oral rat LD50", but never cross the previous endpoint.
+            previous_endpoint_end = endpoints[index - 1].end() if index else 0
+            context_start = max(previous_endpoint_end, endpoint.start() - 80)
+            context_end = min(len(normalized), value_match.end() + 80)
+            context = normalized[context_start:context_end].lower()
+            values.append((float(value_match.group(1)), value_match.group(2).lower(), context))
         return values
 
     @staticmethod

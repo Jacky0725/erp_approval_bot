@@ -70,7 +70,7 @@ class ManualReviewAdviceTest(unittest.TestCase):
         self.assertIn("未配置", result["reason_cn"])
         self.assertNotIn("Error code", result["reason_cn"])
 
-    def test_batch_flow_skips_llm_advice_without_trusted_web_evidence(self) -> None:
+    def test_batch_flow_generates_advisory_llm_opinion_without_trusted_web_evidence(self) -> None:
         class FakeExtractor:
             advice_calls = 0
 
@@ -140,11 +140,13 @@ class ManualReviewAdviceTest(unittest.TestCase):
         ):
             extracted, classification = bot.extract_and_classify_worker(item, FakeRuleEngine())  # type: ignore[arg-type]
 
-        self.assertEqual(FakeExtractor.advice_calls, 0)
+        self.assertEqual(FakeExtractor.advice_calls, 1)
         self.assertEqual(classification["final_category"], "")
         self.assertEqual(classification["matched_categories"], [])
         self.assertEqual(extracted.get("suggested_categories"), [])
-        self.assertNotIn("llm_advisory_category", item["search_result"])
+        self.assertEqual(item["search_result"]["llm_advisory_category"], "强反应性")
+        self.assertEqual(item["search_result"]["llm_advisory_evidence_basis"], "模型知识")
+        self.assertTrue(item["search_result"]["llm_advisory_only"])
 
     def test_advisory_suggestion_is_never_writable(self) -> None:
         bot = _Bot()

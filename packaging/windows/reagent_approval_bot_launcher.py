@@ -65,12 +65,23 @@ def configure_runtime() -> Path:
     os.environ.setdefault("REAGENT_APPROVAL_RUNTIME_ROOT", str(runtime))
     migrate_legacy_runtime(executable_dir, runtime)
     os.chdir(executable_dir)
-    browser_root = bundled_root() / "ms-playwright"
-    if browser_root.exists():
+    browser_root: Path | None = bundled_root() / "ms-playwright"
+    if not browser_root.exists():
+        install_root = executable_dir.parent.parent if executable_dir.parent.name == "versions" else executable_dir
+        try:
+            pointer = json.loads((install_root / "browser-current.json").read_text(encoding="utf-8"))
+            candidate = (install_root / str(pointer.get("path") or "")).resolve()
+            candidate.relative_to((install_root / "shared" / "browsers").resolve())
+            browser_root = candidate
+        except (OSError, ValueError, json.JSONDecodeError):
+            browser_root = None
+    if browser_root and browser_root.exists():
         os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", str(browser_root))
         has_full_chromium = any(browser_root.glob("chromium-*"))
         if not has_full_chromium:
             os.environ.setdefault("REAGENT_APPROVAL_HEADLESS_ONLY", "true")
+    else:
+        os.environ.setdefault("REAGENT_APPROVAL_HEADLESS_ONLY", "true")
     log_dir = runtime / "data" / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
     redirect_process_output(log_dir / "launcher.log")

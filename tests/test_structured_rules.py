@@ -366,6 +366,54 @@ class StructuredRulesTest(unittest.TestCase):
                 self.assertEqual(result["final_category"], "\u666e\u901a\u7c7b")
                 self.assertFalse(result["need_manual_review"])
 
+    def test_controlled_common_salt_enzyme_and_culture_rules(self) -> None:
+        ordinary_names = (
+            "\u78f7\u9178\u6c22\u4e8c\u94be",
+            "\u65e0\u6c34\u786b\u9178\u9541(\u5206\u6790\u7eaf)",
+            "\u78f7\u9178\u4e8c\u6c22\u94a0\u00b7\u4e8c\u6c34",
+            "\u65e0\u6c34\u78b3\u9178\u94a0(AR)",
+            "\u4e59\u9178\u94f5",
+            "\u7532\u9178\u94f5(\u5206\u6790\u7eaf)",
+            "\u4e59\u4e8c\u80fa\u56db\u4e59\u9178\u4e8c\u94a0",
+            "\u4e59\u4e8c\u9178\u56db\u4e59\u9178\u94a0",
+            "\u66f2\u9709\u6dc0\u7c89\u9176(\u5206\u6790\u7eaf)",
+            "\u86cb\u767d\u9176",
+            "\u8102\u80aa\u9176",
+            "\u751f\u7269\u9176\u5236\u5242",
+            "\u9009\u62e9\u6027\u57f9\u517b\u57fa",
+            "\u7ec6\u80de\u57f9\u517b\u6db2",
+        )
+        for name in ordinary_names:
+            with self.subTest(name=name):
+                result = self.engine.classify(
+                    {"reagent_name": name, "standard_name": name, "text": name}
+                )
+                self.assertEqual(result["final_category"], "\u666e\u901a\u7c7b")
+                self.assertFalse(result["need_manual_review"])
+
+        self.assertFalse(self.engine._is_common_low_risk_salt_name({"reagent_name": "\u786b\u9178\u94dc"}))
+        self.assertFalse(self.engine._is_common_low_risk_salt_name({"reagent_name": "\u785d\u9178\u94be"}))
+        self.assertFalse(self.engine._is_enzyme_or_culture_normal_name({"reagent_name": "\u66f2\u9709"}))
+        blocked = self.engine.classify(
+            {
+                "reagent_name": "\u6c5e\u57f9\u517b\u57fa",
+                "standard_name": "\u6c5e\u57f9\u517b\u57fa",
+                "text": "\u6c5e\u57f9\u517b\u57fa",
+            }
+        )
+        self.assertEqual(blocked["final_category"], "\u4e0d\u5efa\u8bae\u63a5\u6536\u7c7b")
+
+    def test_phosphorus_pentoxide_matches_reactivity_with_grade_suffix(self) -> None:
+        result = self.engine.classify(
+            {
+                "reagent_name": "\u4e94\u6c27\u5316\u4e8c\u78f7(AR)",
+                "standard_name": "\u4e94\u6c27\u5316\u4e8c\u78f7",
+                "text": "\u4e94\u6c27\u5316\u4e8c\u78f7(AR)",
+            }
+        )
+
+        self.assertEqual(result["final_category"], "\u5f3a\u53cd\u5e94\u6027")
+
     def test_low_priority_business_normal_keywords_yield_to_other_categories(self) -> None:
         cases = [
             ("\u7eb3\u7c73\u786b\u9178\u94ec\u94be", "\u91cd\u91d1\u5c5e\u7c7b"),
@@ -495,16 +543,17 @@ class StructuredRulesTest(unittest.TestCase):
                 self.assertNotIn("\u5e38\u89c4\u9178", result["matched_categories"])
                 self.assertNotIn("\u7279\u6b8a\u9178", result["matched_categories"])
 
-    def test_plain_mineral_acids_still_match_regular_acid(self) -> None:
-        for name in (
-            "\u76d0\u9178",
-            "\u785d\u9178",
-            "\u786b\u9178",
-            "\u53d1\u70df\u76d0\u9178",
-            "10% HCl",
-            "2mol HCl",
-            "hydrochloric acid solution",
-        ):
+    def test_plain_sulfuric_and_nitric_follow_business_special_acid_policy(self) -> None:
+        expected_categories = {
+            "\u76d0\u9178": "\u5e38\u89c4\u9178",
+            "\u785d\u9178": "\u7279\u6b8a\u9178",
+            "\u786b\u9178": "\u7279\u6b8a\u9178",
+            "\u53d1\u70df\u76d0\u9178": "\u5e38\u89c4\u9178",
+            "10% HCl": "\u5e38\u89c4\u9178",
+            "2mol HCl": "\u5e38\u89c4\u9178",
+            "hydrochloric acid solution": "\u5e38\u89c4\u9178",
+        }
+        for name, expected_category in expected_categories.items():
             with self.subTest(name=name):
                 result = self.engine.classify(
                     {
@@ -516,9 +565,8 @@ class StructuredRulesTest(unittest.TestCase):
                     }
                 )
 
-                self.assertEqual(result["final_category"], "\u5e38\u89c4\u9178")
-                self.assertIn("\u5e38\u89c4\u9178", result["matched_categories"])
-                self.assertNotIn("\u7279\u6b8a\u9178", result["matched_categories"])
+                self.assertEqual(result["final_category"], expected_category)
+                self.assertIn(expected_category, result["matched_categories"])
 
     def test_concentrated_sulfuric_and_nitric_acid_are_special_acids(self) -> None:
         for name in ("浓硫酸（>70%）", "浓硝酸（>65%）"):
@@ -675,6 +723,47 @@ class StructuredRulesTest(unittest.TestCase):
         heavy_metal = self.engine.classify({"reagent_name": "氯化镉", "heavy_metal": True})
         self.assertEqual(heavy_metal["final_category"], "重金属类")
         self.assertTrue(heavy_metal["matched_rule_ids"])
+
+    def test_business_identity_rules_override_broad_halogen_and_name_gaps(self) -> None:
+        cases = {
+            "乙基溴化镁": ("强反应性", "BUS-REA-ORG-MG-001"),
+            "单质溴": ("氧化剂", "BUS-OXI-BROMINE-001"),
+            "单质碘": ("氧化剂", "BUS-OXI-IODINE-001"),
+            "乙酸": ("常规酸", "BUS-ACID-ACETIC-001"),
+            "甲酸": ("常规酸", "BUS-ACID-FORMIC-001"),
+            "氢氧化钾滴定液1mol/l": ("常规碱", "BUS-BASE-TITRANT-001"),
+            "无水硫酸铜": ("普通类", "BUS-NOR-ANHYD-CUSO4-001"),
+        }
+        for name, (category, rule_id) in cases.items():
+            with self.subTest(name=name):
+                result = self.engine.classify({"reagent_name": name, "text": name})
+                self.assertEqual(result["final_category"], category)
+                self.assertIn(rule_id, result["matched_rule_ids"])
+                self.assertFalse(result["need_manual_review"])
+
+        # Only the confirmed anhydrous product is whitelisted; no blanket rule
+        # promotes all copper salts to the ordinary category.
+        result = self.engine.classify({"reagent_name": "硫酸铜", "text": "硫酸铜"})
+        self.assertTrue(result["need_manual_review"])
+
+    def test_sulfuric_and_nitric_acid_concentration_boundaries(self) -> None:
+        cases = (
+            ({"reagent_name": "硫酸", "standard_name": "硫酸"}, "特殊酸", "BUS-ACID-SULFURIC-SPECIAL-001"),
+            ({"reagent_name": "硫酸 AR", "standard_name": "硫酸", "cleaned_name": "硫酸"}, "特殊酸", "BUS-ACID-SULFURIC-SPECIAL-001"),
+            ({"reagent_name": "硫酸 70%", "standard_name": "硫酸", "cleaned_name": "硫酸"}, "常规酸", "BUS-ACID-SULFURIC-REGULAR-001"),
+            ({"reagent_name": "硫酸 98%", "standard_name": "硫酸", "cleaned_name": "硫酸"}, "特殊酸", "BUS-ACID-SULFURIC-SPECIAL-001"),
+            ({"reagent_name": "硝酸", "standard_name": "硝酸"}, "特殊酸", "BUS-ACID-NITRIC-SPECIAL-001"),
+            ({"reagent_name": "硝酸 65%", "standard_name": "硝酸", "cleaned_name": "硝酸"}, "常规酸", "BUS-ACID-NITRIC-REGULAR-001"),
+            ({"reagent_name": "硝酸 68%", "standard_name": "硝酸", "cleaned_name": "硝酸"}, "特殊酸", "BUS-ACID-NITRIC-SPECIAL-001"),
+        )
+        for reagent, category, rule_id in cases:
+            with self.subTest(reagent=reagent):
+                result = self.engine.classify(reagent)
+                self.assertEqual(result["final_category"], category)
+                self.assertIn(rule_id, result["matched_rule_ids"])
+
+        salt = self.engine.classify({"reagent_name": "硫酸钠", "standard_name": "硫酸钠"})
+        self.assertNotIn(salt["final_category"], ("常规酸", "特殊酸"))
 
     def test_structured_flammable_requires_liquid_context(self) -> None:
         liquid = self.engine.classify({"reagent_name": "测试液体", "flammable": True})

@@ -44,6 +44,14 @@
             </div>
             <div class="form-row">
               <label>
+                审批链路
+                <select name="pipeline_version">
+                  <option value="v1">V1 当前查询链路</option>
+                  <option value="v2">V2 物化信息链路</option>
+                  <option value="v3">V3 百炼批量联网建议</option>
+                </select>
+              </label>
+              <label>
                 写入模式
                 <select name="approval_write_mode">
                   <option value="disabled">禁用网页写入</option>

@@ -57,6 +57,7 @@ from scheduler import scheduler_config
 from llm_extractor import LlmExtractor
 from rule_engine import RuleEngine
 from excel_exports import write_excel_atomic
+from v3_web_search import V3WebSearchError, V3_RECOMMENDED_MODELS, resolve_v3_base_url
 
 
 ensure_runtime_layout()
@@ -697,6 +698,8 @@ class AutomationJobManager:
             "AUTO_PASS",
             "SCHEDULED_RUN",
             "SCHEDULED_SKIP_MANUAL_REVIEW_LISTS",
+            "APPROVAL_PIPELINE_VERSION",
+            "V3_RETRY_ITEM_KEY",
         }
         return {
             key: value
@@ -1006,7 +1009,13 @@ def chemical_source_summary(lines: list[str]) -> dict[str, Any]:
         "api_write_attempt_count": 0,
         "api_write_success_count": 0,
         "api_verify_failure_count": 0,
+        "api_page_stale_warning_count": 0,
         "api_fallback_web_write_count": 0,
+        "identity_enrichment_call_count": 0,
+        "identity_enrichment_english_candidate_count": 0,
+        "identity_enrichment_cas_candidate_count": 0,
+        "identity_enrichment_verified_count": 0,
+        "identity_enrichment_failure_count": 0,
     }
     for raw_line in lines:
         line = str(raw_line)
@@ -1075,12 +1084,26 @@ def chemical_source_summary(lines: list[str]) -> dict[str, Any]:
             summary["api_record_resolve_failure_count"] += 1
         if "[api_property_save]" in lower and "skipped=" not in lower:
             summary["api_write_attempt_count"] += 1
-        if "[api_property_save]" in lower and "saved=true" in lower and "verified=true" in lower:
+        if "[api_property_confirmed]" in lower:
             summary["api_write_success_count"] += 1
         if "[api_property_verify]" in lower and "failed=" in lower:
             summary["api_verify_failure_count"] += 1
+        if "[api_property_verify]" in lower and "warning=stable_id_confirmed_page_stale" in lower:
+            summary["api_page_stale_warning_count"] += 1
         if "[api_fallback_web_write]" in lower:
             summary["api_fallback_web_write_count"] += 1
+        if "chemical identity enrichment:" in lower:
+            summary["identity_enrichment_call_count"] += 1
+            english_match = re.search(r"english_candidate=(true|false)", lower)
+            if english_match and english_match.group(1) == "true":
+                summary["identity_enrichment_english_candidate_count"] += 1
+            cas_match = re.search(r"cas_candidates=(\d+)", lower)
+            if cas_match:
+                summary["identity_enrichment_cas_candidate_count"] += int(cas_match.group(1))
+            if "status=failure" in lower:
+                summary["identity_enrichment_failure_count"] += 1
+        if "chemical identity enrichment verified:" in lower:
+            summary["identity_enrichment_verified_count"] += 1
     summary["chemical_search_seconds"] = round(float(summary["chemical_search_seconds"]), 1)
     return summary
 
@@ -1403,6 +1426,58 @@ def artifact_summary(root_dir: Path = ROOT_DIR) -> list[dict[str, Any]]:
             }
         )
     return artifacts[:24]
+
+
+def v3_invalid_results_summary(root_dir: Path = ROOT_DIR, limit: int = 40) -> dict[str, Any]:
+    path = root_dir / "data" / "logs" / "v3_invalid_results.jsonl"
+    if not path.exists():
+        return {"exists": False, "rows": [], "count": 0}
+    rows: list[dict[str, Any]] = []
+    try:
+        for line in reversed(path.read_text(encoding="utf-8").splitlines()):
+            try:
+                value = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(value, dict):
+                continue
+            identity = value.get("identity") if isinstance(value.get("identity"), dict) else {}
+            rows.append({
+                "event_id": str(value.get("event_id") or ""),
+                "at": str(value.get("at") or ""),
+                "list_number": str(identity.get("list_number") or ""),
+                "sequence": str(identity.get("sequence") or ""),
+                "reagent_name": str(identity.get("reagent_name") or ""),
+                "cas": str(identity.get("cas") or ""),
+                "failure_reason": str(value.get("failure_reason") or ""),
+                "attempts": int(value.get("attempts") or 1),
+                "retryable": bool(value.get("retryable", True)),
+            })
+            if len(rows) >= limit:
+                break
+    except OSError as error:
+        return {"exists": True, "rows": [], "count": 0, "error": str(error)}
+    return {"exists": True, "rows": rows, "count": len(rows)}
+
+
+def v3_invalid_result_by_id(event_id: str, root_dir: Path = ROOT_DIR) -> dict[str, Any] | None:
+    event_id = str(event_id or "").strip()
+    if not event_id:
+        return None
+    path = root_dir / "data" / "logs" / "v3_invalid_results.jsonl"
+    if not path.exists():
+        return None
+    try:
+        for line in reversed(path.read_text(encoding="utf-8").splitlines()):
+            try:
+                value = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(value, dict) and str(value.get("event_id") or "") == event_id:
+                return value
+    except OSError:
+        return None
+    return None
 
 
 def file_signature(path: Path) -> tuple[bool, int, int]:
@@ -1736,6 +1811,7 @@ def build_review_queue_payload(path: Path) -> dict[str, Any]:
                 "sequence": first_existing(row, ["序号", "sequence", "index"]),
                 "reagent_name": first_existing(row, ["试剂名称", "chemical_name", "reagent_name"]),
                 "cas": first_existing(row, ["cas", "CAS号"]),
+                "candidate_cas": first_existing(row, ["candidate_cas", "网页候选CAS"]),
                 "standard_name": first_existing(row, ["standard_name", "标准化名称"]),
                 "cleaned_name": first_existing(row, ["cleaned_name", "清洗后名称"]),
                 "specification": first_existing(row, ["specification", "规格"]),
@@ -1752,6 +1828,7 @@ def build_review_queue_payload(path: Path) -> dict[str, Any]:
                 "evidence_quality": first_existing(row, ["evidence_quality"]),
                 "source_url": first_existing(row, ["source_url"]),
                 "source_evidence_items": first_existing(row, ["source_evidence_items"]),
+                "property_enrichment": first_existing(row, ["property_enrichment"]),
                 "matched_rule_ids": first_existing(row, ["matched_rule_ids"]),
                 "rule_version": first_existing(row, ["rule_version"]),
                 "flash_point": first_existing(row, ["flash_point"]),
@@ -1885,15 +1962,33 @@ def confirm_review_item(payload: dict[str, Any], root_dir: Path = ROOT_DIR) -> d
     conflict_candidate = str(row.get("cas_name_conflict") or "").strip().lower() in {"1", "true", "yes", "y"}
     original_erp_cas = best_review_text(row, ["original_erp_cas", "原ERP CAS号"], payload, "")
     corrected_cas = best_review_text(row, ["corrected_cas", "修正CAS号"], payload, "")
-    memory_cas = corrected_cas if conflict_candidate and corrected_cas else best_review_text(
-        row, ["cas", "CAS号"], payload, "cas"
+    candidate_cas = best_review_text(row, ["candidate_cas", "网页候选CAS"], payload, "")
+    confirmed_cas_input = str(payload.get("confirmed_cas") or "").strip()
+    confirmed_cas = normalize_confirmed_cas(confirmed_cas_input) if confirmed_cas_input else ""
+    if confirmed_cas_input and not confirmed_cas:
+        return {"confirmed": False, "message": "人工确认 CAS 格式或校验位无效，请检查后重试。"}
+
+    row_cas = best_review_text(row, ["cas", "CAS号"], payload, "cas")
+    identity_status = best_review_text(row, ["identity_status", "身份验证状态"], payload, "").lower()
+    cas_missing = identity_status == "cas_missing" or (
+        not original_erp_cas and bool(candidate_cas) and row_cas == candidate_cas
     )
+    if confirmed_cas:
+        memory_cas = confirmed_cas
+    elif conflict_candidate and corrected_cas:
+        memory_cas = corrected_cas
+    else:
+        # Name-only memory records are safe to retain but cannot promote an unconfirmed
+        # provider candidate to the canonical CAS identity.
+        memory_cas = "" if cas_missing else row_cas
     memory_reason = repair_display_text(payload.get("reason") or "人工复核确认后加入高可信试剂记忆库。")
     if conflict_candidate and corrected_cas:
         memory_reason = (
             f"{memory_reason}\n名称身份优先修正已由人工确认：原 ERP CAS {original_erp_cas or '-'} "
             f"→ {corrected_cas}；仅更新试剂记忆映射，不自动修改 ERP。"
         ).strip()
+    elif candidate_cas and not confirmed_cas:
+        memory_reason = f"{memory_reason}\nERP 未提供 CAS；网页候选 CAS {candidate_cas} 未经人工确认，未作为正式 CAS 入库。".strip()
     memory_added = memory.add_record(
         raw_name=best_review_text(row, ["试剂名称", "chemical_name", "reagent_name"], payload, "reagent_name"),
         cleaned_name=best_review_text(row, ["cleaned_name", "清洗后名称"], payload, "cleaned_name"),
@@ -1917,7 +2012,18 @@ def confirm_review_item(payload: dict[str, Any], root_dir: Path = ROOT_DIR) -> d
         "confirmed_at": now,
         "confirmed_by": "web_ui",
         "memory_added": str(bool(memory_added)),
-            "cas_correction_applied": "true" if conflict_candidate and bool(memory_added) else str(row.get("cas_correction_applied") or ""),
+        "confirmed_cas": confirmed_cas,
+        "cas": confirmed_cas or row_cas,
+        # Confirmation in this screen is intentionally local: it records the
+        # reviewer decision in the memory library.  An ERP write remains a
+        # separate, verified automation action against the original ERP row.
+        "erp_write_status": "not_requested",
+        "erp_write_note": "本次人工确认仅写入本地试剂记忆库；尚未请求 ERP 写入。",
+        "cas_correction_applied": (
+            "true"
+            if (conflict_candidate and bool(memory_added)) or bool(confirmed_cas)
+            else str(row.get("cas_correction_applied") or "")
+        ),
     }.items():
         if column not in frame.columns:
             frame[column] = ""
@@ -1931,7 +2037,7 @@ def confirm_review_item(payload: dict[str, Any], root_dir: Path = ROOT_DIR) -> d
         message = "已确认人工复核项，并入库为不可自动写网页的拒收/复核决策。"
     else:
         message = (
-            "已确认人工复核项，并写入高可信试剂记忆库。"
+            "已确认分类并写入高可信试剂记忆库；本次未执行 ERP 写入。"
             if memory_added
             else "已确认人工复核项；存在冲突或限制，未设为可自动复用。"
         )
@@ -1944,6 +2050,7 @@ def confirm_review_item(payload: dict[str, Any], root_dir: Path = ROOT_DIR) -> d
     return {
         "confirmed": True,
         "memory_added": bool(memory_added),
+        "erp_write_status": "not_requested",
         "message": message,
         "memory_sync": sync_result,
     }
@@ -2132,6 +2239,18 @@ def best_review_text(
     if payload_value and mojibake_score(payload_value) < mojibake_score(row_value):
         return payload_value
     return row_value or payload_value
+
+
+def normalize_confirmed_cas(value: str) -> str:
+    """Return a normalized CAS only when its check digit is valid."""
+    match = re.fullmatch(r"\s*(\d{2,7})-(\d{2})-(\d)\s*", str(value or ""))
+    if not match:
+        return ""
+    body = f"{match.group(1)}{match.group(2)}"
+    expected = sum(int(digit) * (index + 1) for index, digit in enumerate(reversed(body))) % 10
+    if expected != int(match.group(3)):
+        return ""
+    return f"{match.group(1)}-{match.group(2)}-{match.group(3)}"
 
 
 def memory_summary(
@@ -2431,10 +2550,21 @@ def parse_float(value: Any, default: float) -> float:
         return default
 
 
+def normalize_pipeline_version(value: object, *, emit_deprecation: bool = False) -> str:
+    """Keep only supported approval pipelines; retired Doubao V2 safely becomes V1."""
+    selected = str(value or "v1").strip().lower()
+    if selected == "doubao_web_v2" and emit_deprecation:
+        print("Deprecated approval pipeline 'doubao_web_v2' was normalized to V1.")
+    return selected if selected in {"v1", "v2", "v3"} else "v1"
+
+
 def runtime_config_snapshot() -> dict[str, Any]:
     load_dotenv(ENV_PATH)
     settings = load_settings()
     approval = settings.get("approval", {}) or {}
+    v3 = approval.get("v3", {}) or {}
+    identity_enrichment = approval.get("identity_enrichment", {}) or {}
+    enrichment_v2 = settings.get("enrichment_v2", {}) or {}
     schedule = scheduler_config(settings)
     dingtalk = dingtalk_notification_config(settings)
     dingtalk_stream = dingtalk_stream_config(settings)
@@ -2529,6 +2659,35 @@ def runtime_config_snapshot() -> dict[str, Any]:
         "dingtalk_stream_client_secret_configured": bool(
             os.getenv(str(dingtalk_stream.get("client_secret_env")), "").strip()
         ),
+        "approval_pipeline_version": normalize_pipeline_version(os.getenv("APPROVAL_PIPELINE_VERSION", str(approval.get("pipeline_version", "v1")))),
+        "enrichment_v2_enabled": "true" if enrichment_v2.get("enabled") else "false",
+        "enrichment_v2_shadow_mode": "true" if enrichment_v2.get("shadow_mode", True) else "false",
+        "enrichment_v2_execution_status": (
+            "正式执行" if normalize_pipeline_version(os.getenv("APPROVAL_PIPELINE_VERSION", str(approval.get("pipeline_version", "v1"))) ) == "v2"
+            else "影子运行" if enrichment_v2.get("shadow_mode", True)
+            else "已配置正式接管"
+        ),
+        "v3_base_url": str(v3.get("base_url") or ""),
+        "v3_address_mode": str(v3.get("address_mode") or ("custom" if v3.get("base_url") else "shared_beijing")),
+        "v3_workspace_id": str(v3.get("workspace_id") or ""),
+        "v3_custom_base_url": str(v3.get("custom_base_url") or v3.get("base_url") or ""),
+        "v3_api_key_configured": bool(os.getenv(str(v3.get("api_key_env") or "DASHSCOPE_API_KEY"), "").strip()),
+        "v3_model": str(v3.get("model") or "qwen3.7-plus"),
+        "v3_recommended_models": list(V3_RECOMMENDED_MODELS),
+        "v3_retrieval_mode": str(v3.get("retrieval_mode") or "model_first"),
+        "v3_batch_size": str(v3.get("batch_size", 5)),
+        "v3_parallel_batches": str(v3.get("parallel_batches", 2)),
+        "v3_timeout_seconds": str(v3.get("timeout_seconds", 45)),
+        "v3_max_retries": str(v3.get("max_retries", 1)),
+        "v3_cost_warning_cny": str(v3.get("cost_warning_cny", 10)),
+        "identity_enrichment_enabled": "true" if identity_enrichment.get("enabled") else "false",
+        "identity_enrichment_model": str(identity_enrichment.get("model") or "qwen3.7-flash"),
+        "identity_enrichment_timeout_seconds": str(identity_enrichment.get("timeout_seconds", 10)),
+        "identity_enrichment_max_calls_per_batch": str(identity_enrichment.get("max_calls_per_batch", 20)),
+        "identity_enrichment_max_calls_per_day": str(identity_enrichment.get("max_calls_per_day", 200)),
+        "identity_enrichment_api_key_configured": bool(
+            os.getenv(str(identity_enrichment.get("api_key_env") or "DASHSCOPE_API_KEY"), "").strip()
+        ),
         "dingtalk_stream_api_token_configured": bool(
             os.getenv(str(dingtalk_stream.get("api_token_env")), "").strip()
         ),
@@ -2558,6 +2717,17 @@ def runtime_config_snapshot() -> dict[str, Any]:
 
 
 def save_runtime_config(form: dict[str, str]) -> dict[str, Any]:
+    # Validate V3 before any .env or settings mutation so malformed URLs cannot
+    # leave the configuration half-updated.
+    existing_settings = load_settings()
+    existing_v3 = ((existing_settings.get("approval", {}) or {}).get("v3", {}) or {})
+    requested_address_mode = form.get("v3_address_mode", str(existing_v3.get("address_mode") or "shared_beijing")).strip() or "shared_beijing"
+    requested_workspace_id = form.get("v3_workspace_id", str(existing_v3.get("workspace_id") or "")).strip()
+    requested_custom_url = form.get("v3_custom_base_url", str(existing_v3.get("custom_base_url") or form.get("v3_base_url", ""))).strip()
+    try:
+        resolved_v3_base_url = resolve_v3_base_url(requested_address_mode, requested_workspace_id, requested_custom_url)
+    except V3WebSearchError as error:
+        raise ValueError(f"V3 百炼配置无效：{error}") from error
     provider_id = form.get("llm_provider", "siliconflow").strip() or "siliconflow"
     provider = get_llm_provider(provider_id)
     llm_base_url = provider_base_url(provider.id, form.get("llm_base_url", "").strip())
@@ -2573,6 +2743,7 @@ def save_runtime_config(form: dict[str, str]) -> dict[str, Any]:
         "APPROVAL_WRITE_MIN_CONFIDENCE": form.get("approval_write_min_confidence", "0.8").strip() or "0.8",
         "APPROVAL_WRITE_BATCH_SIZE": form.get("approval_write_batch_size", "3").strip() or "3",
         "ERP_WRITE_BACKEND": normalize_erp_write_backend(form.get("erp_write_backend", "")),
+        "APP_DRY_RUN": form.get("app_dry_run", "false").strip().lower(),
         "LLM_PROVIDER": provider.id,
         "LLM_BASE_URL": llm_base_url,
         "LLM_MODEL": llm_model,
@@ -2592,6 +2763,9 @@ def save_runtime_config(form: dict[str, str]) -> dict[str, Any]:
     if api_key:
         env_updates["LLM_API_KEY"] = api_key
         env_updates[provider.api_key_env] = api_key
+    v3_api_key = form.get("v3_api_key", "").strip()
+    if v3_api_key:
+        env_updates["DASHSCOPE_API_KEY"] = v3_api_key
 
     dingtalk_stream_client_id = form.get("dingtalk_stream_client_id", "").strip()
     if dingtalk_stream_client_id:
@@ -2612,7 +2786,7 @@ def save_runtime_config(form: dict[str, str]) -> dict[str, Any]:
 
     update_env_file(ENV_PATH, env_updates)
 
-    settings = load_settings()
+    settings = existing_settings
     app = settings.setdefault("app", {})
     app["dry_run"] = form.get("app_dry_run", "false").strip().lower() == "true"
 
@@ -2654,6 +2828,47 @@ def save_runtime_config(form: dict[str, str]) -> dict[str, Any]:
         form.get("scheduler_process_all_todos_max", ""),
         scheduler.get("process_all_todos_max", 50),
     )
+    requested_pipeline = form.get("approval_pipeline_version", "v1")
+    approval["pipeline_version"] = normalize_pipeline_version(requested_pipeline, emit_deprecation=True)
+    v3 = approval.setdefault("v3", {})
+    v3["base_url"] = resolved_v3_base_url
+    v3["address_mode"] = requested_address_mode
+    v3["workspace_id"] = requested_workspace_id if requested_address_mode == "workspace_beijing" else ""
+    v3["custom_base_url"] = requested_custom_url if requested_address_mode == "custom" else ""
+    v3["api_key_env"] = "DASHSCOPE_API_KEY"
+    model_choice = form.get("v3_model_choice", form.get("v3_model", "qwen3.7-plus")).strip()
+    custom_model = form.get("v3_custom_model", "").strip()
+    v3["model"] = custom_model if model_choice == "custom" else model_choice
+    if not v3["model"]:
+        v3["model"] = "qwen3.7-plus"
+    retrieval_mode = str(form.get("v3_retrieval_mode", v3.get("retrieval_mode", "model_first"))).strip().lower()
+    v3["retrieval_mode"] = retrieval_mode if retrieval_mode in {"model_first", "always_web"} else "model_first"
+    v3["batch_size"] = max(1, min(20, coerce_int(form.get("v3_batch_size", ""), v3.get("batch_size", 5))))
+    v3["parallel_batches"] = max(1, min(2, coerce_int(form.get("v3_parallel_batches", ""), v3.get("parallel_batches", 2))))
+    v3["timeout_seconds"] = max(10, min(90, coerce_int(form.get("v3_timeout_seconds", ""), v3.get("timeout_seconds", 45))))
+    v3["max_retries"] = max(0, min(2, coerce_int(form.get("v3_max_retries", ""), v3.get("max_retries", 1))))
+    v3["cost_warning_cny"] = max(0, coerce_float(form.get("v3_cost_warning_cny", ""), v3.get("cost_warning_cny", 10)))
+    identity_enrichment = approval.setdefault("identity_enrichment", {})
+    identity_enrichment["enabled"] = form.get("identity_enrichment_enabled", "false").strip().lower() == "true"
+    identity_enrichment["provider"] = "aliyun_bailian"
+    identity_enrichment["base_url"] = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    identity_enrichment["api_key_env"] = "DASHSCOPE_API_KEY"
+    identity_enrichment["model"] = form.get("identity_enrichment_model", "").strip() or "qwen3.7-flash"
+    identity_enrichment["timeout_seconds"] = max(
+        3,
+        min(15, coerce_int(form.get("identity_enrichment_timeout_seconds", ""), identity_enrichment.get("timeout_seconds", 10))),
+    )
+    identity_enrichment["max_calls_per_batch"] = max(
+        1,
+        min(100, coerce_int(form.get("identity_enrichment_max_calls_per_batch", ""), identity_enrichment.get("max_calls_per_batch", 20))),
+    )
+    identity_enrichment["max_calls_per_day"] = max(
+        0,
+        min(10000, coerce_int(form.get("identity_enrichment_max_calls_per_day", ""), identity_enrichment.get("max_calls_per_day", 200))),
+    )
+    enrichment_v2 = settings.setdefault("enrichment_v2", {})
+    enrichment_v2["enabled"] = form.get("enrichment_v2_enabled", "false").strip().lower() == "true"
+    enrichment_v2["shadow_mode"] = form.get("enrichment_v2_shadow_mode", "true").strip().lower() == "true"
     scheduler["approval_write_mode"] = normalize_web_write_mode(
         form.get("scheduler_approval_write_mode", ""),
         default=normalize_web_write_mode(str(scheduler.get("approval_write_mode", "disabled"))),
