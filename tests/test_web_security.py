@@ -3,6 +3,7 @@ from pathlib import Path
 
 import pytest
 from fastapi import HTTPException
+from fastapi.testclient import TestClient
 from starlette.requests import Request
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
@@ -67,3 +68,13 @@ def test_run_ticket_treats_missing_unchecked_flags_as_false():
     assert prepared == submitted
     ticket = security.issue_ticket("run", prepared)["ticket"]
     security.consume_ticket(ticket, "run", submitted)
+
+
+def test_web_middleware_returns_403_for_missing_csrf():
+    from web_app import app
+
+    with TestClient(app, base_url="http://localhost:8000") as client:
+        response = client.post("/api/stop", headers={"Origin": "http://localhost:8000"})
+    assert response.status_code == 403
+    assert response.json()["detail"] == "CSRF 令牌无效。"
+    assert response.headers["x-content-type-options"] == "nosniff"

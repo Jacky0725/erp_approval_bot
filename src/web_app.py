@@ -110,7 +110,13 @@ async def value_error_response(_: Request, error: ValueError) -> JSONResponse:
 
 @app.middleware("http")
 async def protect_local_console(request: Request, call_next):
-    security.validate_request(request)
+    try:
+        security.validate_request(request)
+    except HTTPException as error:
+        response = JSONResponse(status_code=error.status_code, content={"detail": error.detail})
+        for name, value in SECURITY_HEADERS.items():
+            response.headers[name] = value
+        return response
     response = await call_next(request)
     for name, value in SECURITY_HEADERS.items():
         response.headers[name] = value

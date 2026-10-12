@@ -18,7 +18,9 @@ if (!(Test-Path $Browser)) { throw "Browser package not found: $Browser" }
 $Stage = Join-Path $RepoRoot "dist\secure-installer-stage"
 Remove-Item $Stage -Recurse -Force -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force -Path (Join-Path $Stage "payload") | Out-Null
-Copy-Item $Core, $Browser, $Manifest -Destination (Join-Path $Stage "payload") -Force
+# The browser remains a sidecar asset. Setup reuses a sibling offline package or verifies a
+# download from the same release, keeping ordinary Setup updates below the size budget.
+Copy-Item $Core, $Manifest -Destination (Join-Path $Stage "payload") -Force
 Copy-Item (Join-Path $ReleaseDir "ReagentApprovalBotBootstrap.exe") -Destination (Join-Path $Stage "payload\ReagentApprovalBotBootstrap.exe") -Force
 Copy-Item (Join-Path $ReleaseDir "ReagentApprovalBotUpdater.exe") -Destination (Join-Path $Stage "payload\ReagentApprovalBotUpdater.exe") -Force
 $Output = Join-Path $ReleaseDir "ReagentApprovalBot-setup-$Version-windows-amd64.exe"

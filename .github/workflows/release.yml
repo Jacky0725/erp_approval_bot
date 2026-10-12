@@ -1,0 +1,75 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build-release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install locked build dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-dev.txt
+          python -m pip check
+          python -m playwright install chromium
+      - name: Validate release version
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}".TrimStart("v")
+          $version = (Get-Content VERSION -Raw).Trim()
+          if ($tag -ne $version) { throw "Git tag $tag does not match VERSION $version" }
+          if ($version -notmatch '^\d+\.\d+\.\d+$') { throw "VERSION must be semantic version x.y.z" }
+      - name: Compile and test
+        run: |
+          python -m compileall -q src packaging\windows
+          python -m pytest -q
+      - name: Build split release assets
+        shell: pwsh
+        run: |
+          $version = ("${{ github.ref_name }}").TrimStart('v')
+          .\packaging\windows\build_secure_release.ps1 -Version $version
+          .\packaging\windows\build_secure_installer.ps1 -Version $version
+      - name: Verify release contents
+        shell: pwsh
+        run: |
+          $forbidden = Get-ChildItem dist\releases -Recurse -Force -Include .env,*.pdb,*.pyc,debug.log | Select-Object -ExpandProperty FullName
+          if ($forbidden) { throw "Forbidden files in release: $($forbidden -join ', ')" }
+          $manifest = Get-Content dist\releases\release-manifest.json -Raw | ConvertFrom-Json
+          if ($manifest.release_version -ne ("${{ github.ref_name }}").TrimStart('v')) { throw "Manifest version mismatch" }
+          Get-ChildItem dist\releases -Filter *.exe | ForEach-Object {
+            $bytes = [System.IO.File]::ReadAllBytes($_.FullName)
+            if ($bytes.Length -lt 2 -or $bytes[0] -ne 0x4D -or $bytes[1] -ne 0x5A) { throw "Invalid PE: $($_.Name)" }
+          }
+      - name: Verify required assets and hashes
+        shell: pwsh
+        run: |
+          $version = (Get-Content VERSION -Raw).Trim()
+          python packaging\windows\verify_release_assets.py --release-dir dist\releases --version $version
+      - name: Defender scan
+        shell: pwsh
+        run: |
+          $status = Get-MpComputerStatus
+          if (!$status.AntivirusEnabled) { throw "Windows Defender must be enabled for release validation" }
+          Start-MpScan -ScanPath "$pwd\dist\releases" -ScanType CustomScan
+      - name: Publish stable assets
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            dist/releases/ReagentApprovalBot-core-*-windows-amd64.zip
+            dist/releases/ReagentApprovalBot-browser-chromium-headless-*-windows-amd64.zip
+            dist/releases/ReagentApprovalBot-setup-*-windows-amd64.exe
+            dist/releases/release-manifest.json
+            dist/releases/*.size.json

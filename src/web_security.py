@@ -8,6 +8,7 @@ import secrets
 import threading
 import time
 from typing import Any, Mapping
+import os
 
 from fastapi import HTTPException, Request
 
@@ -94,8 +95,9 @@ class WebSecurity:
         # Starlette's TestClient uses this synthetic host; never accepted by the frozen application.
         test_client = host == "testserver"
         if not test_client:
-            hostname = host.rsplit(":", 1)[0].strip("[]").lower()
-            if hostname not in {"127.0.0.1", "localhost"}:
+            hostname, separator, port_text = host.rpartition(":")
+            expected_port = str(int(os.getenv("WEB_UI_PORT", "8000")))
+            if not separator or hostname.strip("[]").lower() not in {"127.0.0.1", "localhost"} or port_text != expected_port:
                 raise HTTPException(status_code=403, detail="非法的本地管理地址。")
 
         if request.method.upper() not in UNSAFE_METHODS:

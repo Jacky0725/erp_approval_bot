@@ -9,6 +9,7 @@ import tempfile
 import threading
 import textwrap
 import time
+import urllib.request
 import zipfile
 import ctypes
 import hashlib
@@ -17,9 +18,9 @@ from queue import Empty, Queue
 from typing import Any
 
 try:
-    from secure_update import atomic_json, safe_extract_zip, sha256_file, stage_version, switch_current
+    from secure_update import ManifestAsset, atomic_json, safe_extract_zip, sha256_file, stage_version, switch_current, verified_download
 except ImportError:  # The legacy installer remains usable when built without the secure updater module.
-    atomic_json = safe_extract_zip = sha256_file = stage_version = switch_current = None
+    ManifestAsset = atomic_json = safe_extract_zip = sha256_file = stage_version = switch_current = verified_download = None
 
 
 APP_NAME = "ReagentApprovalBot"
@@ -526,7 +527,7 @@ def perform_versioned_install(
     log_path: Path,
     payload: Path,
 ) -> Path:
-    if not all((atomic_json, safe_extract_zip, sha256_file, stage_version, switch_current)):
+    if not all((ManifestAsset, atomic_json, safe_extract_zip, sha256_file, stage_version, switch_current, verified_download)):
         raise RuntimeError("Secure installer payload is incomplete.")
     manifest = json.loads((payload / "release-manifest.json").read_text(encoding="utf-8"))
     version = str(manifest.get("release_version") or "")
@@ -537,10 +538,14 @@ def perform_versioned_install(
         raise RuntimeError("Secure installer manifest is missing core or browser assets.")
     core_path = payload / str(core.get("name") or "")
     browser_path = payload / str(browser.get("name") or "")
-    for item, path in ((core, core_path), (browser, browser_path)):
+    for item, path in ((core, core_path),):
         expected = str(item.get("sha256") or "").lower()
         if not path.is_file() or sha256_file(path).lower() != expected:
             raise RuntimeError("Installer payload checksum verification failed.")
+    if not browser_path.is_file():
+        browser_path = download_browser_package(browser, runtime, version)
+    if sha256_file(browser_path).lower() != str(browser.get("sha256") or "").lower():
+        raise RuntimeError("Browser package checksum verification failed.")
 
     if target.exists():
         progress.update("Migrating local data...", str(runtime))
@@ -567,6 +572,26 @@ def perform_versioned_install(
     create_shortcuts(target)
     write_install_log(log_path, f"Versioned installation complete: {version}")
     return target
+
+
+def download_browser_package(asset: dict[str, Any], runtime: Path, version: str) -> Path:
+    """Use an adjacent offline asset first; otherwise fetch the exact stable Release asset."""
+    name = str(asset.get("name") or "")
+    sibling = Path(sys.executable).resolve().parent / name
+    if sibling.is_file():
+        return sibling
+    repository = os.getenv("REAGENT_APPROVAL_GITHUB_REPO", "Jacky0725/erp_approval_bot")
+    url = f"https://github.com/{repository}/releases/download/v{version}/{name}"
+    manifest_asset = ManifestAsset(
+        name=name,
+        kind="browser",
+        arch="amd64",
+        size=int(asset.get("size") or 0),
+        sha256=str(asset.get("sha256") or ""),
+        url=url,
+        browser_revision=str(asset.get("browser_revision") or ""),
+    )
+    return verified_download(manifest_asset, runtime / "data" / "updates", timeout_seconds=600)
 
 
 def main() -> int:
