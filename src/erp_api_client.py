@@ -7,6 +7,8 @@ from urllib.parse import urljoin
 
 from playwright.sync_api import Page
 
+from reagent_data_minimizer import is_ignored_reagent_metadata_key
+
 
 ALLOWED_ERP_WRITE_BACKENDS = {"web_ui", "api_read_web_write", "api_write_with_web_verify"}
 
@@ -84,15 +86,28 @@ class ErpApiClient:
             and str(discovery.get("status") or "").strip().lower() == "verified"
         )
 
-    def fetch_todo_tasks(self) -> list[dict[str, Any]]:
+    def fetch_todo_tasks(self, *, all_pages: bool = False) -> list[dict[str, Any]]:
         if self.protocol == "odoo_jsonrpc":
-            records = self._rpc_search_read(
-                self._rpc_model("list_model", "reagent.list"),
-                [["state", "=", "wait"]],
-                ["name", "state", "approval_schedule"],
-                limit=int(self.rpc_settings.get("todo_limit") or 50),
-                order="id DESC",
-            )
+            records = []
+            page_size = max(1, int(self.rpc_settings.get("todo_limit") or 50))
+            offset = 0
+            seen: set[str] = set()
+            while True:
+                page_records = self._rpc_search_read(
+                    self._rpc_model("list_model", "reagent.list"),
+                    [["state", "=", "wait"]],
+                    ["name", "state", "approval_schedule"],
+                    limit=page_size, offset=offset, order="id DESC",
+                )
+                for record in page_records:
+                    key = str(record.get("id") or record.get("name") or "")
+                    if key in seen:
+                        raise ErpApiUnsupported("ERP todo pagination returned duplicate records.")
+                    seen.add(key)
+                records.extend(page_records)
+                if not all_pages or len(page_records) < page_size:
+                    break
+                offset += len(page_records)
             return [self.normalize_record(record) for record in records]
         payload = self._get_json_endpoint("todo_tasks")
         return [self.normalize_record(record) for record in self._extract_records(payload)]
@@ -330,6 +345,90 @@ class ErpApiClient:
             if attempt == 0:
                 time.sleep(0.5)
         return True
+
+    def update_cas_by_id(
+        self,
+        record_id: str,
+        candidate_cas: str,
+        identity: dict[str, Any],
+        *,
+        allow_canary: bool = False,
+    ) -> ApiWriteResult:
+        """Fill a missing/invalid CAS through the stable Odoo line record.
+
+        This deliberately has no broad REST fallback: the discovered REST
+        protocol currently verifies only physicochemical properties.  A CAS
+        update must fail closed rather than infer an unverified payload shape.
+        """
+        candidate = self._normalize_cas(candidate_cas)
+        if not self._valid_cas(candidate):
+            return ApiWriteResult(True, False, False, "Candidate CAS failed format/checksum validation.", False, record_id)
+        if not self.write_enabled() and not allow_canary:
+            return ApiWriteResult(False, False, False, "ERP API CAS write is disabled by erp_api.enabled_for_write=false.", False, record_id)
+        if self.protocol != "odoo_jsonrpc":
+            return ApiWriteResult(False, False, False, "CAS auto-fill requires the verified Odoo JSON-RPC write protocol.", False, record_id)
+        try:
+            fresh_record = self._read_odoo_line_record(record_id)
+            if fresh_record is None:
+                return ApiWriteResult(True, False, False, "ERP API could not read the target line before CAS update.", False, record_id)
+            normalized = self.normalize_record(fresh_record)
+            if not self.identity_matches_record(identity, normalized):
+                return ApiWriteResult(True, False, False, "ERP CAS update blocked because stable record identity changed.", False, record_id)
+            current_cas = self._normalize_cas(fresh_record.get("cas_code"))
+            if self._valid_cas(current_cas):
+                return ApiWriteResult(True, False, False, "ERP CAS update blocked because the current CAS is already valid.", False, record_id)
+            parent = fresh_record.get("reagent_list_id")
+            parent_id = parent[0] if isinstance(parent, (list, tuple)) and parent else parent
+            if parent_id in (None, ""):
+                return ApiWriteResult(True, False, False, "ERP CAS update has no stable parent record id.", False, record_id)
+            configured = self.rpc_settings.get("line_write_fields") or self.DEFAULT_ODOO_LINE_FIELDS
+            values = {
+                str(field): self._odoo_write_value(fresh_record.get(str(field)))
+                for field in configured
+                if str(field) in fresh_record
+            }
+            values["cas_code"] = candidate
+            result = self._rpc_call(
+                self._rpc_model("list_model", "reagent.list"),
+                "write",
+                [[int(parent_id)], {"reagent_list_line_ids": [[1, int(record_id), values]]}],
+                {"context": self._odoo_rpc_context()},
+            )
+            if result is not True:
+                return ApiWriteResult(True, False, False, "ERP JSON-RPC CAS update did not return true.", False, record_id)
+            verified = self.confirm_cas_twice_by_id(record_id, candidate, identity)
+            return ApiWriteResult(
+                True,
+                True,
+                verified,
+                "ERP CAS update saved and verified." if verified else "ERP CAS update saved but double read-back failed.",
+                False,
+                record_id,
+            )
+        except Exception as error:  # noqa: BLE001 - an ERP mutation must fail closed.
+            return ApiWriteResult(True, False, False, f"ERP CAS update failed: {error}", False, record_id)
+
+    def confirm_cas_twice_by_id(self, record_id: str, expected: str, identity: dict[str, Any]) -> bool:
+        candidate = self._normalize_cas(expected)
+        for attempt in range(2):
+            record = self._read_odoo_line_property(record_id)
+            if not record or not self.identity_matches_record(identity, self.normalize_record(record)):
+                return False
+            if self._normalize_cas(record.get("cas_code")) != candidate:
+                return False
+            if attempt == 0:
+                time.sleep(0.5)
+        return True
+
+    @staticmethod
+    def _valid_cas(value: str) -> bool:
+        import re
+
+        candidate = str(value or "").strip()
+        if not re.fullmatch(r"\d{2,7}-\d{2}-\d", candidate):
+            return False
+        digits = candidate.replace("-", "")
+        return sum(int(digit) * index for index, digit in enumerate(reversed(digits[:-1]), start=1)) % 10 == int(digits[-1])
 
     def _read_odoo_line_property(self, record_id: str) -> dict[str, Any] | None:
         """Read one ERP line by stable id; verification must not scan the full list."""
@@ -667,7 +766,7 @@ class ErpApiClient:
         parents = self._rpc_search_read(
             list_model,
             [["name", "=", list_number]],
-            ["name", "reagent_list_line_ids"],
+            ["name", "reagent_list_line_ids", "state"],
             limit=2,
         )
         exact = [record for record in parents if str(record.get("name") or "").strip() == list_number]
@@ -679,10 +778,9 @@ class ErpApiClient:
         if not parent_id or not isinstance(line_ids, list):
             raise ErpApiUnsupported("ERP reagent list response does not contain stable parent/line ids.")
         configured_fields = self.rpc_settings.get("line_fields") or [
-            "name", "cas_code", "box_num", "spec", "spec_unit_id", "type",
-            "product_uom_qty", "phchproperty_id", "phchproperty_name", "sequence", "reagent_list_id",
+            "name", "cas_code", "type", "phchproperty_id", "phchproperty_name", "sequence", "reagent_list_id",
         ]
-        fields = [str(value) for value in configured_fields]
+        fields = [str(value) for value in configured_fields if not is_ignored_reagent_metadata_key(value)]
         page_size = max(1, int((self.api_settings.get("pagination") or {}).get("page_size") or 200))
         records: list[dict[str, Any]] = []
         for start in range(0, len(line_ids), page_size):
@@ -693,6 +791,7 @@ class ErpApiClient:
             item = self.normalize_record(record)
             item["清单号"] = list_number
             item["_erp_parent_id"] = str(parent_id)
+            item["_erp_parent_state"] = str(parent.get("state") or "")
             normalized.append(item)
         return normalized
 

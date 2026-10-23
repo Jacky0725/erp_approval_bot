@@ -1,46 +1,68 @@
-    <section class="panel review-section" id="review">
-      <div class="panel-title review-header">
+    <section class="review-page" id="review">
+      <header class="review-page-header">
         <div>
-          <h2>人工复核项</h2>
-          <p id="reviewMeta">读取 data/review_queue.xlsx，默认显示仍待处理的最新复核项。</p>
+          <h2>待人工复核</h2>
+          <p id="reviewMeta">读取 data/review_queue.xlsx，显示仍待处理的最新复核项。</p>
         </div>
-        <div class="review-tools review-toolbar">
-          <label>
-            清单号
-            <select id="reviewListFilter">
-              <option value="">全部清单</option>
-            </select>
-          </label>
-          <span id="reviewVisibleCount" class="review-count">显示 0 条</span>
-        </div>
+        <span id="reviewVisibleCount" class="review-count">显示 0 条</span>
+      </header>
+
+      <div class="review-toolbar">
+        <label>
+          清单号
+          <select id="reviewListFilter">
+            <option value="">全部清单</option>
+          </select>
+        </label>
+        <button type="button" id="reviewTimeSort" class="table-sort">
+          最近更新 <span id="reviewSortIcon" aria-hidden="true">↓</span>
+        </button>
       </div>
-      <div class="table-wrap review-table-wrap">
-        <table class="review-table">
-          <thead>
-            <tr>
-              <th><button type="button" id="reviewTimeSort" class="table-sort">时间 <span id="reviewSortIcon">↓</span></button></th>
-              <th>试剂 / 标准名</th>
-              <th>CAS / 状态</th>
-              <th>复核原因</th>
-              <th>确认类别</th>
-              <th>操作</th>
-            </tr>
-          </thead>
-          <tbody id="reviewTable">
-            <tr class="table-empty-row">
-              <td colspan="6">
-                <div class="table-empty-state">
-                  <strong>暂无人工复核项</strong>
-                  <span>需要人工确认的审批记录会显示在这里。</span>
-                </div>
-              </td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-      <div class="review-pagination">
-        <button type="button" id="reviewPrevPage">上一页</button>
-        <span id="reviewPageInfo">第 1 / 1 页，每页 20 条</span>
-        <button type="button" id="reviewNextPage">下一页</button>
+
+      <div class="review-workspace">
+        <section class="panel review-queue-panel" aria-label="人工复核队列">
+          <div class="table-wrap review-table-wrap">
+            <table class="review-table">
+              <thead>
+                <tr>
+                  <th>提交时间</th>
+                  <th>试剂 / CAS</th>
+                  <th>复核原因</th>
+                  <th>状态</th>
+                  <th aria-hidden="true">确认类别</th>
+                  <th aria-hidden="true">行操作</th>
+                </tr>
+              </thead>
+              <tbody id="reviewTable">
+                <tr class="table-empty-row">
+                  <td colspan="4">
+                    <div class="table-empty-state">
+                      <strong>暂无人工复核项</strong>
+                      <span>需要人工确认的审批记录会显示在这里。</span>
+                    </div>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="review-pagination">
+            <button type="button" id="reviewPrevPage">上一页</button>
+            <span id="reviewPageInfo">第 1 / 1 页，每页 20 条</span>
+            <button type="button" id="reviewNextPage">下一页</button>
+          </div>
+        </section>
+
+        <aside class="panel review-inspector" id="reviewInspector" aria-labelledby="reviewInspectorTitle">
+          <div id="reviewInspectorContent" class="review-inspector-content" aria-live="polite">
+            <div class="review-inspector-empty">
+              <strong id="reviewInspectorTitle">选择一条复核记录</strong>
+              <span>试剂信息、判定依据和人工操作会在此处集中展示。</span>
+            </div>
+          </div>
+          <div class="review-decision" id="reviewDecision" hidden>
+            <div class="review-category-slot" id="reviewCategorySlot"></div>
+            <div class="review-action-slot" id="reviewActionSlot"></div>
+          </div>
+        </aside>
       </div>
     </section>

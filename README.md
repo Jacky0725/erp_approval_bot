@@ -56,6 +56,8 @@ http://127.0.0.1:8000
 
 ## 运行模式
 
+当前正式审批入口固定使用 V1 查询链路。V2/V3 执行链路、影子运行及其专属测试/重试入口已停用；历史日志和建议文件保留原样。旧配置中的链路版本在任务入口统一按 V1 处理，Web API 对显式 V2/V3 请求返回停用错误。V1 的缺 CAS 名称补全仍由基础设置单独配置。
+
 常用 `.env` 开关：
 
 - `TARGET_LIST_NUMBER`：指定清单号，例如 `SJ202606170003`。
@@ -94,11 +96,26 @@ python scripts/cleanup_reagent_memory_conflicts.py --yes
 
 脚本会先备份 SQLite 到 `data/logs/`，然后删除所有 `conflict=1` 的试剂记忆记录。
 
+## WorkBuddy 文件对接（试运行）
+
+- 运行页新增“WorkBuddy 准备20条”“WorkBuddy 导入结果”“WorkBuddy 批次循环”。WorkBuddy 独立判定，项目只校验文件、身份和类别映射，只保存物化特性，不执行顶部“通过”。
+- 每批文件位于 `data/workbuddy/<批次ID>/`。`prompt.txt` 是本批任务，输入、规则快照和模板位于同一目录。结果固定为 `result.xlsx`，五列：批次ID、记录ID、试剂名称、物化特性类别、判断依据。
+- `workbuddy.desktop_enabled` 和 `workbuddy.write_enabled` 初始均为 `false`。先使用准备/导入验证；自动循环还需验证 `workbuddy.executable` 对应客户端及控件。选择“禁用网页写入”或全局测试模式时，只预览一批，不入记忆、不写 ERP、不删结果。
+- 正式写入需要专用写入开关与已验证的 ERP API 同时启用。失败原因保存在本批 `state.json` 和审计日志；修正配置后可再次导入原文件，成功记录不会重复写入。
+- 判定入记忆时保留 WorkBuddy 来源，不冒充人工核实，不覆盖人工记忆；全部成功才清理结果 Excel，数据库和状态保留。
+- Windows 客户端适配依赖 `pywinauto`，已列入依赖。执行时保持桌面解锁，先打开“试剂审批”项目或其聊天。不修改客户端权限。
+
+验证范围见 [WorkBuddy 对接说明](docs/WORKBUDDY_INTEGRATION_DESIGN.md)。
+
+项目固定指令见 `docs/WORKBUDDY_PROJECT_INSTRUCTIONS.txt`。先保存到 WorkBuddy“试剂审批”的项目配置并验证新任务继承，再将 `workbuddy.prompt_mode` 从 `full` 改为 `project`，每批即可只投递目录。项目资产不作为正式规则来源。
+
+已确认的规则工作簿可以用 `python scripts/publish_reviewed_rules.py <待发布文件> --expected-sha256 <审阅时正式文件摘要> --reviewer <确认人> --reason <变更说明>` 发布。程序校验后备份并原子替换正式文件；运行中 WorkBuddy 工作进程持锁时拒绝发布，需停止当前运行后执行。规则发布后，旧版本结果会被阻止写入，需按新规则重新判定。校验不等于业务正确性审查，程序不自动发明规则。
+
 ## 安全约束
 
 - 正式安装包默认并强制使用无头浏览器；源码开发调试时可在 `config/settings.yaml` 中临时改为 headed 浏览器。
 - 正式安装包启动 Web UI 时优先使用 `127.0.0.1:8000`；如果端口被其他程序占用，会自动尝试后续端口并打开正确地址。
-- 正式安装包日志保存在安装目录的 `data/logs/`：主程序启动日志为 `launcher.log`，审批任务详细日志为 `web_run_stdout.txt`。
+- 正式安装包的用户数据和日志与程序文件分开，默认位于 `%LOCALAPPDATA%\ReagentApprovalBot\data\`；启动日志位于其中的 `logs\launcher.log`，审批任务日志位于 `logs\runs\`。安装目录仅放程序版本和启动器，升级不应覆盖用户数据。
 - Windows 安装包默认安装到当前用户的 `%LOCALAPPDATA%\Programs\ReagentApprovalBot`；默认不弹目录选择以避免安装进度窗遮挡。需要自定义目录时，可先设置 `REAGENT_APPROVAL_INSTALL_DIR`，或设置 `REAGENT_APPROVAL_PROMPT_INSTALL_DIR=1` 后再运行安装包。在线更新会沿用当前安装目录。
 - 默认 `APPROVAL_WRITE_MODE=multi_page`，会在满足置信度与安全门条件时写入网页；`AUTO_PASS=false` 时不会点击顶部“通过”。
 - 默认 `AUTO_PASS=false`，不会点击顶部“通过”。

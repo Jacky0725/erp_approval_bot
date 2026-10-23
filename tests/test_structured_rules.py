@@ -36,6 +36,29 @@ class StructuredRulesTest(unittest.TestCase):
         self.assertEqual(result["final_category"], "\u6613\u7206\u7c7b")
         self.assertFalse(result["need_manual_review"])
 
+    def test_promoted_drug_biology_polymer_families_keep_hazard_priority(self) -> None:
+        for name, rule_id in (
+            ("阿司匹林", "BUS-NOR-DRUG-DICT-001"),
+            ("LB培养基", "BUS-NOR-BIO-CULTURE-001"),
+            ("丁腈橡胶", "BUS-NOR-POLYMER-MATERIAL-001"),
+        ):
+            with self.subTest(name=name):
+                result = self.engine.classify({"reagent_name": name, "ordinary_evidence_complete": True})
+                self.assertEqual(result["final_category"], "普通类")
+                self.assertIn(rule_id, result["matched_rule_ids"])
+
+        hazardous_drug = self.engine.classify({
+            "reagent_name": "阿司匹林", "evidence": "H225",
+            "ordinary_evidence_complete": True,
+        })
+        self.assertEqual(hazardous_drug["final_category"], "易燃液体")
+        self.assertIn("BUS-FLA-GHS-H224-226-001", hazardous_drug["matched_rule_ids"])
+
+    def test_promoted_alias_maps_to_standard_name_without_overriding_valid_cas(self) -> None:
+        result = self.engine._apply_structured_alias({"reagent_name": "阿司匹林", "cas": "123-45-6"})
+        self.assertEqual(result["standard_name"], "乙酰水杨酸")
+        self.assertEqual(result["cas"], "123-45-6")
+
     def test_unknown_category_is_not_a_structured_manual_review_category(self) -> None:
         self.assertNotIn("未知类", self.engine.manual_review_categories)
 
@@ -45,6 +68,23 @@ class StructuredRulesTest(unittest.TestCase):
 
         self.assertEqual(result["final_category"], "未知类")
         self.assertFalse(result["need_manual_review"])
+
+    def test_missing_sds_in_evidence_does_not_make_named_chemical_unknown(self) -> None:
+        result = self.engine.classify({
+            "reagent_name": "赤藓糖醇",
+            "text": "网站暂不可用；无MSDS；毒性未知",
+            "allow_default_normal": False,
+        })
+        self.assertNotEqual(result["final_category"], "未知类")
+
+    def test_normal_hint_requires_complete_classification_evidence(self) -> None:
+        result = self.engine.classify({
+            "reagent_name": "待核验物质",
+            "text": "高沸点，中性，但来源查询失败",
+            "ordinary_evidence_complete": False,
+            "allow_default_normal": True,
+        })
+        self.assertNotEqual(result["final_category"], "普通类")
 
     def test_specific_reject_examples_override_generic_azide(self) -> None:
         for name in ["叠氮化铅", "雷汞", "TNT", "史蒂芬酸铅"]:
@@ -131,6 +171,43 @@ class StructuredRulesTest(unittest.TestCase):
         self.assertEqual(low["final_category"], "\u7279\u6b8a\u9178")
         self.assertEqual(high["final_category"], "\u6613\u7206\u7c7b")
         self.assertEqual(missing["final_category"], "\u6613\u7206\u7c7b")
+
+    def test_acid_identity_rules_do_not_match_lithium_perchlorate_trihydrate(self) -> None:
+        result = self.engine.classify(
+            {
+                "reagent_name": "\u9ad8\u6c2f\u9178\u9502\u4e09\u6c34\u5408\u7269",
+                "standard_name": "\u9ad8\u6c2f\u9178\u9502\u4e09\u6c34\u5408\u7269",
+                "english_name": "lithium perchlorate trihydrate",
+                "evidence": "H272; Oxidizing solid; UN 1481, class 5.1",
+                "oxidizing": True,
+            }
+        )
+
+        self.assertEqual(result["final_category"], "\u6c27\u5316\u5242")
+        self.assertNotIn("\u6613\u7206\u7c7b", result["matched_categories"])
+        self.assertNotIn("SPECIAL-EXP-004", result["matched_rule_ids"])
+
+    def test_acid_identity_rules_exclude_other_mineral_acid_salts(self) -> None:
+        cases = (
+            ("\u9ad8\u6c2f\u9178\u94a0", "sodium perchlorate", "\u6c27\u5316\u5242"),
+            ("\u786b\u9178\u9502", "lithium sulfate", "\u666e\u901a\u7c7b"),
+            ("\u785d\u9178\u9502", "lithium nitrate", "\u6c27\u5316\u5242"),
+        )
+        for name, english_name, expected in cases:
+            with self.subTest(name=name):
+                result = self.engine.classify(
+                    {
+                        "reagent_name": name,
+                        "standard_name": name,
+                        "english_name": english_name,
+                        "evidence": "H272; oxidizing solid" if expected == "\u6c27\u5316\u5242" else "",
+                        "oxidizing": expected == "\u6c27\u5316\u5242",
+                        "allow_default_normal": True,
+                    }
+                )
+                self.assertEqual(result["final_category"], expected)
+                self.assertNotIn("\u7279\u6b8a\u9178", result["matched_categories"])
+                self.assertNotIn("\u6613\u7206\u7c7b", result["matched_categories"])
 
     def test_bromine_iodine_keeps_priority_over_flammable(self) -> None:
         result = self.engine.classify(
@@ -590,7 +667,37 @@ class StructuredRulesTest(unittest.TestCase):
         })
         self.assertEqual(result["final_category"], "剧毒品")
         self.assertIn("T-TOX-001", result["matched_rule_ids"])
-        self.assertTrue(result["need_manual_review"])
+        self.assertFalse(result["need_manual_review"])
+
+    def test_ghs_acute_tox_category_3_is_high_toxicity(self) -> None:
+        result = self.engine.classify(
+            {
+                "reagent_name": "测试物",
+                "evidence": "H301; H311; H331; Acute Tox. 3",
+            }
+        )
+        self.assertEqual(result["final_category"], "高毒类")
+        self.assertIn("BUS-TOX-ACUTE-CAT3-001", result["matched_rule_ids"])
+
+    def test_injection_route_ld50_never_triggers_oral_or_dermal_thresholds(self) -> None:
+        evidence = (
+            "H301; H311; H331. 造成皮肤灼伤。"
+            "大鼠腹腔 LD50: 31mg/kg; 小鼠皮下 LDLo: 280mg/kg."
+        )
+        result = self.engine.classify({"reagent_name": "氟化铵", "evidence": evidence})
+        self.assertEqual(result["final_category"], "高毒类")
+        self.assertNotIn("T-ACU-DERM-001", result["matched_rule_ids"])
+        self.assertNotIn("剧毒品", result["matched_categories"])
+
+    def test_verified_dermal_ld50_still_uses_dermal_threshold(self) -> None:
+        result = self.engine.classify(
+            {
+                "reagent_name": "测试物",
+                "toxicity": "Rabbit dermal LD50: 31 mg/kg",
+            }
+        )
+        self.assertEqual(result["final_category"], "剧毒品")
+        self.assertIn("T-ACU-DERM-001", result["matched_rule_ids"])
 
     def test_lc50_value_is_not_concatenated_with_endpoint_number(self) -> None:
         result = self.engine.classify({
@@ -619,25 +726,42 @@ class StructuredRulesTest(unittest.TestCase):
         self.assertIn("SPECIAL-EXP-001", result["matched_rule_ids"])
         self.assertEqual(result["confidence"], 0.92)
 
-    def test_irritancy_requires_explicit_skin_or_eye_irritation_evidence(self) -> None:
-        cases = (
-            ("H315", "IRR-GHS-SKIN"),
-            ("H319", "IRR-GHS-EYE"),
-            ("造成皮肤刺激", "IRR-GHS-SKIN"),
-            ("引起皮肤刺激", "IRR-GHS-SKIN"),
-            ("Causes skin irritation", "IRR-GHS-SKIN"),
-            ("造成严重眼刺激", "IRR-GHS-EYE"),
-            ("引起严重眼刺激", "IRR-GHS-EYE"),
-            ("Causes serious eye irritation", "IRR-GHS-EYE"),
-            ("该物质具有催泪作用", "IRR-LACH"),
-            ("Lachrymatory agent", "IRR-LACH"),
-        )
-        for evidence, rule_id in cases:
+    def test_irritancy_requires_the_uploaded_oral_ld50_band(self) -> None:
+        for evidence in (
+            "强烈刺激皮肤", "造成严重眼损伤", "H314", "H318",
+            "该物质具有催泪作用", "Lachrymatory agent", "H315", "H319",
+            "造成皮肤刺激", "Causes skin irritation", "R34", "R36",
+        ):
             with self.subTest(evidence=evidence):
-                result = self.engine.classify({"reagent_name": "测试物", "evidence": evidence})
-                self.assertEqual(result["final_category"], "刺激性")
+                result = self.engine.classify(
+                    {"reagent_name": "测试物", "evidence": evidence, "allow_default_normal": True}
+                )
+                self.assertEqual(result["final_category"], "普通类")
+                self.assertNotIn("刺激性", result.get("matched_categories", []))
+
+    def test_legacy_acute_harm_r_codes_require_uploaded_oral_ld50_band(self) -> None:
+        for evidence in ("R20", "R21", "R22", "R20/21/22", "R34; R20/21/22"):
+            with self.subTest(evidence=evidence):
+                result = self.engine.classify(
+                    {"reagent_name": "测试物", "evidence": evidence, "allow_default_normal": True}
+                )
+                self.assertEqual(result["final_category"], "普通类")
                 self.assertFalse(result["need_manual_review"])
-                self.assertIn(rule_id, result["matched_rule_ids"])
+                self.assertNotIn("BUS-IRR-TOX-HCODES-001", result.get("matched_rule_ids", []))
+
+    def test_graphene_principal_material_is_normal_only_when_isolated(self) -> None:
+        result = self.engine.classify({
+            "reagent_name": "石墨烯量子点",
+            "name": "石墨烯量子点",
+            "standard_name": "石墨烯量子点",
+            "cleaned_name": "石墨烯量子点",
+        })
+        self.assertEqual(result["final_category"], "普通类")
+        self.assertIn("BUS-NOR-GRAPHENE-001", result["matched_rule_ids"])
+        self.assertNotEqual(
+            self.engine.classify({"reagent_name": "石墨烯量子点乙醇分散液"})["final_category"],
+            "普通类",
+        )
 
     def test_irritancy_does_not_match_broad_or_negated_skin_text(self) -> None:
         for evidence in (
@@ -651,10 +775,8 @@ class StructuredRulesTest(unittest.TestCase):
                 self.assertNotEqual(result["final_category"], "刺激性")
                 self.assertTrue(result["need_manual_review"])
 
-    def test_non_irritation_ghs_hazards_force_manual_review(self) -> None:
+    def test_sensitization_and_respiratory_irritation_are_neutral_annotations(self) -> None:
         cases = (
-            "H314 Causes severe skin burns and eye damage",
-            "H318 Causes serious eye damage",
             "H317 May cause an allergic skin reaction",
             "H335 May cause respiratory irritation",
         )
@@ -668,30 +790,42 @@ class StructuredRulesTest(unittest.TestCase):
                         "allow_default_normal": True,
                     }
                 )
-                self.assertEqual(result["final_category"], "")
-                self.assertTrue(result["need_manual_review"])
-                self.assertIn("不能等同于皮肤/眼刺激", result["reason"])
+                self.assertEqual(result["final_category"], "普通类")
+                self.assertFalse(result["need_manual_review"])
+                self.assertNotIn("刺激性", result.get("matched_categories", []))
 
-    def test_severe_damage_overrides_concurrent_irritation_statement(self) -> None:
-        result = self.engine.classify(
-            {
-                "reagent_name": "测试物",
-                "evidence": "H314; H315",
-            }
+    def test_h317_or_h335_does_not_mask_other_hazard_categories(self) -> None:
+        cases = (
+            ("H317; 具有强氧化性", "氧化剂"),
+            ("H335; 与水反应", "强反应性"),
         )
-        self.assertEqual(result["final_category"], "")
-        self.assertTrue(result["need_manual_review"])
+        for evidence, category in cases:
+            with self.subTest(evidence=evidence):
+                result = self.engine.classify({"reagent_name": "测试物", "evidence": evidence})
+                self.assertEqual(result["final_category"], category)
+                self.assertFalse(result["need_manual_review"])
 
-    def test_llm_irritancy_hint_or_legacy_name_example_is_not_enough(self) -> None:
-        for reagent_info in (
-            {"reagent_name": "测试物", "suggested_categories": ["刺激性"]},
-            {"reagent_name": "苯酚类"},
-            {"reagent_name": "硫酸二甲酯"},
-            {"reagent_name": "瓦斯"},
-        ):
-            with self.subTest(reagent_info=reagent_info):
-                result = self.engine.classify(reagent_info)
-                self.assertNotEqual(result["final_category"], "刺激性")
+    def test_h317_h335_and_former_severe_codes_do_not_trigger_uploaded_irritancy_rule(self) -> None:
+        for evidence in ("H314; H317", "H318; H335", "H314; H315"):
+            with self.subTest(evidence=evidence):
+                result = self.engine.classify(
+                    {"reagent_name": "测试物", "evidence": evidence, "allow_default_normal": True}
+                )
+                self.assertEqual(result["final_category"], "普通类")
+                self.assertNotIn("刺激性", result.get("matched_categories", []))
+
+    def test_llm_irritancy_hint_and_paused_examples_do_not_trigger_irritancy(self) -> None:
+        result = self.engine.classify({"reagent_name": "测试物", "suggested_categories": ["刺激性"]})
+        self.assertNotEqual(result["final_category"], "刺激性")
+
+        for name in ("苯酚类", "硫酸二甲酯", "瓦斯"):
+            with self.subTest(name=name):
+                result = self.engine.classify({"reagent_name": name, "allow_default_normal": True})
+                self.assertEqual(result["final_category"], "普通类")
+
+    def test_dilute_sulfuric_acid_is_regular_acid_without_numeric_concentration(self) -> None:
+        result = self.engine.classify({"reagent_name": "稀硫酸", "text": "稀硫酸"})
+        self.assertEqual(result["final_category"], "常规酸")
 
     def test_inhalation_thresholds_are_loaded_from_workbook(self) -> None:
         result = self.engine.classify({
@@ -707,6 +841,19 @@ class StructuredRulesTest(unittest.TestCase):
         for text in ("该物质具有毒性", "该物质具有氧化性"):
             result = self.engine.classify({"reagent_name": "测试物", "text": text})
             self.assertNotEqual(result["final_category"], "特殊酸")
+
+    def test_oxidizer_rule_ignores_incompatibility_text_but_keeps_positive_evidence(self) -> None:
+        incompatible = self.engine.classify(
+            {"reagent_name": "测试物", "evidence": "易燃；与强氧化剂不相容；避免接触氧化剂。"}
+        )
+        self.assertNotEqual(incompatible["final_category"], "氧化剂")
+        self.assertNotIn("BUS-OXI-GHS-001", incompatible.get("matched_rule_ids", []))
+
+        positive = self.engine.classify(
+            {"reagent_name": "测试物", "evidence": "H272; 该物质具有强氧化性，为氧化性固体。"}
+        )
+        self.assertEqual(positive["final_category"], "氧化剂")
+        self.assertIn("BUS-OXI-GHS-001", positive["matched_rule_ids"])
 
     def test_structured_hazard_booleans_are_executable(self) -> None:
         cases = {
@@ -786,11 +933,82 @@ class StructuredRulesTest(unittest.TestCase):
         self.assertTrue(result["need_manual_review"])
         self.assertEqual(result["final_category"], "")
 
-    def test_default_manual_review_category_blocks_auto_pass(self) -> None:
+    def test_uploaded_irritancy_uses_only_oral_ld50_50_through_200(self) -> None:
+        boundary = self.engine.classify({"reagent_name": "测试物", "toxicity": "oral LD50 50 mg/kg"})
+        self.assertEqual(boundary["final_category"], "高毒类")
+        self.assertIn("T-TOX-002", boundary["matched_rule_ids"])
+        for toxicity in ("oral LD50 50.1 mg/kg", "oral LD50 200 mg/kg"):
+            with self.subTest(toxicity=toxicity):
+                result = self.engine.classify({"reagent_name": "测试物", "toxicity": toxicity})
+                self.assertEqual(result["final_category"], "刺激性")
+                self.assertFalse(result["need_manual_review"])
+
+        for toxicity in (
+            "oral LD50 201 mg/kg", "dermal LD50 500 mg/kg",
+            "inhalation LC50 gas 1000 ppm 4 h", "inhalation LC50 vapor 5 mg/L 4 h",
+            "inhalation LC50 dust 2 mg/L 4 h",
+        ):
+            with self.subTest(no_irritancy_toxicity=toxicity):
+                result = self.engine.classify(
+                    {"reagent_name": "测试物", "toxicity": toxicity, "allow_default_normal": True}
+                )
+                self.assertEqual(result["final_category"], "普通类")
+
+        dermal_high = self.engine.classify({"reagent_name": "测试物", "toxicity": "dermal LD50 200 mg/kg"})
+        self.assertEqual(dermal_high["final_category"], "高毒类")
+
+    def test_formal_acute_harm_code_without_comparable_number_is_not_irritancy(self) -> None:
+        without_number = self.engine.classify(
+            {"reagent_name": "测试物", "evidence": "H302", "allow_default_normal": True}
+        )
+        self.assertEqual(without_number["final_category"], "普通类")
+        self.assertNotIn("BUS-IRR-TOX-HCODES-001", without_number.get("matched_rule_ids", []))
+
+        with_comparable_number = self.engine.classify(
+            {"reagent_name": "测试物", "evidence": "H302; oral LD50 1000 mg/kg", "allow_default_normal": True}
+        )
+        self.assertEqual(with_comparable_number["final_category"], "普通类")
+        self.assertNotIn("BUS-IRR-TOX-HCODES-001", with_comparable_number.get("matched_rule_ids", []))
+
+    def test_h225_is_formal_flammable_liquid_evidence(self) -> None:
+        result = self.engine.classify({"reagent_name": "测试物", "evidence": "H225"})
+        self.assertEqual(result["final_category"], "易燃液体")
+        self.assertIn("BUS-FLA-GHS-H224-226-001", result["matched_rule_ids"])
+        self.assertFalse(result["need_manual_review"])
+
+    def test_r36_is_risk_information_not_uploaded_irritancy_evidence(self) -> None:
+        result = self.engine.classify({"reagent_name": "测试物", "evidence": "R36", "allow_default_normal": True})
+        self.assertEqual(result["final_category"], "普通类")
+        self.assertNotIn("BUS-IRR-EU-EYE-001", result.get("matched_rule_ids", []))
+
+    def test_heavy_metal_precedes_the_absent_irritancy_match(self) -> None:
+        result = self.engine.classify({"reagent_name": "氯化镍", "evidence": "H315"})
+        self.assertEqual(result["final_category"], "重金属类")
+        self.assertIn("重金属类", result["matched_categories"])
+        self.assertNotIn("刺激性", result["matched_categories"])
+
+    def test_uploaded_non_reagent_container_policy_overrides_embedded_chemical_words(self) -> None:
+        for name, rule_id in (
+            ("空瓶", "BUS-NOR-EMPTY-BOTTLE-001"),
+            ("比色用硫酸桶", "BUS-NOR-NONREAGENT-CONTAINER-001"),
+            ("乙醇桶", "BUS-NOR-NONREAGENT-CONTAINER-001"),
+        ):
+            with self.subTest(name=name):
+                result = self.engine.classify({"reagent_name": name, "allow_default_normal": True})
+                self.assertEqual(result["final_category"], "普通类")
+                self.assertFalse(result["need_manual_review"])
+                self.assertIn(rule_id, result["matched_rule_ids"])
+
+        contained_chemical = self.engine.classify(
+            {"reagent_name": "乙醇桶内含乙醇", "evidence": "H225", "allow_default_normal": True}
+        )
+        self.assertEqual(contained_chemical["final_category"], "易燃液体")
+
+    def test_v5_acute_poison_category_does_not_force_manual_review(self) -> None:
         result = self.engine.classify({"reagent_name": "\u6c30\u5316\u94a0", "text": "\u6c30\u5316\u94a0"})
 
         self.assertEqual(result["final_category"], "\u5267\u6bd2\u54c1")
-        self.assertTrue(result["need_manual_review"])
+        self.assertFalse(result["need_manual_review"])
 
 
 if __name__ == "__main__":

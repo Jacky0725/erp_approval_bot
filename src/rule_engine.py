@@ -257,7 +257,7 @@ class RuleEngine:
         reagent_info = properties.to_rule_input(name=name, cas=cas)
         result = dict(self.classify(reagent_info))
         warnings: list[str] = []
-        if identity_status not in {"verified", "cas_verified", "name_verified_pubchem"}:
+        if identity_status not in {"verified", "cas_verified", "name_verified", "name_verified_pubchem"}:
             warnings.append(f"identity_status:{identity_status or 'unresolved'}")
         conflicts = tuple(getattr(properties, "conflicts", ()) or ())
         if conflicts:
@@ -306,6 +306,10 @@ class RuleEngine:
         if not text:
             return self._manual_result("无法判断：试剂信息为空。")
 
+        non_reagent_container = self._explicit_non_reagent_container_rule(reagent_info)
+        if non_reagent_container is not None:
+            return non_reagent_container
+
         if self._contains_mercury_name(reagent_info):
             return {
                 "final_category": "不建议接收类",
@@ -330,7 +334,13 @@ class RuleEngine:
         # those rules rather than by the name-only fallback.
         suppress_special_acid_rule = self._is_mineral_acid_salt_like(reagent_info)
         for rule in self.rules:
-            if rule.category == "\u7279\u6b8a\u9178" and suppress_special_acid_rule:
+            # Acid-identity rules must apply to an acid itself, never merely
+            # because the name of one of its salts contains the acid radical.
+            # For example, lithium perchlorate is an oxidizer, not
+            # high-concentration perchloric acid.  The workbook marks such
+            # rules with ``acid_identity_only`` so this applies equally to
+            # future concentration-sensitive acid rules.
+            if suppress_special_acid_rule and self._rule_requires_acid_identity(rule):
                 continue
             if rule.category == "\u5e38\u89c4\u9178" and self._is_mineral_acid_salt_like(reagent_info):
                 continue
@@ -364,11 +374,6 @@ class RuleEngine:
                 example_hits = self._flammable_example_hits(rule.example_keywords, reagent_info)
             else:
                 example_hits = self._specific_example_hits(rule.example_keywords, reagent_info)
-            # A legacy material-name example cannot establish skin/eye
-            # irritation.  Auto classification requires an explicit GHS or
-            # lacrimation statement from the evidence fields.
-            if rule.category == IRRITANT_CATEGORY:
-                example_hits = []
             # LLM/category suggestions are leads for review, never evidence of
             # a skin/eye irritation endpoint.
             category_hits = [] if rule.category == IRRITANT_CATEGORY else self._category_suggestion_hits(rule.category, reagent_info)
@@ -381,7 +386,11 @@ class RuleEngine:
             # Keep separators between the endpoint label and its value. The
             # normalized text turns "LD50 4 mg/kg" into "ld504mg/kg".
             toxic_hits = self._toxic_threshold_hits(rule.category, raw_text)
-            if toxic_hits is not None:
+            # Legacy rows whose *only* purpose is to describe a threshold
+            # must not be treated as free-text evidence.  Conversely, a
+            # structured GHS rule such as H301+H311+H331 is evidence in its
+            # own right and must survive when no LD50/LC50 number is present.
+            if toxic_hits is not None and (toxic_hits or self._rule_uses_toxicity_threshold(rule)):
                 protected_toxic_name_hits = (
                     RuleEngine._high_toxic_name_hits(reagent_info) if rule.category == "\u9ad8\u6bd2\u7c7b" else []
                 )
@@ -394,9 +403,6 @@ class RuleEngine:
 
             if not explanation_hits:
                 example_hits = self._exact_example_hits(rule.example_keywords, reagent_info)
-            if rule.category == IRRITANT_CATEGORY:
-                example_hits = []
-
             score = len(explanation_hits) * 2.0 + len(example_hits) * 0.8
             if score > 0:
                 existing = matches.get(rule.category)
@@ -439,7 +445,14 @@ class RuleEngine:
                 if threshold.threshold_id and threshold.threshold_id not in existing.rule_ids:
                     existing.rule_ids.append(threshold.threshold_id)
 
-        if self._looks_unknown(text):
+        # Missing or unknown *property data* in a source page does not make a
+        # clearly named reagent an unknown product.  Only the ERP name (or an
+        # explicit name-rule flag) can establish this business category.
+        identity_label = str(reagent_info.get("reagent_name") or reagent_info.get("name") or "")
+        if self._looks_unknown(self._normalize_text(identity_label)) or reagent_info.get("unknown_name_rule"):
+            # A broad biological/medicine family regex must not turn an
+            # explicitly unknown sample into an identified Ordinary product.
+            matches.pop(NORMAL_CATEGORY, None)
             matches.setdefault(
                 UNKNOWN_CATEGORY,
                 RuleMatch(
@@ -450,11 +463,16 @@ class RuleEngine:
                 ),
             )
 
-        irritation_exclusion = self._irritation_exclusion_reason(reagent_info)
-        if irritation_exclusion:
-            return self._manual_result(
-                f"无法按刺激性自动判定：{irritation_exclusion}；该危害类别不能等同于皮肤/眼刺激，需人工确认对应业务类别。"
-            )
+        # A normal-class keyword in a page snippet cannot prove that all
+        # applicable hazards were checked.  Explicit name-only business rules
+        # still work for callers without the evidence-completeness flag.
+        if not self._ordinary_auto_allowed(reagent_info):
+            matches.pop(NORMAL_CATEGORY, None)
+
+        # H317 (skin sensitisation) and H335 (respiratory irritation) remain in
+        # the retained evidence, but are not business-category triggers.  Do not
+        # manufacture a manual-review result from either code alone; other rules
+        # and the ordinary unresolved-result path decide the outcome.
 
         flammable_issue = self.flammable_evidence_issue(reagent_info)
         if flammable_issue and not matches:
@@ -525,6 +543,105 @@ class RuleEngine:
             "matched_rule_ids": list(matches[final_category].rule_ids),
             "rule_version": self.rule_version,
         }
+
+    def _explicit_non_reagent_container_rule(self, reagent_info: dict[str, Any]) -> dict[str, Any] | None:
+        """Apply the enabled, narrow non-reagent container override.
+
+        The workbook policy deliberately classifies an empty vessel or a name
+        that denotes packaging/equipment, rather than its former contents.
+        A content statement (for example, ``桶内含乙醇`` or ``硫酸溶液``)
+        retains the ordinary chemical lookup path.
+        """
+        enabled_ids = {str(rule.rule_id or "").strip() for rule in self.rules}
+        supported = {
+            "BUS-NOR-EMPTY-BOTTLE-001",
+            "BUS-NOR-NONREAGENT-CONTAINER-001",
+        }
+        if not (enabled_ids & supported):
+            return None
+
+        name = " ".join(
+            str(reagent_info.get(key) or "")
+            for key in ("reagent_name", "name", "chemical_name", "standard_name", "cleaned_name")
+        ).strip()
+        normalized = self._normalize_text(name)
+        if not normalized:
+            return None
+
+        content_markers = (
+            "内含", "含有", "盛有", "装有", "灌装", "溶液", "水溶液", "分散液", "悬浊液", "乳液",
+            "浓度", "mol/l", "mol/l", "%",
+        )
+        if any(marker in normalized for marker in content_markers):
+            return None
+
+        if "空瓶" in normalized and "BUS-NOR-EMPTY-BOTTLE-001" in enabled_ids:
+            matched_rule_id = "BUS-NOR-EMPTY-BOTTLE-001"
+            reason = "名称明确为“空瓶”，按已启用的非试剂容器规则归普通类。"
+        else:
+            # Limit the generic override to unambiguous packaging/equipment
+            # wording or names ending in a packaging unit. A valid CAS means
+            # the ERP row represents a chemical substance, not a bare vessel.
+            cas = str(reagent_info.get("cas") or reagent_info.get("cas_no") or "").strip()
+            packaging_terms = ("试剂瓶", "样品瓶", "空桶", "包装桶", "包装瓶", "容器", "包装", "器具", "比色用硫酸桶")
+            ends_as_package = normalized.endswith(("桶", "瓶", "罐", "容器"))
+            if (
+                "BUS-NOR-NONREAGENT-CONTAINER-001" not in enabled_ids
+                or cas
+                or not (any(term in normalized for term in packaging_terms) or ends_as_package)
+            ):
+                return None
+            matched_rule_id = "BUS-NOR-NONREAGENT-CONTAINER-001"
+            reason = "名称明确为容器、包装或器具，且未声明其中装有实际化学品，按非试剂物料归普通类。"
+
+        return {
+            "final_category": NORMAL_CATEGORY,
+            "matched_categories": [NORMAL_CATEGORY],
+            "matched_rule_ids": [matched_rule_id],
+            "reason": reason,
+            "confidence": 0.98,
+            "need_manual_review": False,
+            "rule_version": self.rule_version,
+        }
+
+    @staticmethod
+    def explicit_heavy_metal_element_rule(reagent_info: dict[str, Any]) -> dict[str, Any] | None:
+        """Recognise only an elemental heavy-metal name and its physical form.
+
+        This intentionally excludes salts, oxides, alloys, solutions and other
+        compounds.  It is a local business identity rule, not a substitute for
+        chemical identity resolution of a compound.
+        """
+        names = [
+            re.sub(r"[\s\u200b\u200c\u200d\ufeff]+", "", str(reagent_info.get(key) or "")).lower()
+            for key in ("reagent_name", "name", "standard_name", "cleaned_name")
+        ]
+        names = [name for name in dict.fromkeys(names) if name]
+        if not names:
+            return None
+        # These suffixes mean the element token is part of another chemical or
+        # formulation and must continue through evidence-based classification.
+        excluded_tokens = (
+            "盐", "氧化", "硫化", "氯化", "硝酸", "硫酸", "磷酸", "氢氧化",
+            "络合", "合金", "溶液", "分散", "乳液", "悬浊", "制剂", "化合物",
+        )
+        element_tokens = ("汞", "镉", "铬", "砷", "铅", "镍", "铍", "银", "钒", "硒", "钴", "锡")
+        form = r"(?:粉|粒|片|丝|箔|块|棒|球|线|锭|屑|颗粒)?"
+        quality = r"(?:(?:\d+(?:\.\d+)?目)|(?:ar|gr|cp|分析纯|优级纯|化学纯)|(?:≥?\d+(?:\.\d+)?%))*"
+        for text in names:
+            if any(token in text for token in excluded_tokens):
+                continue
+            for token in element_tokens:
+                if re.fullmatch(rf"(?:金属)?{token}{form}{quality}", text, flags=re.I):
+                    return {
+                        "final_category": "重金属类",
+                        "matched_categories": ["重金属类"],
+                        "matched_rule_ids": ["BUS-HMT-ELEMENT-FORM-001"],
+                        "reason": f"明确重金属元素本体（{token}）及物理形态，按本地业务规则归重金属类。",
+                        "confidence": 1.0,
+                        "need_manual_review": False,
+                    }
+        return None
 
     @staticmethod
     def _ordinary_auto_allowed(reagent_info: dict[str, Any]) -> bool:
@@ -684,8 +801,17 @@ class RuleEngine:
                 hits.append(keyword)
         return hits
 
-    @staticmethod
-    def _structured_rule_hits(rule: Rule, reagent_info: dict[str, Any]) -> list[str]:
+    def _structured_rule_hits(self, rule: Rule, reagent_info: dict[str, Any]) -> list[str]:
+        # Cross-field business policies are executed by dedicated code paths.
+        # Treating their descriptive pattern as a keyword would create false
+        # category hits (for example, the CAS routing policy is not a "normal"
+        # category rule).
+        if str(rule.match_type or "").strip().lower() == "business_policy":
+            return []
+        if str(rule.match_type or "").strip().lower() == "dictionary":
+            names = self._normalized_name_values(reagent_info)
+            hits = [name for name in names if name in self.aliases]
+            return [f"{rule.rule_id}:alias:{name}" for name in hits]
         if (
             rule.category == "\u91cd\u91d1\u5c5e\u7c7b"
             and any(scope.strip().lower() == "heavy_metal" for scope in rule.field_scope)
@@ -732,7 +858,11 @@ class RuleEngine:
             if condition and condition != "any" and "concentration" in condition:
                 concentration = RuleEngine._first_percent_concentration(RuleEngine._raw_reagent_text(reagent_info))
                 if "missing" in condition and concentration is None:
-                    pass
+                    raw_text = RuleEngine._raw_reagent_text(reagent_info).lower()
+                    # A name that explicitly says dilute is evidence against
+                    # the high-concentration fallback, even without a number.
+                    if "稀" in raw_text or "dilute" in raw_text:
+                        continue
                 elif concentration is None:
                     continue
                 elif "<=" in condition:
@@ -749,7 +879,11 @@ class RuleEngine:
                         continue
             elif condition in {"requiresliquidcontext", "requires_liquid_context"}:
                 if (
-                    not RuleEngine._has_liquid_context(reagent_info)
+                    not (
+                        RuleEngine._has_liquid_context(reagent_info)
+                        or RuleEngine._has_explicit_flammable_liquid_statement(reagent_info)
+                        or RuleEngine._has_ghs_flammable_liquid_code(reagent_info)
+                    )
                     or RuleEngine._has_flammable_blocking_context(reagent_info)
                     or RuleEngine._salt_like_name_blocks_auto_flammable(reagent_info)
                 ):
@@ -760,6 +894,20 @@ class RuleEngine:
                 continue
             hits.append(f"{rule.rule_id}:{pattern}" if rule.rule_id else pattern)
         return hits
+
+    @staticmethod
+    def _rule_requires_acid_identity(rule: Rule) -> bool:
+        """Whether a structured rule describes an acid itself, not its salts."""
+        condition = RuleEngine._normalize_text(rule.condition or "")
+        return (
+            rule.category in {"\u7279\u6b8a\u9178", "\u5e38\u89c4\u9178"}
+            or "acididentityonly" in condition
+            or "acid_identity_only" in condition
+        )
+
+    @staticmethod
+    def _rule_uses_toxicity_threshold(rule: Rule) -> bool:
+        return "toxicitythreshold" in RuleEngine._normalize_text(rule.condition or "")
 
     @staticmethod
     def _scoped_text(reagent_info: dict[str, Any], scopes: tuple[str, ...]) -> str:
@@ -810,8 +958,13 @@ class RuleEngine:
             text = RuleEngine._raw_reagent_text(reagent_info)
             for value, unit, context in RuleEngine._toxicity_values(text):
                 converted = RuleEngine._to_mg_per_kg(value, unit)
-                route_words = ("经口", "口服", "oral") if field == "oral_ld50" else ("经皮", "皮肤", "dermal", "skin")
-                if converted is not None and any(word in context for word in route_words):
+                is_oral, is_dermal, _is_inhalation, is_unsupported_route = RuleEngine._toxicity_route_flags(context)
+                route_matches = is_oral if field == "oral_ld50" else is_dermal
+                # An intraperitoneal, subcutaneous, intravenous, injection,
+                # or otherwise unsupported route must never be re-labelled as
+                # oral/dermal because a nearby hazard sentence contains a
+                # word such as "skin".
+                if converted is not None and route_matches and not is_unsupported_route:
                     values.append(converted)
         elif field.startswith("inhalation_lc50_"):
             text = RuleEngine._raw_reagent_text(reagent_info)
@@ -1087,7 +1240,11 @@ class RuleEngine:
         if category == "\u6613\u7206\u7c7b" and RuleEngine._contains_azide(text):
             hits.append("\u53e0\u6c2e/\u53e0\u5316/azide")
 
-        if RuleEngine._contains_perchloric_acid(text):
+        # The acid-radical text also occurs in salts such as lithium
+        # perchlorate.  Concentration policy belongs only to perchloric acid
+        # itself; salts continue through their actual hazards (for example,
+        # oxidizing-solid evidence).
+        if RuleEngine._contains_perchloric_acid(text) and not RuleEngine._is_mineral_acid_salt_like(reagent_info):
             concentration = RuleEngine._first_percent_concentration(text)
             if category == "\u6613\u7206\u7c7b" and (concentration is None or concentration > 72.0):
                 hits.append("\u9ad8\u6c2f\u9178>72%\u6216\u672a\u6807\u6ce8\u6d53\u5ea6")
@@ -1181,24 +1338,6 @@ class RuleEngine:
         raw = RuleEngine._raw_reagent_text(reagent_info).lower()
         exclusions = (
             (
-                "H314/皮肤腐蚀",
-                (
-                    r"\bh\s*314\b",
-                    r"causes severe skin burns",
-                    r"造成严重皮肤灼伤",
-                    r"皮肤腐蚀",
-                ),
-            ),
-            (
-                "H318/严重眼损伤",
-                (
-                    r"\bh\s*318\b",
-                    r"causes serious eye damage",
-                    r"造成严重眼损伤",
-                    r"严重眼损伤",
-                ),
-            ),
-            (
                 "H317/皮肤致敏",
                 (
                     r"\bh\s*317\b",
@@ -1289,6 +1428,19 @@ class RuleEngine:
         ):
             if token in name_text and not RuleEngine._keyword_is_negated(token, name_text):
                 hits.append(label)
+        # Apply this only to identifiable inorganic nitrate salts.  Nitric
+        # acid, nitrate esters, and generic organic nitro compounds need their
+        # own evidence and must not inherit an oxidizer classification.
+        inorganic_cations = (
+            "锂", "钠", "钾", "铵", "钙", "镁", "钡", "锶", "铝", "铁", "钴", "镍",
+            "铜", "锌", "锆", "锰", "铬", "铈", "钇", "镧", "钕", "钆", "铕", "镥",
+            "铀", "钍", "铋", "铊", "镉", "汞", "银", "铅", "锡", "锑", "钒", "钼",
+            "钨", "钛", "铌", "钽", "铪", "铼", "铑", "铱", "铂", "金",
+        )
+        if any(f"硝酸{cation}" in name_text for cation in inorganic_cations):
+            hits.append("无机硝酸盐")
+        if re.search(r"\b(?:lithium|sodium|potassium|ammonium|calcium|magnesium|barium|strontium|aluminium|aluminum|iron|cobalt|nickel|copper|zinc|zirconium)\s+nitrate\b", name_text):
+            hits.append("inorganic nitrate")
         return list(dict.fromkeys(hits))
 
     @staticmethod
@@ -1412,6 +1564,11 @@ class RuleEngine:
             or re.search(r"\bhighly\s+flammable\s+liquid\b", text, flags=re.I)
             or "易燃液体" in text
         )
+
+    @staticmethod
+    def _has_ghs_flammable_liquid_code(reagent_info: dict[str, Any]) -> bool:
+        text = RuleEngine._raw_reagent_text(reagent_info)
+        return bool(re.search(r"(?<![A-Za-z0-9])H22[456](?![0-9])", text, flags=re.I))
 
     @staticmethod
     def _has_liquid_context(reagent_info: dict[str, Any]) -> bool:
@@ -1876,6 +2033,17 @@ class RuleEngine:
             "nitrate",
             "sulfate",
             "sulphate",
+            "perchlorate",
+            "chlorate",
+            "phosphate",
+            "fluoride",
+            "bromide",
+            "iodide",
+            "acetate",
+            "formate",
+            "oxalate",
+            "methanesulfonate",
+            "triflate",
             "sulfonate",
             "sulphonate",
             "carboxylate",
@@ -1889,6 +2057,11 @@ class RuleEngine:
             "硝酸盐",
             "硫酸盐",
             "磷酸盐",
+            "高氯酸盐",
+            "氯酸盐",
+            "氟化物",
+            "溴化物",
+            "碘化物",
             "磺酸盐",
             "羧酸盐",
             "钠盐",
@@ -1901,11 +2074,22 @@ class RuleEngine:
             return True
         if any(token in name_text for token in chinese_salt_tokens):
             return True
-        if re.search(r"酸(钠|钾|铵|銨|氨)", name_text):
+        cations = (
+            "锂", "钠", "钾", "铵", "銨", "氨", "钙", "镁", "钡", "锶", "铝", "铁", "亚铁",
+            "铜", "锌", "镍", "钴", "铬", "锰", "银", "铅", "汞", "镉", "锡", "锑", "铋",
+            "钒", "锆", "铈", "钇", "镧", "钕", "钆", "铕", "铊", "铍", "钼", "钨",
+        )
+        acid_roots = (
+            "三氟甲磺酸", "高氯酸", "氯磺酸", "氟磺酸", "甲磺酸", "高碘酸", "碳硼烷酸",
+            "盐酸", "硝酸", "硫酸", "磷酸", "氢氟酸", "氢溴酸", "氢碘酸", "乙酸", "甲酸", "草酸",
+        )
+        cation_pattern = "|".join(re.escape(value) for value in cations)
+        acid_pattern = "|".join(re.escape(value) for value in acid_roots)
+        if re.search(rf"(?:{acid_pattern}).{{0,12}}(?:{cation_pattern})(?:盐)?", name_text):
             return True
-        if re.search(r"(盐酸|硝酸|硫酸|磷酸|磺酸|羧酸|酚).{0,12}(钠|钾|铵|銨)", name_text):
+        if re.search(rf"(?:{cation_pattern}).{{0,12}}(?:{acid_pattern})(?:盐)?", name_text):
             return True
-        if re.search(r"(钠|钾|铵|銨).{0,12}(盐酸|硝酸|硫酸|磷酸|磺酸|羧酸|酚)", name_text):
+        if re.search(r"酸(?:盐|酯)", name_text):
             return True
 
         acid_solution_forms = (
@@ -1921,6 +2105,9 @@ class RuleEngine:
             "发烟盐酸",
             "发烟硝酸",
             "发烟硫酸",
+            "高氯酸溶液",
+            "浓高氯酸",
+            "稀高氯酸",
         )
         if any(form in name_text for form in acid_solution_forms):
             return False
@@ -2024,13 +2211,7 @@ class RuleEngine:
             if mg_per_kg is None:
                 continue
 
-            is_oral = any(word in context for word in ("经口", "口服", "oral"))
-            is_dermal = any(word in context for word in ("经皮", "皮肤", "dermal", "skin"))
-            is_inhalation = any(word in context for word in ("吸入", "inhalation", "lc50"))
-            is_unsupported_route = any(
-                word in context
-                for word in ("intravenous", "iv", "腹腔", "intraperitoneal", "subcutaneous", "注射")
-            )
+            is_oral, is_dermal, is_inhalation, is_unsupported_route = RuleEngine._toxicity_route_flags(context)
             if is_unsupported_route or (not is_oral and not is_dermal and not is_inhalation):
                 continue
 
@@ -2042,6 +2223,27 @@ class RuleEngine:
                     hits.append(f"LD50阈值 {value:g}{unit}")
 
         return list(dict.fromkeys(hits))
+
+    @staticmethod
+    def _toxicity_route_flags(context: str) -> tuple[bool, bool, bool, bool]:
+        """Return route flags for one bound LD50/LC50 endpoint context.
+
+        ``皮肤`` alone is deliberately not accepted as an LD50 dermal-route
+        marker: safety statements such as "causes skin burns" frequently
+        occur close to unrelated injection-route values.
+        """
+        normalized = str(context or "").lower()
+        is_unsupported = any(
+            word in normalized
+            for word in (
+                "腹腔", "腹膜", "皮下", "静脉", "肌肉注射", "注射",
+                "intraperitoneal", "intravenous", "subcutaneous", "intramuscular",
+            )
+        )
+        is_oral = any(word in normalized for word in ("经口", "口服", "oral", "gavage"))
+        is_dermal = any(word in normalized for word in ("经皮", "dermal", "percutaneous", "skin ld50"))
+        is_inhalation = any(word in normalized for word in ("吸入", "inhalation", "inhaled", "lc50"))
+        return is_oral, is_dermal, is_inhalation, is_unsupported
 
     @staticmethod
     def _toxicity_values(text: str) -> list[tuple[float, str, str]]:
@@ -2077,7 +2279,9 @@ class RuleEngine:
             # "oral rat LD50", but never cross the previous endpoint.
             previous_endpoint_end = endpoints[index - 1].end() if index else 0
             context_start = max(previous_endpoint_end, endpoint.start() - 80)
-            context_end = min(len(normalized), value_match.end() + 80)
+            # Do not let an adjacent endpoint's route (for example, a later
+            # subcutaneous LDLo) contaminate this LD50's route detection.
+            context_end = min(next_endpoint_start, value_match.end() + 80)
             context = normalized[context_start:context_end].lower()
             values.append((float(value_match.group(1)), value_match.group(2).lower(), context))
         return values
@@ -2169,7 +2373,7 @@ class RuleEngine:
 
     @staticmethod
     def _looks_unknown(text: str) -> bool:
-        return any(keyword in text for keyword in ("未知", "不明", "无标签", "无msds", "无法辨识", "标签腐烂"))
+        return any(keyword in text for keyword in ("未知", "不明", "无标签", "无法辨识", "标签腐烂"))
 
     @staticmethod
     def _clean_text(value: Any) -> str:

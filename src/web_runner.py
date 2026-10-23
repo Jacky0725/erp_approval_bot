@@ -57,7 +57,6 @@ from scheduler import scheduler_config
 from llm_extractor import LlmExtractor
 from rule_engine import RuleEngine
 from excel_exports import write_excel_atomic
-from v3_web_search import V3WebSearchError, V3_RECOMMENDED_MODELS, resolve_v3_base_url
 
 
 ensure_runtime_layout()
@@ -75,6 +74,9 @@ TODO_TASKS_JSON_PATH = LOG_DIR / "todo_tasks.json"
 ALLOWED_WEB_WRITE_MODES = {"disabled", "multi_page", "generate_library"}
 
 ACTION_LABELS = {
+    "workbuddy_loop": "WorkBuddy 批次循环",
+    "workbuddy_prepare": "WorkBuddy 准备下一批（最多20条）",
+    "workbuddy_import": "WorkBuddy 导入结果并按写入模式保存",
     "suggestions": "审批流程",
     "todo_export": "待办清单刷新",
     "erp_smoke": "ERP 只读冒烟测试",
@@ -699,7 +701,6 @@ class AutomationJobManager:
             "SCHEDULED_RUN",
             "SCHEDULED_SKIP_MANUAL_REVIEW_LISTS",
             "APPROVAL_PIPELINE_VERSION",
-            "V3_RETRY_ITEM_KEY",
         }
         return {
             key: value
@@ -790,6 +791,30 @@ def action_label(action: str) -> str:
     return ACTION_LABELS.get(str(action or ""), str(action or ""))
 
 
+def confirmed_api_write_count(lines: list[str]) -> int:
+    confirmed_api_records: set[str] = set()
+    for line in lines:
+        lower = line.lower()
+        if "[api_property_confirmed]" in lower:
+            match = re.search(r"\brecord_id=([^\s]+)", line)
+            if match:
+                confirmed_api_records.add(match.group(1))
+            else:
+                confirmed_api_records.add(line)
+    return len(confirmed_api_records)
+
+
+def confirmed_write_count(lines: list[str]) -> int:
+    page_confirmations = 0
+    for line in lines:
+        lower = line.lower()
+        if "save verified for sequence" in lower and ": false" not in lower:
+            page_confirmations += 1
+        elif "save result for sequence" in lower and ": false" not in lower:
+            page_confirmations += 1
+    return confirmed_api_write_count(lines) + page_confirmations
+
+
 def run_summary(
     lines: list[str],
     *,
@@ -806,11 +831,7 @@ def run_summary(
     todo = todo_tasks_summary(root_dir)
     suggestion_metrics = aggregate_suggestion_summaries(lines)
 
-    write_success = sum(
-        1
-        for line in lines
-        if "save verified for sequence" in line.lower() or "save result for sequence" in line.lower()
-    )
+    write_success = confirmed_write_count(lines)
     write_failed = sum(
         1
         for line in lines
@@ -919,11 +940,7 @@ def light_run_summary(
     target_lists = parse_target_list_numbers(str(options.get("TARGET_LIST_NUMBERS") or options.get("target_list_numbers") or ""))
     suggestion_metrics = aggregate_suggestion_summaries(lines)
     source_summary = chemical_source_summary(lines)
-    write_success = sum(
-        1
-        for line in lines
-        if "save verified for sequence" in line.lower() or "save result for sequence" in line.lower()
-    )
+    write_success = confirmed_write_count(lines)
     write_failed = sum(
         1
         for line in lines
@@ -1010,6 +1027,8 @@ def chemical_source_summary(lines: list[str]) -> dict[str, Any]:
         "api_write_success_count": 0,
         "api_verify_failure_count": 0,
         "api_page_stale_warning_count": 0,
+        "api_page_not_located_warning_count": 0,
+        "api_page_mismatch_warning_count": 0,
         "api_fallback_web_write_count": 0,
         "identity_enrichment_call_count": 0,
         "identity_enrichment_english_candidate_count": 0,
@@ -1084,11 +1103,19 @@ def chemical_source_summary(lines: list[str]) -> dict[str, Any]:
             summary["api_record_resolve_failure_count"] += 1
         if "[api_property_save]" in lower and "skipped=" not in lower:
             summary["api_write_attempt_count"] += 1
-        if "[api_property_confirmed]" in lower:
-            summary["api_write_success_count"] += 1
         if "[api_property_verify]" in lower and "failed=" in lower:
             summary["api_verify_failure_count"] += 1
-        if "[api_property_verify]" in lower and "warning=stable_id_confirmed_page_stale" in lower:
+        if "[api_property_verify]" in lower and "warning=stable_id_confirmed_page_not_located" in lower:
+            summary["api_page_not_located_warning_count"] += 1
+        if "[api_property_verify]" in lower and "warning=stable_id_confirmed_page_mismatch" in lower:
+            summary["api_page_mismatch_warning_count"] += 1
+        if "[api_property_verify]" in lower and any(
+            marker in lower for marker in (
+                "warning=stable_id_confirmed_page_stale",
+                "warning=stable_id_confirmed_page_not_located",
+                "warning=stable_id_confirmed_page_mismatch",
+            )
+        ):
             summary["api_page_stale_warning_count"] += 1
         if "[api_fallback_web_write]" in lower:
             summary["api_fallback_web_write_count"] += 1
@@ -1105,6 +1132,7 @@ def chemical_source_summary(lines: list[str]) -> dict[str, Any]:
         if "chemical identity enrichment verified:" in lower:
             summary["identity_enrichment_verified_count"] += 1
     summary["chemical_search_seconds"] = round(float(summary["chemical_search_seconds"]), 1)
+    summary["api_write_success_count"] = confirmed_api_write_count(lines)
     return summary
 
 
@@ -1239,6 +1267,7 @@ def run_health(lines: list[str], success: bool | None, error: str) -> str:
         return "failed"
     text = "\n".join(str(line) for line in lines).lower()
     warning_tokens = (
+        "[workbuddy attention]",
         "failed save operation",
         "could not select",
         "could not open technical judgement",
@@ -1428,56 +1457,8 @@ def artifact_summary(root_dir: Path = ROOT_DIR) -> list[dict[str, Any]]:
     return artifacts[:24]
 
 
-def v3_invalid_results_summary(root_dir: Path = ROOT_DIR, limit: int = 40) -> dict[str, Any]:
-    path = root_dir / "data" / "logs" / "v3_invalid_results.jsonl"
-    if not path.exists():
-        return {"exists": False, "rows": [], "count": 0}
-    rows: list[dict[str, Any]] = []
-    try:
-        for line in reversed(path.read_text(encoding="utf-8").splitlines()):
-            try:
-                value = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if not isinstance(value, dict):
-                continue
-            identity = value.get("identity") if isinstance(value.get("identity"), dict) else {}
-            rows.append({
-                "event_id": str(value.get("event_id") or ""),
-                "at": str(value.get("at") or ""),
-                "list_number": str(identity.get("list_number") or ""),
-                "sequence": str(identity.get("sequence") or ""),
-                "reagent_name": str(identity.get("reagent_name") or ""),
-                "cas": str(identity.get("cas") or ""),
-                "failure_reason": str(value.get("failure_reason") or ""),
-                "attempts": int(value.get("attempts") or 1),
-                "retryable": bool(value.get("retryable", True)),
-            })
-            if len(rows) >= limit:
-                break
-    except OSError as error:
-        return {"exists": True, "rows": [], "count": 0, "error": str(error)}
-    return {"exists": True, "rows": rows, "count": len(rows)}
 
 
-def v3_invalid_result_by_id(event_id: str, root_dir: Path = ROOT_DIR) -> dict[str, Any] | None:
-    event_id = str(event_id or "").strip()
-    if not event_id:
-        return None
-    path = root_dir / "data" / "logs" / "v3_invalid_results.jsonl"
-    if not path.exists():
-        return None
-    try:
-        for line in reversed(path.read_text(encoding="utf-8").splitlines()):
-            try:
-                value = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(value, dict) and str(value.get("event_id") or "") == event_id:
-                return value
-    except OSError:
-        return None
-    return None
 
 
 def file_signature(path: Path) -> tuple[bool, int, int]:
@@ -2551,25 +2532,24 @@ def parse_float(value: Any, default: float) -> float:
 
 
 def normalize_pipeline_version(value: object, *, emit_deprecation: bool = False) -> str:
-    """Keep only supported approval pipelines; retired Doubao V2 safely becomes V1."""
+    """Normalize historical pipeline settings to the sole supported V1 path."""
     selected = str(value or "v1").strip().lower()
-    if selected == "doubao_web_v2" and emit_deprecation:
-        print("Deprecated approval pipeline 'doubao_web_v2' was normalized to V1.")
-    return selected if selected in {"v1", "v2", "v3"} else "v1"
+    if selected not in {"", "v1"} and emit_deprecation:
+        print(f"Deprecated approval pipeline {selected!r} was normalized to V1.")
+    return "v1"
 
 
 def runtime_config_snapshot() -> dict[str, Any]:
     load_dotenv(ENV_PATH)
     settings = load_settings()
     approval = settings.get("approval", {}) or {}
-    v3 = approval.get("v3", {}) or {}
     identity_enrichment = approval.get("identity_enrichment", {}) or {}
-    enrichment_v2 = settings.get("enrichment_v2", {}) or {}
     schedule = scheduler_config(settings)
     dingtalk = dingtalk_notification_config(settings)
     dingtalk_stream = dingtalk_stream_config(settings)
     llm = settings.get("llm", {}) or {}
     app_settings = settings.get("app", {}) or {}
+    workbuddy_settings = settings.get("workbuddy", {}) or {}
     erp_api = settings.get("erp_api", {}) or {}
     erp_api_discovery = erp_api.get("discovery", {}) or {}
     sync_config = memory_sync_config(settings)
@@ -2598,6 +2578,7 @@ def runtime_config_snapshot() -> dict[str, Any]:
         "app_version": app_version(),
         "app_frozen": bool(getattr(sys, "frozen", False)),
         "app_dry_run": "true" if app_settings.get("dry_run") else "false",
+        "workbuddy_desktop_enabled": bool(workbuddy_settings.get("desktop_enabled", False)),
         "update_token_configured": bool(
             os.getenv("REAGENT_APPROVAL_UPDATE_TOKEN", "").strip()
             or os.getenv("GITHUB_TOKEN", "").strip()
@@ -2659,27 +2640,7 @@ def runtime_config_snapshot() -> dict[str, Any]:
         "dingtalk_stream_client_secret_configured": bool(
             os.getenv(str(dingtalk_stream.get("client_secret_env")), "").strip()
         ),
-        "approval_pipeline_version": normalize_pipeline_version(os.getenv("APPROVAL_PIPELINE_VERSION", str(approval.get("pipeline_version", "v1")))),
-        "enrichment_v2_enabled": "true" if enrichment_v2.get("enabled") else "false",
-        "enrichment_v2_shadow_mode": "true" if enrichment_v2.get("shadow_mode", True) else "false",
-        "enrichment_v2_execution_status": (
-            "正式执行" if normalize_pipeline_version(os.getenv("APPROVAL_PIPELINE_VERSION", str(approval.get("pipeline_version", "v1"))) ) == "v2"
-            else "影子运行" if enrichment_v2.get("shadow_mode", True)
-            else "已配置正式接管"
-        ),
-        "v3_base_url": str(v3.get("base_url") or ""),
-        "v3_address_mode": str(v3.get("address_mode") or ("custom" if v3.get("base_url") else "shared_beijing")),
-        "v3_workspace_id": str(v3.get("workspace_id") or ""),
-        "v3_custom_base_url": str(v3.get("custom_base_url") or v3.get("base_url") or ""),
-        "v3_api_key_configured": bool(os.getenv(str(v3.get("api_key_env") or "DASHSCOPE_API_KEY"), "").strip()),
-        "v3_model": str(v3.get("model") or "qwen3.7-plus"),
-        "v3_recommended_models": list(V3_RECOMMENDED_MODELS),
-        "v3_retrieval_mode": str(v3.get("retrieval_mode") or "model_first"),
-        "v3_batch_size": str(v3.get("batch_size", 5)),
-        "v3_parallel_batches": str(v3.get("parallel_batches", 2)),
-        "v3_timeout_seconds": str(v3.get("timeout_seconds", 45)),
-        "v3_max_retries": str(v3.get("max_retries", 1)),
-        "v3_cost_warning_cny": str(v3.get("cost_warning_cny", 10)),
+        "approval_pipeline_version": "v1",
         "identity_enrichment_enabled": "true" if identity_enrichment.get("enabled") else "false",
         "identity_enrichment_model": str(identity_enrichment.get("model") or "qwen3.7-flash"),
         "identity_enrichment_timeout_seconds": str(identity_enrichment.get("timeout_seconds", 10)),
@@ -2717,17 +2678,7 @@ def runtime_config_snapshot() -> dict[str, Any]:
 
 
 def save_runtime_config(form: dict[str, str]) -> dict[str, Any]:
-    # Validate V3 before any .env or settings mutation so malformed URLs cannot
-    # leave the configuration half-updated.
     existing_settings = load_settings()
-    existing_v3 = ((existing_settings.get("approval", {}) or {}).get("v3", {}) or {})
-    requested_address_mode = form.get("v3_address_mode", str(existing_v3.get("address_mode") or "shared_beijing")).strip() or "shared_beijing"
-    requested_workspace_id = form.get("v3_workspace_id", str(existing_v3.get("workspace_id") or "")).strip()
-    requested_custom_url = form.get("v3_custom_base_url", str(existing_v3.get("custom_base_url") or form.get("v3_base_url", ""))).strip()
-    try:
-        resolved_v3_base_url = resolve_v3_base_url(requested_address_mode, requested_workspace_id, requested_custom_url)
-    except V3WebSearchError as error:
-        raise ValueError(f"V3 百炼配置无效：{error}") from error
     provider_id = form.get("llm_provider", "siliconflow").strip() or "siliconflow"
     provider = get_llm_provider(provider_id)
     llm_base_url = provider_base_url(provider.id, form.get("llm_base_url", "").strip())
@@ -2744,6 +2695,7 @@ def save_runtime_config(form: dict[str, str]) -> dict[str, Any]:
         "APPROVAL_WRITE_BATCH_SIZE": form.get("approval_write_batch_size", "3").strip() or "3",
         "ERP_WRITE_BACKEND": normalize_erp_write_backend(form.get("erp_write_backend", "")),
         "APP_DRY_RUN": form.get("app_dry_run", "false").strip().lower(),
+        "APPROVAL_PIPELINE_VERSION": "v1",
         "LLM_PROVIDER": provider.id,
         "LLM_BASE_URL": llm_base_url,
         "LLM_MODEL": llm_model,
@@ -2763,9 +2715,9 @@ def save_runtime_config(form: dict[str, str]) -> dict[str, Any]:
     if api_key:
         env_updates["LLM_API_KEY"] = api_key
         env_updates[provider.api_key_env] = api_key
-    v3_api_key = form.get("v3_api_key", "").strip()
-    if v3_api_key:
-        env_updates["DASHSCOPE_API_KEY"] = v3_api_key
+    identity_enrichment_api_key = form.get("identity_enrichment_api_key", "").strip()
+    if identity_enrichment_api_key:
+        env_updates["DASHSCOPE_API_KEY"] = identity_enrichment_api_key
 
     dingtalk_stream_client_id = form.get("dingtalk_stream_client_id", "").strip()
     if dingtalk_stream_client_id:
@@ -2828,26 +2780,9 @@ def save_runtime_config(form: dict[str, str]) -> dict[str, Any]:
         form.get("scheduler_process_all_todos_max", ""),
         scheduler.get("process_all_todos_max", 50),
     )
-    requested_pipeline = form.get("approval_pipeline_version", "v1")
-    approval["pipeline_version"] = normalize_pipeline_version(requested_pipeline, emit_deprecation=True)
-    v3 = approval.setdefault("v3", {})
-    v3["base_url"] = resolved_v3_base_url
-    v3["address_mode"] = requested_address_mode
-    v3["workspace_id"] = requested_workspace_id if requested_address_mode == "workspace_beijing" else ""
-    v3["custom_base_url"] = requested_custom_url if requested_address_mode == "custom" else ""
-    v3["api_key_env"] = "DASHSCOPE_API_KEY"
-    model_choice = form.get("v3_model_choice", form.get("v3_model", "qwen3.7-plus")).strip()
-    custom_model = form.get("v3_custom_model", "").strip()
-    v3["model"] = custom_model if model_choice == "custom" else model_choice
-    if not v3["model"]:
-        v3["model"] = "qwen3.7-plus"
-    retrieval_mode = str(form.get("v3_retrieval_mode", v3.get("retrieval_mode", "model_first"))).strip().lower()
-    v3["retrieval_mode"] = retrieval_mode if retrieval_mode in {"model_first", "always_web"} else "model_first"
-    v3["batch_size"] = max(1, min(20, coerce_int(form.get("v3_batch_size", ""), v3.get("batch_size", 5))))
-    v3["parallel_batches"] = max(1, min(2, coerce_int(form.get("v3_parallel_batches", ""), v3.get("parallel_batches", 2))))
-    v3["timeout_seconds"] = max(10, min(90, coerce_int(form.get("v3_timeout_seconds", ""), v3.get("timeout_seconds", 45))))
-    v3["max_retries"] = max(0, min(2, coerce_int(form.get("v3_max_retries", ""), v3.get("max_retries", 1))))
-    v3["cost_warning_cny"] = max(0, coerce_float(form.get("v3_cost_warning_cny", ""), v3.get("cost_warning_cny", 10)))
+    approval["pipeline_version"] = "v1"
+    approval.pop("v3", None)
+    approval.pop("llm_identity_review", None)
     identity_enrichment = approval.setdefault("identity_enrichment", {})
     identity_enrichment["enabled"] = form.get("identity_enrichment_enabled", "false").strip().lower() == "true"
     identity_enrichment["provider"] = "aliyun_bailian"
@@ -2866,9 +2801,7 @@ def save_runtime_config(form: dict[str, str]) -> dict[str, Any]:
         0,
         min(10000, coerce_int(form.get("identity_enrichment_max_calls_per_day", ""), identity_enrichment.get("max_calls_per_day", 200))),
     )
-    enrichment_v2 = settings.setdefault("enrichment_v2", {})
-    enrichment_v2["enabled"] = form.get("enrichment_v2_enabled", "false").strip().lower() == "true"
-    enrichment_v2["shadow_mode"] = form.get("enrichment_v2_shadow_mode", "true").strip().lower() == "true"
+    settings.pop("enrichment_v2", None)
     scheduler["approval_write_mode"] = normalize_web_write_mode(
         form.get("scheduler_approval_write_mode", ""),
         default=normalize_web_write_mode(str(scheduler.get("approval_write_mode", "disabled"))),

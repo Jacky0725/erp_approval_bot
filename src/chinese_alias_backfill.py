@@ -11,6 +11,7 @@ import yaml
 
 from chemical_searcher import ChemicalSearcher
 from reagent_identity import IdentityRecord, ReagentIdentityResolver
+from reagent_data_minimizer import minimize_reagent_record
 
 
 @dataclass(frozen=True)
@@ -159,11 +160,12 @@ class ChineseAliasBackfill:
         )
 
     def _identity(self, reagent: dict[str, Any]) -> IdentityRecord:
+        reagent = minimize_reagent_record(reagent)
         return self.identity_resolver.resolve(
             str(reagent.get("试剂名称") or reagent.get("reagent_name") or reagent.get("name") or ""),
             cas=str(reagent.get("CAS号") or reagent.get("cas") or ""),
-            specification=str(reagent.get("规格") or reagent.get("specification") or ""),
-            unit=str(reagent.get("规格单位") or reagent.get("unit") or ""),
+            specification="",
+            unit="",
         )
 
     def _candidates_path(self) -> Path:

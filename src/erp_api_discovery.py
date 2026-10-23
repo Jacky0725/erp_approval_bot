@@ -5,6 +5,7 @@ import os
 import re
 import threading
 import copy
+import hashlib
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -31,6 +32,35 @@ SENSITIVE_KEY_RE = re.compile(
 )
 PHONE_RE = re.compile(r"(?<!\d)1[3-9]\d{9}(?!\d)")
 EMAIL_RE = re.compile(r"[\w.\-+%]+@[\w.\-]+\.[A-Za-z]{2,}")
+
+
+def compact_discovery_event(event: dict[str, Any]) -> dict[str, Any]:
+    """Keep only protocol evidence; raw ERP payloads never belong in discovery files."""
+    analyzer = ApiDiscoveryAnalyzer()
+    context = event.get("save_context") or {}
+    update = analyzer._odoo_line_update(event)
+    identity = "|".join(str(context.get(key) or "") for key in ("list_number", "record_id", "sequence"))
+    sample_key = hashlib.sha256(identity.encode("utf-8")).hexdigest() if identity.strip("|") else ""
+    matches = {
+        key: analyzer._find_matching_fields(event.get("request_payload"), context.get(key))
+        for key in ("expected_property", "record_id", "list_number", "sequence", "name", "cas")
+    }
+    return {
+        key: event.get(key)
+        for key in ("captured_at", "method", "origin", "path", "status", "query_keys", "response_shape", "candidate_fields", "action_hint", "in_save_window", "web_save_verified")
+        if key in event
+    } | {
+        "request_headers": {"content-type": analyzer._content_type(event)},
+        "analysis": {
+            "sample_key": sample_key,
+            "verified_property_write": analyzer._is_verified_property_write(event),
+            "matching_fields": matches,
+            "odoo_update": bool(update),
+            "odoo_record_id_field": (update or {}).get("record_id_field", ""),
+            "odoo_property_field": (update or {}).get("property_field", ""),
+            "success_indicators": analyzer._success_indicators([event]),
+        },
+    }
 
 
 def sanitize_value(value: Any) -> Any:
@@ -262,21 +292,21 @@ class ApiDiscoveryRecorder:
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         json_path = self.log_dir / f"erp_api_discovery_{stamp}.json"
         md_path = self.log_dir / f"erp_api_discovery_{stamp}.md"
-        payload = {"events": self.events}
+        payload = {"events": [compact_discovery_event(event) for event in self.events]}
         json_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-        md_path.write_text(self._markdown_summary(), encoding="utf-8")
+        md_path.write_text(self._markdown_summary(payload["events"]), encoding="utf-8")
         return json_path, md_path
 
-    def _markdown_summary(self) -> str:
-        lines = ["# ERP API Discovery", "", f"Captured events: {len(self.events)}", ""]
-        for index, event in enumerate(self.events, start=1):
+    def _markdown_summary(self, events: list[dict[str, Any]]) -> str:
+        lines = ["# ERP API Discovery", "", f"Captured events: {len(events)}", ""]
+        for index, event in enumerate(events, start=1):
             lines.extend(
                 [
                     f"## {index}. {event['method']} {event['path']}",
                     f"- Status: {event['status']}",
-                    f"- Action hint: {event['action_hint']}",
+                    f"- Action hint: {event.get('action_hint') or '-'}",
                     f"- Query keys: {', '.join(event.get('query_keys') or []) or '-'}",
-                    f"- Request payload: `{json.dumps(event.get('request_payload') or {}, ensure_ascii=False, default=str)[:500]}`",
+                    f"- Matched field paths: `{json.dumps((event.get('analysis') or {}).get('matching_fields') or {}, ensure_ascii=False)[:500]}`",
                     f"- Response shape: `{json.dumps(event.get('response_shape') or {}, ensure_ascii=False, default=str)[:500]}`",
                     f"- Candidate fields: `{json.dumps(event.get('candidate_fields') or {}, ensure_ascii=False, default=str)[:500]}`",
                     "",
@@ -313,7 +343,8 @@ class ApiDiscoveryAnalyzer:
             return DiscoveryCandidate("pending_capture", 0.0, {}, [], ["save_property"])
         (origin, method, save_path), samples = ranked[0]
         distinct_sequences = {
-            str((sample.get("save_context") or {}).get("sequence") or "") for sample in samples
+            str((sample.get("analysis") or {}).get("sample_key") or (sample.get("save_context") or {}).get("sequence") or "")
+            for sample in samples
         } - {""}
         if len(samples) < required_write_samples or len(distinct_sequences) < required_write_samples:
             missing.append(f"verified_write_samples:{len(distinct_sequences)}/{required_write_samples}")
@@ -384,7 +415,7 @@ class ApiDiscoveryAnalyzer:
             "save_static_payload": self._common_static_payload(samples, set(save_mapping.values())),
             "success_indicators": success_indicators,
         }
-        odoo_samples = [self._odoo_line_update(sample) for sample in samples]
+        odoo_samples = [self._odoo_line_update(sample) or ((sample.get("analysis") or {}).get("odoo_update")) for sample in samples]
         if odoo_samples and all(odoo_samples):
             config.update({
                 "protocol": "odoo_jsonrpc",
@@ -412,6 +443,8 @@ class ApiDiscoveryAnalyzer:
         return DiscoveryCandidate("candidate" if not missing else "pending_capture", confidence, config, evidence, missing)
 
     def _is_verified_property_write(self, event: dict[str, Any]) -> bool:
+        if "analysis" in event:
+            return bool((event.get("analysis") or {}).get("verified_property_write"))
         if str(event.get("method") or "").upper() not in self.WRITE_METHODS:
             return False
         if not event.get("in_save_window") or not event.get("web_save_verified"):
@@ -497,6 +530,13 @@ class ApiDiscoveryAnalyzer:
         return [path for path, value in cls._flatten(payload) if expected_text and str(value or "").strip() == expected_text]
 
     def _consistent_matching_field(self, samples: list[dict[str, Any]], context_key: str) -> str:
+        if samples and all("analysis" in sample for sample in samples):
+            fields = [((sample.get("analysis") or {}).get("matching_fields") or {}).get(context_key) or [] for sample in samples]
+            if context_key == "expected_property":
+                odoo_fields = [(sample.get("analysis") or {}).get("odoo_property_field") for sample in samples]
+                if all(odoo_fields) and len(set(odoo_fields)) == 1:
+                    return str(odoo_fields[0])
+            return str(fields[0][0]) if all(len(items) == 1 and items[0] == fields[0][0] for items in fields) else ""
         if context_key == "expected_property":
             odoo_fields = [
                 str((self._odoo_line_update(sample) or {}).get("property_field") or "")
@@ -514,6 +554,11 @@ class ApiDiscoveryAnalyzer:
         return fields[0] if fields and len(set(fields)) == 1 else ""
 
     def _record_id_field(self, samples: list[dict[str, Any]]) -> str:
+        if samples and all("analysis" in sample for sample in samples):
+            paths = [(sample.get("analysis") or {}).get("odoo_record_id_field") for sample in samples]
+            if all(paths) and len(set(paths)) == 1:
+                return str(paths[0])
+            return self._consistent_matching_field(samples, "record_id")
         odoo_fields = [
             str((self._odoo_line_update(sample) or {}).get("record_id_field") or "")
             for sample in samples
@@ -557,6 +602,9 @@ class ApiDiscoveryAnalyzer:
 
     @staticmethod
     def _success_indicators(samples: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        if samples and all("analysis" in sample for sample in samples):
+            indicators = [(sample.get("analysis") or {}).get("success_indicators") or [] for sample in samples]
+            return indicators[0] if indicators and all(item == indicators[0] for item in indicators) else []
         preferred_names = {"success", "ok", "code", "status", "statuscode", "result"}
         accepted_values = {True, 0, "0", 200, "200", "success", "ok"}
         flattened = [dict(ApiDiscoveryAnalyzer._flatten(sample.get("response_payload") or {})) for sample in samples]
@@ -575,10 +623,14 @@ class ApiDiscoveryAnalyzer:
     def _common_static_payload(self, samples: list[dict[str, Any]], dynamic_paths: set[str]) -> dict[str, Any]:
         if not samples:
             return {}
+        if all("analysis" in sample for sample in samples):
+            return {}
         flattened = [dict(self._flatten(sample.get("request_payload"))) for sample in samples]
         common: dict[str, Any] = {}
         for path, value in flattened[0].items():
             if path in dynamic_paths or "." in path or SENSITIVE_KEY_RE.search(path):
+                continue
+            if path not in {"jsonrpc", "method"}:
                 continue
             if not isinstance(value, (str, int, float, bool)) or value in (None, ""):
                 continue
@@ -625,7 +677,7 @@ class ErpApiConfigurator:
             "evidence": candidate.evidence,
             "missing": candidate.missing,
             "captured_at": datetime.now().isoformat(timespec="seconds"),
-            "events": events,
+            "events": [compact_discovery_event(event) if "analysis" not in event else event for event in events],
         }
         self._atomic_yaml(path, payload)
         return path

@@ -465,9 +465,32 @@ class WorkflowSummaryTest(unittest.TestCase):
         self.assertEqual(summary["api_record_resolve_failure_count"], 1)
         self.assertEqual(summary["api_write_attempt_count"], 1)
         self.assertEqual(summary["api_write_success_count"], 1)
+        self.assertEqual(summary["write_success_count"], 1)
         self.assertEqual(summary["api_verify_failure_count"], 1)
         self.assertEqual(summary["api_page_stale_warning_count"], 1)
         self.assertEqual(summary["api_fallback_web_write_count"], 1)
+
+    def test_api_confirmations_count_once_in_full_and_light_summaries(self) -> None:
+        lines = [
+            "[api_property_confirmed] sequence=1 record_id=667610 category=氧化剂",
+            "[api_property_confirmed] sequence=1 record_id=667610 category=氧化剂",
+            "[api_property_confirmed] sequence=2 record_id=667611 category=普通类",
+            "Save verified for sequence 3: False (clicked_save=True)",
+        ]
+        options = dict(action="suggestions", options={}, running=False, success=True, error="")
+        self.assertEqual(run_summary(lines, **options)["write_success_count"], 2)
+        self.assertEqual(light_run_summary(lines, **options)["write_success_count"], 2)
+
+    def test_api_page_warning_categories_are_distinct(self) -> None:
+        lines = [
+            "[api_property_verify] sequence=1 warning=stable_id_confirmed_page_not_located page_value=<not located>; no duplicate save",
+            "[api_property_verify] sequence=2 warning=stable_id_confirmed_page_mismatch page_value=普通类; no duplicate save",
+        ]
+        options = dict(action="suggestions", options={}, running=False, success=True, error="")
+        summary = light_run_summary(lines, **options)
+        self.assertEqual(summary["api_page_not_located_warning_count"], 1)
+        self.assertEqual(summary["api_page_mismatch_warning_count"], 1)
+        self.assertEqual(summary["api_page_stale_warning_count"], 2)
 
     def test_run_summary_counts_search_time_and_batched_review_writes(self) -> None:
         summary = run_summary(

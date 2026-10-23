@@ -177,6 +177,43 @@ class ChemicalSearchCache:
                     ),
                 )
 
+    def get_detail_mapping(self, provider: str, lookup_key: str) -> dict[str, Any] | None:
+        if not self.enabled or not str(lookup_key or "").strip():
+            return None
+        now = self._now_iso()
+        with closing(self._connect()) as conn:
+            row = conn.execute(
+                "SELECT payload_json FROM chemical_detail_mapping WHERE provider = ? AND lookup_key = ? AND expires_at > ?",
+                (str(provider).lower(), str(lookup_key).strip().lower(), now),
+            ).fetchone()
+        if row is None:
+            return None
+        try:
+            return copy.deepcopy(json.loads(row["payload_json"]))
+        except (TypeError, json.JSONDecodeError):
+            return None
+
+    def put_detail_mapping(self, provider: str, lookup_key: str, payload: dict[str, Any], ttl_days: int = 180) -> None:
+        if not self.enabled or not str(lookup_key or "").strip():
+            return
+        now = datetime.now(timezone.utc)
+        with closing(self._connect()) as conn:
+            with conn:
+                conn.execute(
+                    """
+                    INSERT INTO chemical_detail_mapping(provider, lookup_key, payload_json, created_at, expires_at)
+                    VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT(provider, lookup_key) DO UPDATE SET
+                      payload_json=excluded.payload_json, created_at=excluded.created_at, expires_at=excluded.expires_at
+                    """,
+                    (
+                        str(provider).lower(), str(lookup_key).strip().lower(),
+                        json.dumps(payload, ensure_ascii=False, sort_keys=True),
+                        now.isoformat(timespec="seconds"),
+                        (now + timedelta(days=max(1, ttl_days))).isoformat(timespec="seconds"),
+                    ),
+                )
+
     def _connect(self) -> sqlite3.Connection:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(self.path, timeout=15.0)
@@ -203,12 +240,29 @@ class ChemicalSearchCache:
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS chemical_detail_mapping (
+                provider TEXT NOT NULL,
+                lookup_key TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                PRIMARY KEY(provider, lookup_key)
+            )
+            """
+        )
         return conn
 
     def _ttl_days(self, result: dict[str, Any]) -> float:
         cache_settings = self._cache_settings()
         failure_reason = str(result.get("failure_reason") or "").strip()
         if result.get("need_manual_review") or failure_reason:
+            if str(result.get("lookup_status") or result.get("retrieval_status") or "").strip() == "not_found":
+                try:
+                    return max(1.0, float(cache_settings.get("not_found_ttl_hours", 24))) / 24
+                except (TypeError, ValueError):
+                    return 1.0
             retry_minutes = cache_settings.get("failure_ttl_minutes")
             if retry_minutes not in (None, ""):
                 try:

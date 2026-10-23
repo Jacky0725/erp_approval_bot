@@ -1,4 +1,15 @@
 config_schema_version: 2
+workbuddy:
+  desktop_enabled: true
+  write_enabled: true
+  executable: D:\Program Files\WorkBuddy\WorkBuddy.exe
+  project_name: 试剂审批-程龙
+  prompt_mode: project
+  reuse_chat: false
+  batch_size: 20
+  batch_dir: data/workbuddy
+  max_write_attempts: 2
+  result_timeout_seconds: 900
 app:
   name: reagent-approval-bot
   dry_run: false
@@ -9,42 +20,41 @@ browser:
 llm:
   provider: siliconflow
   base_url: https://api.siliconflow.cn/v1
-  model: deepseek-ai/DeepSeek-V3.2
+  model: deepseek-ai/DeepSeek-V4.1-Flash
   timeout_seconds: 30
   max_retries: 0
 chemical_search:
-  # A checksum-valid ERP CAS resolved by PubChem is the formal identity.  Any
-  # mismatch with the supplied name is retained as an audit record only.
   cas_authoritative: true
-  query_priority:
-  - cleaned_name
-  - standard_name
-  - english_name
-  - aliases
-  - cas_verification
   max_name_queries: 3
   providers:
-  - pubchem
   - chemsrc
   - chemicalbook
-  - nist
+  - pubchem
   requests_per_second: 2
+  source_requests_per_second:
+    chemsrc: 0.2
+    chemicalbook: 0.5
+    pubchem: 2
+  request_jitter_seconds:
+    chemsrc:
+    - 0.1
+    - 0.8
   per_source_concurrency: 1
   max_attempts: 2
   request_timeout_seconds: 8
   read_timeout_seconds: 8
-  lookup_budget_seconds: 20
+  lookup_budget_seconds: 30
   batch_budget_seconds: 120
   batch_workers: 3
   provider_budget_seconds:
-    chemsrc: 6
-    chemicalbook: 3
+    chemsrc: 15
+    chemicalbook: 8
     pubchem: 6
     nist: 4
   provider_negative_cache_seconds: 60
-  pubchem_batch_prefetch: true
+  pubchem_batch_prefetch: false
   failure_circuit_break_threshold: 3
-  failure_circuit_cooldown_seconds: 300
+  failure_circuit_cooldown_seconds: 1800
   stale_if_error_days: 180
   chemsrc_enabled: true
   chemicalbook_enabled: true
@@ -52,12 +62,12 @@ chemical_search:
   nist_enabled: true
   property_enrichment:
     enabled: true
-    max_requests: 3
-    budget_seconds: 8
+    max_requests: 6
+    budget_seconds: 30
     providers:
-    - pubchem
     - chemsrc
     - chemicalbook
+    - pubchem
     - nist
     fields:
     - flash_point
@@ -78,6 +88,8 @@ chemical_search:
     enabled: true
     path: data/chemical_search_cache.sqlite
     success_ttl_days: 30
+    detail_mapping_ttl_days: 180
+    not_found_ttl_hours: 24
     failure_ttl_days: 1
     failure_ttl_minutes: 30
 erp_api:
@@ -85,6 +97,7 @@ erp_api:
   base_url: https://xxpt.sh-tianhan.com:5500
   enabled_for_write: true
   web_verify_after_api_write: true
+  web_verify_sample_every: 5
   verify_attempts: 3
   verify_delays_seconds:
   - 0.5
@@ -284,7 +297,7 @@ paths:
   review_queue_excel: data/review_queue.xlsx
   audit_log_dir: data/logs
 approval:
-  pipeline_version: v3
+  pipeline_version: v1
   identity_enrichment:
     enabled: false
     provider: aliyun_bailian
@@ -294,34 +307,22 @@ approval:
     timeout_seconds: 10
     max_calls_per_batch: 20
     max_calls_per_day: 200
-  v3:
-    base_url: https://ws-n7pzljbon73jfgip.cn-beijing.maas.aliyuncs.com/compatible-mode/v1
-    api_key_env: DASHSCOPE_API_KEY
-    model: qwen3.7-plus
-    retrieval_mode: model_first
-    batch_size: 5
-    parallel_batches: 2
-    timeout_seconds: 45
-    max_retries: 1
-    cost_warning_cny: 10.0
-    address_mode: workspace_beijing
-    workspace_id: ws-n7pzljbon73jfgip
-    custom_base_url: ''
   default_action: manual_review
   enable_llm_manual_review_advice: true
-  llm_manual_review_advice_mode: batch
+  llm_manual_review_advice_mode: on_demand
+  adopt_llm_second_opinion_when_rule_unresolved: true
+  v1:
+    formal_rule_direct_write: true
+    candidate_cas_memory:
+      enabled: true
+      require_source_verified_candidate: true
+      require_page_bound_web_cas: true
+      require_secondary_confirmation_for_web_sources: true
   identity_conflict_policy:
     mode: cas_authoritative_audit_only
     require_manual_confirmation: false
     promote_confirmed_correction_to_memory: false
     auto_update_erp_cas: false
-  llm_identity_review:
-    enabled: true
-    trigger_on_cas_missing: true
-    trigger_on_name_cas_conflict: true
-    allow_model_knowledge: true
-    advisory_only: true
-    max_calls_per_identity: 1
   write_mode: multi_page
   erp_write_backend: api_write_with_web_verify
   write_min_confidence: 0.7
@@ -334,6 +335,19 @@ approval:
   - approve
   - reject
   - manual_review
+  v3:
+    base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+    address_mode: shared_beijing
+    workspace_id: ''
+    custom_base_url: ''
+    api_key_env: DASHSCOPE_API_KEY
+    model: qwen3.7-plus
+    retrieval_mode: model_first
+    batch_size: 5
+    parallel_batches: 2
+    timeout_seconds: 45
+    max_retries: 1
+    cost_warning_cny: 10.0
 scheduler:
   enabled: false
   mode: daily
@@ -349,28 +363,6 @@ notification:
   dingtalk:
     enabled: true
     at_all: true
-enrichment_v2:
-  enabled: false
-  shadow_mode: true
-  providers:
-    pubchem:
-      read_timeout_seconds: 10
-      max_concurrency: 2
-      include_hazard_details: true
-    nist:
-      enabled: true
-      read_timeout_seconds: 8
-    comptox:
-      enabled: false
-      api_key_env: EPA_CTX_API_KEY
-  llm:
-    enabled: false
-  chinese_alias_backfill:
-    enabled: false
-    sources:
-    - chemsrc
-    - chemicalbook
-    auto_promote: false
 enrichment_metrics:
   enabled: true
   jsonl_path: data/logs/enrichment_metrics.jsonl
@@ -420,3 +412,6 @@ selectors:
   review_items: ''
   approve_button: ''
   reject_button: ''
+enrichment_v2:
+  enabled: false
+  shadow_mode: true

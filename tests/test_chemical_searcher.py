@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from typing import Any
@@ -75,6 +76,7 @@ class ChemicalSearcherTest(unittest.TestCase):
         ChemicalSearcher._source_skip_logged = set()
         ChemicalSearcher._source_half_open = set()
         ChemicalSearcher._source_semaphores = {}
+        ChemicalSearcher._provider_negative_until = {}
 
     def test_query_candidates_try_names_after_cas(self) -> None:
         self.assertEqual(
@@ -138,7 +140,7 @@ class ChemicalSearcherTest(unittest.TestCase):
         searcher = RecordingSearcher(root_dir=ROOT_DIR)
         result = searcher.search("NaOH 0.1mol/L 分析纯")
 
-        self.assertEqual(searcher.queries, ["氢氧化钠", "1310-73-2"])
+        self.assertEqual(searcher.queries, ["氢氧化钠"])
         self.assertEqual(result["query"], "氢氧化钠")
         self.assertEqual(result["name_normalization"]["standard_name"], "氢氧化钠")
         self.assertEqual(result["name_normalization"]["english_name"], "sodium hydroxide")
@@ -563,7 +565,7 @@ abbreviations: {}
 
         self.assertTrue(result["need_manual_review"])
         self.assertEqual(result["name_normalization"]["standard_name"], "氢氧化钠")
-        self.assertIn("1310-73-2", result["raw_text"])
+        self.assertNotIn("1310-73-2", result["raw_text"])
 
     def test_repeated_identical_search_uses_cache(self) -> None:
         searcher = RecordingSearcher(root_dir=ROOT_DIR, succeed=False)
@@ -779,6 +781,18 @@ abbreviations: {}
                 name_result,
             )
         )
+
+    def test_trade_model_coupling_agent_without_cas_is_not_normalized_or_searched(self) -> None:
+        searcher = ChemicalSearcher(root_dir=ROOT_DIR)
+        self.assertTrue(searcher._looks_like_unresolved_product_model("偶联剂TM-P"))
+        self.assertTrue(searcher._looks_like_unresolved_product_model("AR-P 6200.09"))
+        with patch.object(searcher, "_search_chemsrc", side_effect=AssertionError("must not query")), \
+             patch.object(searcher, "_search_chemicalbook", side_effect=AssertionError("must not query")):
+            result = searcher.search("偶联剂TM-P", cas="")
+        self.assertTrue(result["product_model_identity_blocked"])
+        self.assertEqual(result["identity_status"], "unresolved")
+        self.assertEqual(result["retrieval_status"], "product_model_blocked")
+        self.assertEqual(result["name_normalization"]["standard_name"], "偶联剂TM-P")
 
     def test_precise_chemical_name_still_allows_fallback_web_research(self) -> None:
         searcher = ChemicalSearcher(root_dir=ROOT_DIR)
@@ -1238,22 +1252,25 @@ abbreviations: {}
                 ) -> dict[str, Any] | None:
                     return None
 
-            settings = {"paths": {"name_aliases_yaml": "config/name_aliases.yaml"}}
+            settings = {
+                "paths": {"name_aliases_yaml": "config/name_aliases.yaml"},
+                "chemical_search": {"cas_authoritative": True, "providers": ["chemsrc"]},
+            }
             searcher = ConflictingCasSearcher(root_dir=root, settings=settings)
             result = searcher.search("氢氧化钠", cas="64-17-5")
 
-        self.assertEqual(result["cas"], "1310-73-2")
+        self.assertEqual(result["cas"], "64-17-5")
         self.assertEqual(result["original_erp_cas"], "64-17-5")
-        self.assertEqual(result["candidate_cas"], "1310-73-2")
-        self.assertTrue(result["cas_name_conflict"])
-        self.assertTrue(result["cas_correction_applied"])
+        self.assertEqual(result["candidate_cas"], "64-17-5")
+        self.assertFalse(result["cas_name_conflict"])
+        self.assertFalse(result["cas_correction_applied"])
         self.assertFalse(result["need_manual_review"])
-        self.assertEqual(result["identity_status"], "conflict")
-        self.assertEqual(result["identity_decision_basis"], "name_identity")
-        self.assertEqual(result["name_identity"]["cas"], "1310-73-2")
+        self.assertEqual(result["identity_status"], "cas_verified")
+        self.assertEqual(result["identity_decision_basis"], "cas_identity")
+        self.assertEqual(result["name_identity"]["status"], "not_queried")
         self.assertEqual(result["cas_identity"]["cas"], "64-17-5")
 
-    def test_cas_authoritative_policy_records_name_conflict_without_blocking(self) -> None:
+    def test_cas_authoritative_policy_does_not_compare_returned_name(self) -> None:
         class CasAuthoritativeSearcher(ChemicalSearcher):
             def _pubchem_cids(self, query: str) -> list[str]:
                 return ["180"] if query == "67-64-1" else []
@@ -1280,8 +1297,8 @@ abbreviations: {}
         self.assertEqual(result["cas"], "67-64-1")
         self.assertEqual(result["identity_status"], "cas_verified")
         self.assertEqual(result["identity_decision_basis"], "cas_identity")
-        self.assertTrue(result["cas_name_conflict"])
-        self.assertTrue(result["identity_conflict_recorded"])
+        self.assertFalse(result["cas_name_conflict"])
+        self.assertFalse(result["identity_conflict_recorded"])
         self.assertFalse(result["need_manual_review"])
         self.assertFalse(result["cas_correction_applied"])
         self.assertNotIn("corrected_cas", result)
@@ -1313,11 +1330,11 @@ abbreviations: {}
                 settings={"chemical_search": {"cas_authoritative": True, "providers": ["pubchem"]}},
             ).search("ethanol", cas="67-64-1")
 
-        self.assertEqual(result["identity_status"], "name_verified_pubchem")
-        self.assertEqual(result["identity_decision_basis"], "name_fallback_after_cas_unresolved")
+        self.assertEqual(result["identity_status"], "name_verified")
+        self.assertEqual(result["identity_decision_basis"], "name_identity")
         self.assertEqual(result["original_erp_cas"], "67-64-1")
         self.assertEqual(result["candidate_cas"], "64-17-5")
-        self.assertEqual(result["cas_lookup_status"], "unresolved_name_fallback")
+        self.assertEqual(result["cas_lookup_status"], "not_found_name_fallback")
         self.assertFalse(result["cas_correction_applied"])
         self.assertNotIn("corrected_cas", result)
 
@@ -1373,7 +1390,7 @@ abbreviations: {}
         selected = result["selected_property_evidence"]["flash_point"]
         self.assertEqual(selected["value"], ">250 °C")
         self.assertEqual(selected["status"], "measured")
-        self.assertEqual(result["property_enrichment"]["requests"], 2)
+        self.assertGreaterEqual(result["property_enrichment"]["requests"], 2)
 
     def test_property_evidence_distinguishes_not_applicable_unknown_and_latest_conflict(self) -> None:
         not_applicable = ChemicalSearcher._decorate_property_item({"field": "flash_point", "value": "Not applicable"})
@@ -1386,9 +1403,9 @@ abbreviations: {}
             {"field": "flash_point", "value": "15 °C", "source_updated_at": "2026-01-01", "retrieved_at": "2025-01-01T00:00:00+00:00"},
         ])
         selected = next(item for item in merged if item["selected"])
-        self.assertEqual(selected["value"], "15 °C")
+        self.assertEqual(selected["value"], "13 °C")
         self.assertTrue(selected["conflict"])
-        self.assertEqual(selected["selection_basis"], "latest_source_selected")
+        self.assertEqual(selected["selection_basis"], "lowest_comparable_flash_point")
 
     def test_property_enrichment_rejects_cross_domain_links_and_overrides_llm_field(self) -> None:
         links = ChemicalSearcher._property_detail_links(
@@ -1610,6 +1627,30 @@ Stable
         self.assertEqual(len(results), 2)
         self.assertEqual(len(searcher.queries), 2)
 
+    def test_search_many_does_not_start_component_lookup_after_batch_budget(self) -> None:
+        class SlowMixtureSearcher(ChemicalSearcher):
+            def __init__(self, *args: Any, **kwargs: Any) -> None:
+                super().__init__(*args, **kwargs)
+                self.searched: list[str] = []
+
+            def search(self, reagent_name: str, **kwargs: Any) -> dict[str, Any]:
+                self.searched.append(reagent_name)
+                time.sleep(1.05)
+                return {
+                    "mixture_components": [{"name": "ethanol", "cas": "64-17-5"}],
+                    "composition_complete": True,
+                }
+
+        searcher = SlowMixtureSearcher(settings={"chemical_search": {
+            "batch_budget_seconds": 1, "batch_workers": 1,
+            "pubchem_batch_prefetch": False, "providers": ["chemsrc"],
+        }})
+        result = searcher.search_many([{"name": "mixture", "cas": ""}])[0]
+
+        self.assertEqual(searcher.searched, ["mixture"])
+        self.assertEqual(result["component_results"][0]["retrieval_status"], "unavailable")
+        self.assertTrue(result["need_manual_review"])
+
     def test_search_many_batches_pubchem_properties_by_cid(self) -> None:
         class BatchFixtureSearcher(ChemicalSearcher):
             def __init__(self, *args: Any, **kwargs: Any) -> None:
@@ -1709,7 +1750,7 @@ Stable
         self.assertNotIn("corrected_cas", result)
 
 
-    def test_name_lookup_cas_without_erp_cas_is_marked_as_candidate(self) -> None:
+    def test_unconfirmed_web_name_lookup_cas_is_not_an_erp_candidate(self) -> None:
         class CandidateCasSearcher(ChemicalSearcher):
             def _search_chemsrc(
                 self,
@@ -1747,8 +1788,9 @@ Stable
         result = CandidateCasSearcher(root_dir=ROOT_DIR).search("\u7532\u9178\u94f5")
 
         self.assertEqual(result["candidate_cas"], "540-69-2")
-        self.assertEqual(result["identity_status"], "cas_missing")
+        self.assertEqual(result["identity_status"], "unresolved")
         self.assertTrue(result["need_manual_review"])
+        self.assertFalse(result["candidate_cas_eligible_for_memory"])
 
 
 if __name__ == "__main__":

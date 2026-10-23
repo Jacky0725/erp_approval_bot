@@ -72,6 +72,7 @@ HAZARD_KEYWORDS = [
 class SearchCandidate:
     url: str
     title: str = ""
+    cas: str = ""
 
 
 @dataclass
@@ -132,7 +133,9 @@ class ChemicalSearcher:
             result["budget_seconds"] = max(1.0, min(30.0, float(result.get("budget_seconds", 8))))
         except (TypeError, ValueError):
             result["budget_seconds"] = 8.0
-        result["providers"] = {str(value).strip().lower() for value in result.get("providers", []) if str(value).strip()}
+        result["providers"] = list(dict.fromkeys(
+            str(value).strip().lower() for value in result.get("providers", []) if str(value).strip()
+        ))
         result["fields"] = {str(value).strip() for value in result.get("fields", []) if str(value).strip()}
         return result
 
@@ -147,6 +150,9 @@ class ChemicalSearcher:
         sds_text: str = "",
         erp_is_mixture: bool = False,
     ) -> dict[str, Any]:
+        # Packaging and size metadata are never chemical identity evidence.
+        specification = ""
+        unit = ""
         cache_key = (
             *self._cache_key(reagent_name, cas, specification, unit),
             str(manufacturer or "").strip().lower(),
@@ -158,10 +164,25 @@ class ChemicalSearcher:
             return copy.deepcopy(self._search_cache[cache_key])
 
         name = reagent_name.strip()
-        normalizer = NameNormalizer(settings=self.settings, root_dir=self.root_dir)
-        name_result = normalizer.normalize(raw_name=name, cas=cas)
-        supplied_cas = self._extract_cas(str(cas or ""))
+        raw_erp_cas = self._normalize_cas_input(str(cas or ""))
+        if raw_erp_cas.lower() in {"-", "--", "—", "无", "暂无", "none", "null", "n/a", "na"}:
+            raw_erp_cas = ""
+        supplied_cas = self._extract_cas(raw_erp_cas)
         input_cas = supplied_cas if self._is_valid_cas(supplied_cas) else ""
+        cas_validation_status = "valid" if input_cas else "invalid" if raw_erp_cas else "missing"
+        # A model-style product name without CAS (for example “偶联剂 TM-P”)
+        # cannot be safely generalized into a similarly named single compound.
+        # Do not ask the normalizer model to invent an identity for it.
+        product_model_name = not bool(input_cas) and self._looks_like_unresolved_product_model(name)
+        # A checksum-valid ERP CAS is already the search identity.  LLM name
+        # correction is useful only on the name-fallback path and must never
+        # become a second identity vote against a valid CAS.
+        normalizer = NameNormalizer(
+            settings=self.settings,
+            root_dir=self.root_dir,
+            enable_llm=not bool(input_cas) and not product_model_name,
+        )
+        name_result = normalizer.normalize(raw_name=name, cas=cas)
         name_only_result = (
             normalizer.normalize(raw_name=name, cas="")
             if supplied_cas
@@ -169,13 +190,21 @@ class ChemicalSearcher:
         )
 
         query_name_result = name_only_result if input_cas else name_result
-        cas_no = input_cas or self._extract_cas(str(query_name_result.get("cas") or ""))
+        # A CAS carried by an alias table or LLM normalization is a search hint,
+        # not formal input.  Invalid/missing ERP CAS therefore starts with name
+        # queries and obtains CAS only from a chemical source response.
+        cas_no = input_cas
         standard_name = str(query_name_result.get("standard_name") or "").strip()
         cleaned_name = str(query_name_result.get("cleaned_name") or "").strip()
         english_name = str(query_name_result.get("english_name") or "").strip()
         aliases = [str(value).strip() for value in (query_name_result.get("aliases") or []) if str(value).strip()]
+        normalized_candidates = [
+            str(value).strip() for value in (query_name_result.get("candidate_names") or []) if str(value).strip()
+        ][:3]
         name_result = query_name_result
-        queries = self._query_candidates_compat(cas_no, standard_name, cleaned_name, english_name, aliases)
+        queries = self._query_candidates_compat(
+            cas_no, standard_name, cleaned_name, english_name, [*normalized_candidates, *aliases]
+        )
         # Keep the original ERP spelling as a retrieval candidate.  Cleaning is
         # intentionally conservative and can remove a hydration notation such
         # as "·三水" that Chinese supplier indexes retain.  These are query
@@ -190,6 +219,24 @@ class ChemicalSearcher:
         mixture["catalog_number"] = str(catalog_number or "").strip()
         mixture["is_mixture"] = bool(mixture["is_mixture"] or erp_is_mixture)
 
+        if product_model_name and not str(sds_text or "").strip():
+            manual = self._manual_result(
+                name=name,
+                cas="",
+                reason="商品名/型号未提供 CAS 或供应商 SDS，不能映射为具体化学实体或采用网页相似结果。",
+                name_normalization=name_result,
+            )
+            manual.update(mixture)
+            manual.update({
+                "identity_status": "unresolved",
+                "identity_decision_basis": "product_model_unresolved",
+                "product_model_identity_blocked": True,
+                "lookup_status": "not_attempted",
+                "retrieval_status": "product_model_blocked",
+                "failure_reason": "商品名/型号缺少可验证身份；已禁止名称泛化、外部网页检索及规则证据串用。",
+            })
+            return self._remember_result(cache_key, manual)
+
         if str(sds_text or "").strip():
             sds_result = self._supplier_sds_result(
                 name=name,
@@ -199,7 +246,9 @@ class ChemicalSearcher:
                 catalog_number=catalog_number,
                 name_normalization=name_result,
             )
-            sds_result.update({key: value for key, value in mixture.items() if key not in {"mixture_components"}})
+            for key, value in mixture.items():
+                if key != "mixture_components":
+                    sds_result.setdefault(key, value)
             sds_result["is_mixture"] = bool(
                 sds_result.get("is_mixture") or mixture.get("is_mixture") or len(sds_result.get("mixture_components") or []) > 1
             )
@@ -218,25 +267,17 @@ class ChemicalSearcher:
             manufacturer=str(mixture.get("manufacturer") or ""),
             catalog_number=str(mixture.get("catalog_number") or ""),
         )
-        # A syntactically valid ERP CAS is an explicit business identifier.  When
-        # PubChem resolves it, use that identity before considering a supplier
-        # name match.  This avoids silently replacing ERP's CAS with a similarly
-        # named but different substance.  A name mismatch remains visible in the
-        # audit payload, but is not a review or write gate under the configured
-        # CAS-authoritative policy.
+        cas_explicitly_not_found = False
+        # A checksum-valid ERP CAS is the formal V1 identity.  Resolve it in the
+        # configured supplier-first order.  Returned names are display data;
+        # they are deliberately not compared with the ERP name.
         if input_cas and self._cas_authoritative():
             self._thread_state.lookup_deadline = time.monotonic() + self._lookup_budget_seconds()
-            cas_candidate = self._run_provider(
-                self._search_pubchem,
-                name=input_cas,
-                cas=input_cas,
-                query=input_cas,
-                validation_names=validation_names,
+            cas_candidate, cas_diagnostics = self._search_authoritative_cas(
+                input_cas=input_cas,
+                raw_name=name,
             )
-            if cas_candidate and self._same_cas(
-                input_cas,
-                self._extract_cas(str(cas_candidate.get("candidate_cas") or cas_candidate.get("cas") or "")),
-            ):
+            if cas_candidate:
                 cas_candidate = self._finalize_cas_authoritative_result(
                     cas_candidate,
                     input_cas=input_cas,
@@ -245,7 +286,47 @@ class ChemicalSearcher:
                     name_queries=queries,
                     mixture=mixture,
                 )
+                combined_diagnostics = [*cas_diagnostics, *(cas_candidate.get("provider_results") or [])]
+                cas_candidate["provider_results"] = list({
+                    json.dumps(item, ensure_ascii=False, sort_keys=True): item
+                    for item in combined_diagnostics if isinstance(item, dict)
+                }.values())
                 return self._remember_result(cache_key, cas_candidate, persistent_key)
+            # A transient failure is not proof that the CAS does not exist.
+            # Name fallback is allowed only when every enabled identity source
+            # returned a definitive not-found response.
+            if any(item.get("status") in {"unavailable", "rate_limited"} for item in cas_diagnostics):
+                stale_days = int(((self.settings or {}).get("chemical_search", {}) or {}).get("stale_if_error_days", 180) or 180)
+                stale_result = self._persistent_cache().get_stale(persistent_key, max_age_days=stale_days)
+                if stale_result is not None:
+                    stale_result.update({
+                        "cas_validation_status": "valid",
+                        "lookup_status": "unavailable",
+                        "identity_status": "cas_verified",
+                        "identity_decision_basis": "cas_identity",
+                        "provider_results": cas_diagnostics,
+                    })
+                    return self._remember_result(cache_key, stale_result)
+                manual = self._manual_result(
+                    name=name,
+                    cas=input_cas,
+                    reason="CAS 数据源暂不可用，不能将网络故障解释为 CAS 不存在。",
+                    name_normalization=name_result,
+                )
+                manual.update(mixture)
+                manual.update({
+                    "cas_validation_status": "valid",
+                    "lookup_status": "unavailable",
+                    "identity_status": "unresolved",
+                    "identity_decision_basis": "cas_identity",
+                    "original_erp_cas": input_cas,
+                    "provider_results": cas_diagnostics,
+                })
+                return self._remember_result(cache_key, manual)
+            cas_explicitly_not_found = bool(cas_diagnostics) and all(
+                item.get("status") in {"not_found", "identity_rejected"}
+                for item in cas_diagnostics
+            )
         persistent_result = self._persistent_cache().get(persistent_key)
         persistent_failure_result: dict[str, Any] | None = None
         if persistent_result is not None:
@@ -258,6 +339,19 @@ class ChemicalSearcher:
                 and str(persistent_result.get("failure_reason") or "").strip() == ""
                 and persistent_confidence >= 0.7
             )
+            cached_candidate = self._extract_cas(str(persistent_result.get("candidate_cas") or persistent_result.get("cas") or ""))
+            cached_source = str(persistent_result.get("source") or "").strip()
+            if (
+                has_trusted_success
+                and cached_candidate
+                and cached_source in {"Chemsrc", "ChemicalBook"}
+                and not persistent_result.get("candidate_cas_page_bound", False)
+            ):
+                # Cache rows created before entity-bound CAS extraction are not
+                # safe identity evidence.  Re-fetch them under the stricter parser.
+                has_trusted_success = False
+                persistent_result["candidate_cas_validation_status"] = "legacy_cache_rejected"
+                persistent_result["candidate_cas_validation_reason"] = "历史缓存未记录页面实体绑定 CAS，已拒绝作为身份或 CAS 补齐依据。"
             if has_trusted_success and str(persistent_result.get("raw_text") or "").strip():
                 cached_relevance = self._result_relevance(
                     str(persistent_result["raw_text"]),
@@ -298,6 +392,15 @@ class ChemicalSearcher:
             if compatible_result is not None:
                 break
         if compatible_result is not None:
+            compatible_candidate = self._extract_cas(str(compatible_result.get("candidate_cas") or compatible_result.get("cas") or ""))
+            if (
+                compatible_candidate
+                and str(compatible_result.get("source") or "").strip() in {"Chemsrc", "ChemicalBook"}
+                and not compatible_result.get("candidate_cas_page_bound", False)
+            ):
+                print("Ignoring compatible cache result because it predates page-bound CAS validation.")
+                compatible_result = None
+        if compatible_result is not None:
             cached_raw_text = str(compatible_result.get("raw_text") or "")
             if cached_raw_text:
                 cached_relevance = self._result_relevance(
@@ -313,6 +416,8 @@ class ChemicalSearcher:
         if compatible_result is not None:
             compatible_result["retrieval_status"] = "compatible_cache"
             compatible_result["name_normalization"] = name_result
+            compatible_result["used_llm_search_candidates"] = bool(name_result.get("llm_search_candidates_only"))
+            compatible_result["llm_search_candidates"] = list(name_result.get("candidate_names") or [])[:3]
             compatible_result["query"] = cleaned_name or standard_name or english_name or name
             compatible_result["query_plan"] = {
                 "cleaned_name": cleaned_name,
@@ -327,15 +432,12 @@ class ChemicalSearcher:
                 # candidate_cas field.
                 if candidate_cas:
                     compatible_result["candidate_cas"] = candidate_cas
-                verified_pubchem = (
-                    str(compatible_result.get("source") or "") == "PubChem"
-                    and str(compatible_result.get("pubchem_cid") or "")
-                    and float(compatible_result.get("name_similarity") or 0) >= 0.9
-                    and compatible_result.get("relevance_passed", False)
-                )
-                compatible_result["identity_status"] = "name_verified_pubchem" if verified_pubchem else "cas_missing"
+                verified_name = bool(candidate_cas and self._trusted_name_verification(compatible_result))
+                compatible_result["identity_status"] = "name_verified" if verified_name else "unresolved"
                 compatible_result["identity_decision_basis"] = "name_identity"
-                compatible_result["need_manual_review"] = not verified_pubchem
+                compatible_result["need_manual_review"] = not verified_name
+                compatible_result["cas_validation_status"] = cas_validation_status
+                compatible_result["lookup_status"] = "found" if verified_name else "not_found"
             compatible_result.update(mixture)
             print("Chemical lookup result: source=compatible_cache retrieval=compatible_cache")
             return self._remember_result(cache_key, compatible_result, persistent_key)
@@ -380,7 +482,7 @@ class ChemicalSearcher:
         cas_identity_result: dict[str, Any] | None = None
         def resolve_cas_identity() -> dict[str, Any] | None:
             nonlocal cas_identity_result
-            if cas_identity_result is not None or not cas_no:
+            if cas_identity_result is not None or not cas_no or cas_explicitly_not_found:
                 return cas_identity_result
             cas_validation_names = self._validation_names(
                 cas_no, standard_name, cleaned_name, english_name, aliases
@@ -448,18 +550,19 @@ class ChemicalSearcher:
                     if self._same_cas(input_cas, name_candidate_cas):
                         result["identity_status"] = "verified"
                         result["identity_decision_basis"] = "name_and_cas"
-                    elif self._cas_authoritative():
-                        # This path is reached only after the direct PubChem CAS
-                        # lookup did not resolve. Retain ERP CAS and use the
-                        # verified name result as a documented fallback.
+                    elif self._cas_authoritative() and cas_explicitly_not_found:
+                        verified_name = self._trusted_name_verification(result)
                         result.update({
                             "candidate_cas": name_candidate_cas,
                             "original_erp_cas": input_cas,
-                            "cas_lookup_status": "unresolved_name_fallback",
-                            "identity_status": "name_only",
-                            "identity_decision_basis": "name_fallback_after_cas_unresolved",
+                            "cas_lookup_status": "not_found_name_fallback",
+                            "cas_validation_status": "valid",
+                            "lookup_status": "found" if verified_name else "not_found",
+                            "identity_status": "name_verified" if verified_name else "unresolved",
+                            "identity_decision_basis": "name_identity",
                             "cas_correction_candidate": False,
                             "cas_correction_applied": False,
+                            "need_manual_review": not verified_name,
                         })
                         result.pop("corrected_cas", None)
                     else:
@@ -523,6 +626,8 @@ class ChemicalSearcher:
                         result["cas_correction_reason"],
                     )
                 result["name_normalization"] = name_result
+                result["used_llm_search_candidates"] = bool(name_result.get("llm_search_candidates_only"))
+                result["llm_search_candidates"] = list(name_result.get("candidate_names") or [])[:3]
                 result["query"] = query
                 result["query_plan"] = {
                     "cleaned_name": cleaned_name,
@@ -533,7 +638,7 @@ class ChemicalSearcher:
                 result["name_identity"] = self._identity_snapshot(result, query_kind="name")
                 result["cas_identity"] = self._identity_snapshot(cas_identity_result, query_kind="cas")
                 result.update(mixture)
-                if mixture["is_mixture"]:
+                if mixture["is_mixture"] and not result.get("composition_complete", False):
                     result["need_manual_review"] = True
                     result["failure_reason"] = self._append_reason(
                         str(result.get("failure_reason") or ""),
@@ -572,16 +677,28 @@ class ChemicalSearcher:
                         # Preserve the completed name-normalization result, then make
                         # the missing ERP CAS explicit for review and downstream writes.
                         result["candidate_cas"] = candidate_cas
-                        verified_pubchem = (
-                            str(result.get("source") or "") == "PubChem"
-                            and str(result.get("pubchem_cid") or "")
-                            and float(result.get("name_similarity") or 0) >= 0.9
-                            and result.get("relevance_passed", False)
-                            and not mixture["is_mixture"]
+                        verified_name = bool(
+                            self._trusted_name_verification(result)
+                            and result.get("identity_status") != "ambiguous"
+                            and (not mixture["is_mixture"] or result.get("composition_complete", False))
                         )
-                        result["identity_status"] = "name_verified_pubchem" if verified_pubchem else "cas_missing"
+                        result["identity_status"] = "name_verified" if verified_name else "unresolved"
                         result["identity_decision_basis"] = "name_identity"
-                        result["need_manual_review"] = not verified_pubchem
+                        result["need_manual_review"] = not verified_name
+                        result["cas_validation_status"] = cas_validation_status
+                        result["lookup_status"] = "found" if verified_name else "not_found"
+                        # Name verification and ERP CAS promotion are separate:
+                        # web pages additionally need a page-bound CAS and a
+                        # PubChem confirmation.  LLM names remain search leads.
+                        result = self._confirm_candidate_cas_for_memory(
+                            result,
+                            validation_names=validation_names,
+                        )
+                        # Keep the existing missing-CAS review gate. An explicitly
+                        # invalid ERP CAS must not veto independently verified name evidence.
+                        if not result.get("candidate_cas_source_verified") and cas_validation_status == "missing":
+                            result["identity_status"] = "unresolved"
+                            result["need_manual_review"] = True
                 print(
                     "Chemical lookup result: "
                     f"source={result.get('source') or 'none'} retrieval={result.get('retrieval_status') or 'fresh'} "
@@ -673,6 +790,8 @@ class ChemicalSearcher:
         )
         manual.update(mixture)
         manual["identity_status"] = "unresolved"
+        manual["cas_validation_status"] = cas_validation_status
+        manual["lookup_status"] = "unavailable" if unavailable else "not_found"
         manual["retrieval_status"] = "unavailable" if unavailable else "not_found"
         manual["query_plan"] = {
             "cleaned_name": cleaned_name,
@@ -680,6 +799,8 @@ class ChemicalSearcher:
             "erp_cas": input_cas,
             "queries_attempted": attempted,
         }
+        manual["used_llm_search_candidates"] = bool(name_result.get("llm_search_candidates_only"))
+        manual["llm_search_candidates"] = list(name_result.get("candidate_names") or [])[:3]
         manual["identity_enrichment"] = enrichment
         manual["manual_search_urls"] = self._manual_search_urls(search_name, cas_no)
         print(
@@ -826,6 +947,13 @@ class ChemicalSearcher:
                     "name_identity": self._identity_snapshot(result, query_kind="enriched_identity"),
                     "cas_identity": self._identity_snapshot(result, query_kind="enriched_cas"),
                 })
+                result = self._confirm_candidate_cas_for_memory(
+                    result,
+                    validation_names=validation_names,
+                )
+                if not result.get("candidate_cas_source_verified"):
+                    result["identity_status"] = "unresolved"
+                    result["need_manual_review"] = True
                 result.update(mixture)
                 print(
                     "Chemical identity enrichment verified: "
@@ -849,9 +977,62 @@ class ChemicalSearcher:
         }
 
     def _cas_authoritative(self) -> bool:
-        """Whether a PubChem-resolved, checksum-valid ERP CAS is authoritative."""
+        """Whether a source-resolved, checksum-valid ERP CAS is authoritative."""
         settings = (self.settings or {}).get("chemical_search", {}) or {}
         return bool(settings.get("cas_authoritative", False))
+
+    def _search_authoritative_cas(
+        self,
+        *,
+        input_cas: str,
+        raw_name: str,
+    ) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
+        """Resolve a valid ERP CAS without using name similarity as a gate."""
+        diagnostics: list[dict[str, Any]] = []
+        for provider in self._identity_provider_chain():
+            candidate = self._run_provider(
+                provider,
+                name=input_cas,
+                cas=input_cas,
+                query=input_cas,
+                validation_names=[],
+            )
+            diagnostic = dict(getattr(self._thread_state, "last_provider_result", {}) or {})
+            if diagnostic:
+                diagnostics.append(diagnostic)
+            if not candidate:
+                continue
+            returned_cas = self._extract_cas(
+                str(candidate.get("candidate_cas") or candidate.get("cas") or "")
+            )
+            if not self._same_cas(input_cas, returned_cas):
+                if diagnostics:
+                    diagnostics[-1]["status"] = "identity_rejected"
+                    diagnostics[-1]["reason"] = f"returned_cas:{returned_cas or 'missing'}"
+                continue
+            candidate["actual_query_key"] = input_cas
+            candidate["website_returned_name"] = str(
+                candidate.get("matched_site_name") or candidate.get("name") or ""
+            ).strip()
+            return candidate, diagnostics
+        return None, diagnostics
+
+    def _identity_provider_chain(self) -> list[Any]:
+        """Identity sources for V1; NIST is property-only."""
+        enabled = (self.settings or {}).get("chemical_search", {}) or {}
+        configured = {
+            str(value or "").strip().lower()
+            for value in enabled.get("providers", ["chemsrc", "chemicalbook", "pubchem"])
+        }
+        providers: list[Any] = []
+        for key, flag, provider in (
+            ("chemsrc", "chemsrc_enabled", self._search_chemsrc),
+            ("chemicalbook", "chemicalbook_enabled", self._search_chemicalbook),
+            ("pubchem", "pubchem_enabled", self._search_pubchem),
+        ):
+            if key in configured and bool(enabled.get(flag, True)):
+                providers.append(provider)
+        return providers
 
     def _finalize_cas_authoritative_result(
         self,
@@ -863,27 +1044,21 @@ class ChemicalSearcher:
         name_queries: list[str],
         mixture: dict[str, Any],
     ) -> dict[str, Any]:
-        """Mark a PubChem CAS lookup as the formal identity without mutating ERP CAS."""
+        """Mark a source CAS lookup as the formal identity without name voting."""
         finalized = self._enrich_missing_official_fields(dict(result))
-        matched_name = str(finalized.get("matched_site_name") or finalized.get("name") or "").strip()
-        name_similarity = self._normalize_confidence(finalized.get("name_similarity"))
-        name_is_informative = not self._non_informative_name_text(
-            raw_name,
-            name_result.get("cleaned_name", ""),
-            name_result.get("standard_name", ""),
-        )
-        name_conflict = bool(name_is_informative and name_similarity < 0.82)
         finalized.update({
             "cas": input_cas,
             "candidate_cas": input_cas,
             "original_erp_cas": input_cas,
+            "cas_validation_status": "valid",
+            "lookup_status": "found",
             "identity_status": "cas_verified",
             "identity_decision_basis": "cas_identity",
             "relevance_passed": True,
             "need_manual_review": False,
             "cas_matched": True,
-            "cas_name_conflict": name_conflict,
-            "identity_conflict_recorded": name_conflict,
+            "cas_name_conflict": False,
+            "identity_conflict_recorded": False,
             "name_identity": {
                 "query_kind": "name",
                 "name": raw_name,
@@ -904,22 +1079,12 @@ class ChemicalSearcher:
                 "cas_authoritative": True,
             },
         })
-        # CAS is not corrected from a name result under this policy.  Preserve
-        # both values for traceability when the recorded name does not agree.
         finalized.pop("corrected_cas", None)
+        finalized.pop("identity_conflict_reason", None)
         finalized["cas_correction_candidate"] = False
         finalized["cas_correction_applied"] = False
-        if name_conflict:
-            finalized["identity_conflict_reason"] = (
-                f"ERP 名称“{raw_name}”与 PubChem CAS {input_cas} 对应物质“{matched_name or '-'}”不一致；"
-                "按已验证 CAS 作为正式物化性质和 ERP 写入依据，冲突仅记录审计。"
-            )
-            finalized["failure_reason"] = self._append_reason(
-                str(finalized.get("failure_reason") or ""),
-                finalized["identity_conflict_reason"],
-            )
         finalized.update(mixture)
-        if mixture.get("is_mixture"):
+        if mixture.get("is_mixture") and not finalized.get("composition_complete", False):
             finalized["need_manual_review"] = True
             finalized["failure_reason"] = self._append_reason(
                 str(finalized.get("failure_reason") or ""),
@@ -928,7 +1093,7 @@ class ChemicalSearcher:
         return finalized
 
     def _provider_chain(self) -> list[Any]:
-        """Select the configured historical Chinese-name chain or PubChem fallback."""
+        """Select V1 identity sources. NIST is never an identity provider."""
         cls = type(self)
         legacy_overridden = (
             cls._search_chemsrc is not ChemicalSearcher._search_chemsrc
@@ -938,12 +1103,11 @@ class ChemicalSearcher:
         if legacy_overridden and not pubchem_overridden:
             return [self._search_chemsrc, self._search_chemicalbook]
         search_settings = (self.settings or {}).get("chemical_search", {}) or {}
-        configured = search_settings.get("providers") or ["chemsrc", "chemicalbook", "pubchem", "nist"]
+        configured = search_settings.get("providers") or ["chemsrc", "chemicalbook", "pubchem"]
         provider_map = {
             "chemsrc": ("chemsrc_enabled", self._search_chemsrc),
             "chemicalbook": ("chemicalbook_enabled", self._search_chemicalbook),
             "pubchem": ("pubchem_enabled", self._search_pubchem),
-            "nist": ("nist_enabled", self._search_nist),
         }
         providers: list[Any] = []
         for item in configured:
@@ -1082,12 +1246,32 @@ class ChemicalSearcher:
                     continue
                 component_key = (*self._cache_key(component_name, component_cas), "", "", "")
                 if component_key not in completed:
-                    completed[component_key] = self.search(component_name, cas=component_cas)
+                    if time.monotonic() - started >= batch_budget:
+                        completed[component_key] = self._manual_result(
+                            name=component_name,
+                            cas=component_cas,
+                            reason="批量查询预算已用尽；混合物组分需人工复核。",
+                        )
+                        completed[component_key]["retrieval_status"] = "unavailable"
+                    else:
+                        completed[component_key] = self.search(component_name, cas=component_cas)
                 component_result = copy.deepcopy(completed[component_key])
                 component_result["concentration"] = str(component.get("concentration") or "")
                 component_results.append(component_result)
             if component_results:
                 result["component_results"] = component_results
+                reliable = all(
+                    str(item.get("identity_status") or "") in {"verified", "cas_verified", "name_verified"}
+                    for item in component_results
+                )
+                result["composition_complete"] = bool(result.get("composition_complete") and reliable)
+                result["mixture_classification_basis"] = "highest_rule_priority_of_confirmed_components"
+                if not reliable:
+                    result["need_manual_review"] = True
+                    result["failure_reason"] = self._append_reason(
+                        str(result.get("failure_reason") or ""),
+                        "至少一个混合物组分身份未由化学来源确认。",
+                    )
         results = [copy.deepcopy(completed[key]) for key in ordered_keys]
         provider_parts: list[str] = []
         for provider, metrics in sorted(self._provider_metrics.items()):
@@ -1529,6 +1713,68 @@ class ChemicalSearcher:
             and self._normalize_confidence(search_result.get("source_confidence")) >= 0.86
         )
 
+    def _confirm_candidate_cas_for_memory(
+        self,
+        result: dict[str, Any],
+        *,
+        validation_names: list[str],
+    ) -> dict[str, Any]:
+        """Require a page-bound CAS and an independent confirmation before ERP fill."""
+        updated = dict(result)
+        candidate = self._extract_cas(str(updated.get("candidate_cas") or updated.get("cas") or ""))
+        source = str(updated.get("source") or "").strip()
+        if not candidate or not self._is_valid_cas(candidate):
+            updated.update({
+                "candidate_cas_source_verified": False,
+                "candidate_cas_eligible_for_memory": False,
+                "candidate_cas_validation_status": "rejected",
+                "candidate_cas_validation_reason": "候选 CAS 缺失、格式错误或校验位错误。",
+            })
+            return updated
+        if source == "PubChem":
+            updated.update({
+                "candidate_cas_source_verified": True,
+                "candidate_cas_eligible_for_memory": True,
+                "candidate_cas_validation_status": "pubchem_confirmed",
+                "candidate_cas_confirmation_source": "PubChem",
+                "candidate_cas_confirmation_url": updated.get("url") or "",
+            })
+            return updated
+        if not updated.get("candidate_cas_page_bound", False):
+            updated.update({
+                "candidate_cas_source_verified": False,
+                "candidate_cas_eligible_for_memory": False,
+                "candidate_cas_validation_status": "rejected",
+                "candidate_cas_validation_reason": "网页 CAS 未能从同一详情记录的明确 CAS 字段或结构化数据确认。",
+            })
+            return updated
+        confirmation = self._run_provider(
+            self._search_pubchem,
+            name=candidate,
+            cas=candidate,
+            query=candidate,
+            validation_names=validation_names,
+        )
+        confirmed_cas = self._extract_cas(str((confirmation or {}).get("candidate_cas") or (confirmation or {}).get("cas") or ""))
+        if confirmation and self._same_cas(candidate, confirmed_cas):
+            updated.update({
+                "candidate_cas_source_verified": True,
+                "candidate_cas_eligible_for_memory": True,
+                "candidate_cas_validation_status": "cross_source_confirmed",
+                "candidate_cas_confirmation_source": source,
+                "candidate_cas_confirmation_url": updated.get("url") or "",
+                "candidate_cas_secondary_confirmation_source": "PubChem",
+                "candidate_cas_secondary_confirmation_url": confirmation.get("url") or "",
+            })
+            return updated
+        updated.update({
+            "candidate_cas_source_verified": False,
+            "candidate_cas_eligible_for_memory": False,
+            "candidate_cas_validation_status": "rejected",
+            "candidate_cas_validation_reason": "网页候选 CAS 未获 PubChem 独立确认。",
+        })
+        return updated
+
     @staticmethod
     def _identity_elements(value: str) -> set[str]:
         """Return a small, conservative set of element identities in a name.
@@ -1775,14 +2021,22 @@ class ChemicalSearcher:
             self._log_source_circuit_skip(source, remaining_seconds)
             return None
         self._begin_provider_attempt()
-        started = time.monotonic()
+        queued_started = time.monotonic()
         original_deadline = getattr(self._thread_state, "lookup_deadline", None)
-        provider_deadline = time.monotonic() + self._provider_budget_seconds(source)
-        if original_deadline is not None:
-            provider_deadline = min(float(original_deadline), provider_deadline)
-        self._thread_state.lookup_deadline = provider_deadline
+        effective_deadline = float(original_deadline) if original_deadline is not None else None
         try:
             with self._source_slot(source):
+                # Source slots deliberately serialize Chemsrc.  Queueing for a
+                # respectful rate limit is not a failed lookup and must not
+                # consume the request-time budget of the item waiting its turn.
+                queue_wait = time.monotonic() - queued_started
+                if effective_deadline is not None:
+                    effective_deadline += queue_wait
+                provider_deadline = time.monotonic() + self._provider_budget_seconds(source)
+                if effective_deadline is not None:
+                    provider_deadline = min(effective_deadline, provider_deadline)
+                self._thread_state.lookup_deadline = provider_deadline
+                started = time.monotonic()
                 result = provider(name=name, cas=cas, query=query, validation_names=validation_names)
         finally:
             if original_deadline is None:
@@ -1791,13 +2045,19 @@ class ChemicalSearcher:
                 except AttributeError:
                     pass
             else:
-                self._thread_state.lookup_deadline = original_deadline
-        elapsed_ms = int((time.monotonic() - started) * 1000)
+                self._thread_state.lookup_deadline = effective_deadline
+        elapsed_ms = int((time.monotonic() - queued_started) * 1000)
         failure_kind = self._provider_failure_kind()
-        provider_status = "success" if result else ("unavailable" if self._failure_counts_toward_circuit(failure_kind) else "not_found")
+        if result:
+            provider_status = "success"
+        elif failure_kind == "http_error_429":
+            provider_status = "rate_limited"
+        else:
+            provider_status = "unavailable" if self._failure_counts_toward_circuit(failure_kind) else "not_found"
         provider_result = {
             "provider": source,
             "status": provider_status,
+            "failure_kind": failure_kind,
             "attempts": int(getattr(self._thread_state, "fetch_attempts", 0) or 0),
             "elapsed_ms": elapsed_ms,
         }
@@ -2292,6 +2552,23 @@ class ChemicalSearcher:
         )
 
     @staticmethod
+    def _looks_like_unresolved_product_model(value: str) -> bool:
+        """Detect trade-name/model tokens that are not chemical identities."""
+        text = str(value or "").strip()
+        if not text:
+            return False
+        # Preserve real chemical names such as “3-氨丙基三甲氧基硅烷”.
+        # Block a standalone Latin model after a product type and generic
+        # catalogue/model forms such as “AR-P 6200.09”.
+        coupling_model = bool(re.search(
+            r"偶联剂\s*[A-Za-z]{1,8}(?:[-_/][A-Za-z0-9]{1,12}|\d[A-Za-z0-9-]*)", text
+        ))
+        catalogue_model = bool(re.fullmatch(
+            r"[A-Za-z]{1,8}(?:[-_][A-Za-z0-9]{1,16})+(?:\s+\d+(?:\.\d+){1,3})?", text
+        ))
+        return coupling_model or catalogue_model
+
+    @staticmethod
     def _looks_like_precise_chemical_name(value: str) -> bool:
         text = str(value or "").strip()
         if len(text) < 3:
@@ -2378,7 +2655,7 @@ class ChemicalSearcher:
         name_result: dict[str, Any],
     ) -> dict[str, Any]:
         concentration = str(name_result.get("concentration") or "").strip()
-        text = re.sub(r"\s+", "", f"{raw_name} {cleaned_name} {specification}").lower()
+        text = re.sub(r"\s+", "", f"{raw_name} {cleaned_name}").lower()
         mixture_tokens = (
             "混合物", "混合液", "溶液", "分散剂", "清洗剂", "润湿剂", "润滑液",
             "油品", "机油", "树脂", "涂料", "色浆", "胶水", "添加剂", "助剂",
@@ -2460,17 +2737,18 @@ class ChemicalSearcher:
 
         result = self._result(name=name, cas=cas, source=source_label, url=source_url, raw_text=text)
         result.update({
-            "identity_status": "verified" if (manufacturer and catalog_number) else "name_only",
+            "identity_status": "verified" if (not incomplete and all(self._is_valid_cas(str(item.get('cas') or '')) for item in components)) else "unresolved",
             "retrieval_status": "local",
             "relevance_passed": True,
             "need_manual_review": incomplete,
             "failure_reason": "SDS 组成不完整或含保密组分，按已知最高风险输出并转人工复核。" if incomplete else "",
             "name_normalization": name_normalization,
-            "is_mixture": len(components) > 1,
+            "is_mixture": bool(len(components) > 1 or self._mixture_metadata(name, name, "", name_normalization).get("is_mixture")),
             "manufacturer": str(manufacturer or "").strip(),
             "catalog_number": str(catalog_number or "").strip(),
             "mixture_components": components,
             "composition_complete": not incomplete,
+            "mixture_classification_basis": "highest_rule_priority_of_confirmed_components" if not incomplete else "unknown_or_incomplete_composition",
             "evidence_items": evidence_items,
             "query_plan": {
                 "cleaned_name": str(name_normalization.get("cleaned_name") or ""),
@@ -2853,6 +3131,9 @@ class ChemicalSearcher:
                 for item in merged
                 if item.get("selected") and str(item.get("field") or "") in config["fields"]
             }
+            enriched["selected_toxicity_evidence"] = [
+                item for item in merged if item.get("field") == "toxicity" and item.get("selected")
+            ]
             enriched["property_enrichment"] = {
                 "enabled": True,
                 "requests": 0,
@@ -2865,38 +3146,94 @@ class ChemicalSearcher:
         started = time.monotonic()
         state = {"requests": 0, "max_requests": config["max_requests"], "deadline": started + config["budget_seconds"]}
         diagnostics: list[dict[str, Any]] = []
-        providers = config["providers"]
+        providers = list(config["providers"])
+        source_key = str(enriched.get("source") or "").strip().lower()
 
-        # The initial PubChem request reads Safety and Hazards. A separate
-        # physical-properties view is only requested when a relevant field is missing.
+        # PubChem's identity response contains Safety and Hazards; its physical
+        # property view is a distinct API heading and must still be queried
+        # before moving on to NIST.
         pubchem_cid = str(enriched.get("pubchem_cid") or "").strip()
-        if pubchem_cid and "pubchem" in providers and self._enrichment_request_allowed(state):
+        if source_key == "pubchem" and pubchem_cid and self._enrichment_request_allowed(state):
             items, diagnostic = self._pubchem_physical_evidence(pubchem_cid, state)
             evidence.extend(items)
             diagnostics.append(diagnostic)
 
-        missing = self._missing_property_fields(evidence, config["fields"])
-        if "boiling_point" in missing and "nist" in providers and self._enrichment_request_allowed(state):
+        # First consume the verified source's same-record detail links.
+        for url in list(dict.fromkeys(str(value).split("#", 1)[0] for value in enriched.get("property_detail_links") or [])):
+            if not self._enrichment_request_allowed(state):
+                break
             self._enrichment_request_started(state)
-            items, diagnostic = self._nist_evidence(verified_cas)
+            items, diagnostic = self._linked_property_evidence(url=url, parent=enriched, verified_cas=verified_cas)
             evidence.extend(items)
             diagnostics.append(diagnostic)
 
-        # Supplier sites are only followed from the already identity-verified
-        # detail page. No new site search or browser interaction is introduced.
-        source_key = str(enriched.get("source") or "").strip().lower()
-        if source_key in providers:
-            for url in enriched.get("property_detail_links") or []:
+        # Fill only still-missing fields, in the configured source order after
+        # the identity source.  A source that already supplied a field prevents
+        # later network calls for that field.
+        start_index = providers.index(source_key) + 1 if source_key in providers else 0
+        for provider_key in providers[start_index:]:
+            missing = self._missing_property_fields(evidence, config["fields"])
+            if not missing or not self._enrichment_request_allowed(state):
+                break
+            if provider_key == "nist":
+                if "boiling_point" not in missing:
+                    continue
+                self._enrichment_request_started(state)
+                items, diagnostic = self._nist_evidence(verified_cas)
+                evidence.extend(items)
+                diagnostics.append(diagnostic)
+                continue
+            provider = {
+                "chemsrc": self._search_chemsrc,
+                "chemicalbook": self._search_chemicalbook,
+                "pubchem": self._search_pubchem,
+            }.get(provider_key)
+            if provider is None:
+                continue
+            self._enrichment_request_started(state)
+            supplemental = self._run_provider(
+                provider,
+                name=verified_cas,
+                cas=verified_cas,
+                query=verified_cas,
+                validation_names=[],
+            )
+            diagnostic = dict(getattr(self._thread_state, "last_provider_result", {}) or {})
+            if diagnostic:
+                diagnostic["provider"] = f"{diagnostic.get('provider')} property enrichment"
+                diagnostics.append(diagnostic)
+            if not supplemental:
+                continue
+            supplemental_items = self._decorate_property_evidence(list(supplemental.get("evidence_items") or []))
+            evidence.extend(
+                item for item in supplemental_items
+                if str(item.get("field") or "") not in config["fields"]
+                or str(item.get("field") or "") in missing
+            )
+            if supplemental.get("chemsrc_sections") and not enriched.get("chemsrc_sections"):
+                enriched["chemsrc_sections"] = supplemental["chemsrc_sections"]
+            for link in list(dict.fromkeys(str(value).split("#", 1)[0] for value in supplemental.get("property_detail_links") or [])):
                 if not self._enrichment_request_allowed(state):
                     break
                 self._enrichment_request_started(state)
-                items, diagnostic = self._linked_property_evidence(
-                    url=str(url), parent=enriched, verified_cas=verified_cas,
+                items, linked_diagnostic = self._linked_property_evidence(
+                    url=link, parent=supplemental, verified_cas=verified_cas,
                 )
-                evidence.extend(items)
-                diagnostics.append(diagnostic)
-                if not self._missing_property_fields(evidence, config["fields"]):
-                    break
+                evidence.extend(
+                    item for item in items
+                    if str(item.get("field") or "") not in config["fields"]
+                    or str(item.get("field") or "") in missing
+                )
+                diagnostics.append(linked_diagnostic)
+            pubchem_cid = str(supplemental.get("pubchem_cid") or "").strip()
+            if provider_key == "pubchem" and pubchem_cid and self._enrichment_request_allowed(state):
+                items, physical_diagnostic = self._pubchem_physical_evidence(pubchem_cid, state)
+                evidence.extend(
+                    item for item in items
+                    if str(item.get("field") or "") not in config["fields"]
+                    or str(item.get("field") or "") in missing
+                )
+                diagnostics.append(physical_diagnostic)
 
         merged = self._merge_property_evidence(evidence)
         selected = {
@@ -2906,6 +3243,9 @@ class ChemicalSearcher:
         }
         enriched["evidence_items"] = merged
         enriched["selected_property_evidence"] = selected
+        enriched["selected_toxicity_evidence"] = [
+            item for item in merged if item.get("field") == "toxicity" and item.get("selected")
+        ]
         enriched["property_enrichment"] = {
             "enabled": True,
             "requests": state["requests"],
@@ -2989,14 +3329,250 @@ class ChemicalSearcher:
         if not raw_text or not self._property_page_identity_matches(raw_text, parent, verified_cas):
             return [], {"provider": f"{source} property enrichment", "status": "identity_rejected", "attempts": 1, "elapsed_ms": int((time.monotonic() - started) * 1000)}
         source_updated_at = self._page_updated_at(raw_text) or self._response_metadata_for(url).get("last_modified", "")
-        items = self._chemsrc_chinese_property_evidence(
-            raw_html,
-            source_url=url,
-            source_updated_at=source_updated_at,
-        )
+        items: list[dict[str, Any]] = []
+        if source.lower() == "chemsrc":
+            items, sections = self._chemsrc_full_page_evidence(
+                raw_html,
+                source_url=url.split("#", 1)[0],
+                source_updated_at=source_updated_at,
+            )
+            if sections:
+                parent["chemsrc_sections"] = sections
+        if not items:
+            items = self._chemsrc_chinese_property_evidence(
+                raw_html,
+                source_url=url,
+                source_updated_at=source_updated_at,
+            )
         if not items:
             items = self._property_evidence_from_text(raw_text, source=source, source_url=url, source_updated_at=source_updated_at)
         return items, {"provider": f"{source} property enrichment", "status": "success" if items else "not_found", "attempts": 1, "elapsed_ms": int((time.monotonic() - started) * 1000)}
+
+    @classmethod
+    def _chemsrc_full_page_evidence(
+        cls,
+        page_html: str,
+        *,
+        source_url: str,
+        source_updated_at: str = "",
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        """Parse the server-rendered Chemsrc detail document once.
+
+        `#wuHuaDiv`, `#MSDSDiv`, and `#duXinDiv` are anchors in one HTML
+        document.  The raw section text is retained for audit while selected
+        rows are also emitted as normal field evidence.
+        """
+        parsed_url = urlparse(str(source_url or ""))
+        if not (parsed_url.hostname and parsed_url.hostname.lower().endswith("chemsrc.com") and "/cas/" in parsed_url.path.lower()):
+            return [], {}
+
+        retrieved_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        physical_html = cls._html_section_by_id(page_html, "wuHuaDiv")
+        msds_html = cls._html_section_by_id(page_html, "MSDSDiv") or cls._html_section_by_id(page_html, "MSDSTbl")
+        toxicity_html = cls._html_section_by_id(page_html, "duXinDiv") or cls._html_section_by_id(page_html, "duXinTbl")
+        safety_html = cls._html_section_by_id(page_html, "anQuanDiv") or cls._section_containing_heading(page_html, ("安全信息", "安全"))
+
+        physical_rows = cls._html_table_rows(physical_html)
+        physical_text = cls._html_to_text(physical_html)
+        msds_text = cls._html_to_text(msds_html)
+        toxicity_text = cls._html_to_text(toxicity_html)
+        safety_text = cls._html_to_text(safety_html)
+        msds_sections = cls._split_msds_sections(msds_text)
+        sections: dict[str, Any] = {
+            "physicochemical": {"rows": physical_rows, "raw_text": physical_text},
+            "msds": {"sections": msds_sections, "raw_text": msds_text},
+            "toxicology_ecology": {"raw_text": toxicity_text},
+            "safety": {"raw_text": safety_text},
+            "source_url": source_url.split("#", 1)[0],
+            "retrieved_at": retrieved_at,
+        }
+
+        items: list[dict[str, Any]] = []
+        field_labels = {
+            "闪点": "flash_point", "沸点": "boiling_point", "熔点": "melting_point",
+            "密度": "density", "分子式": "molecular_formula", "分子量": "molecular_weight",
+            "精确质量": "exact_mass", "蒸汽压": "vapor_pressure", "蒸气压": "vapor_pressure",
+            "折射率": "refractive_index", "外观": "appearance", "外观性状": "appearance",
+            "溶解性": "solubility", "稳定性": "stability", "储存条件": "storage_conditions",
+            "logp": "logp", "psa": "psa", "inchikey": "inchikey", "smiles": "smiles",
+        }
+
+        def add(field_name: str, value: str, section: str, *, unit: str = "", extra: dict[str, Any] | None = None) -> None:
+            value = re.sub(r"\s+", " ", str(value or "")).strip()
+            if not value:
+                return
+            record: dict[str, Any] = {
+                "field": field_name,
+                "value": value[:1200],
+                "raw_value": value[:1200],
+                "normalized_value": value[:1200],
+                "unit": unit,
+                "source": "Chemsrc",
+                "source_url": source_url.split("#", 1)[0],
+                "source_section": section,
+                "source_updated_at": source_updated_at,
+                "source_type": "static_dom_page",
+                "retrieved_at": retrieved_at,
+            }
+            if extra:
+                record.update(extra)
+            items.append(cls._decorate_property_item(record))
+
+        for label, value in physical_rows.items():
+            normalized_label = re.sub(r"[\s:：]", "", label).lower()
+            field_name = next((field for token, field in field_labels.items() if token in normalized_label), "")
+            if field_name:
+                add(field_name, value, f"wuHuaDiv/{label}")
+
+        # Section 9 may repeat physical values with different test conditions.
+        section_nine = msds_sections.get("9", "")
+        for label, field_name in (("闪点", "flash_point"), ("沸点", "boiling_point"), ("熔点", "melting_point")):
+            for match in re.finditer(rf"{label}\s*[:：]?\s*([^；;。]{{1,100}})", section_nine):
+                add(field_name, match.group(1), f"MSDS 第9部分/{label}")
+
+        # Preserve all 16 MSDS sections as traceable evidence.  Only sections
+        # relevant to rules are additionally mapped to typed fields.
+        for number, text_value in msds_sections.items():
+            add("msds_section", text_value, f"MSDS 第{number}部分", extra={"section_number": number})
+        for number, field_name in (("5", "explosive_risk"), ("10", "reactivity"), ("11", "toxicity"), ("12", "ecotoxicity"), ("14", "transport_hazard")):
+            if msds_sections.get(number):
+                add(field_name, msds_sections[number], f"MSDS 第{number}部分")
+
+        endpoints = cls._toxicity_endpoints(toxicity_text)
+        sections["toxicology_ecology"]["endpoints"] = endpoints
+        for endpoint in endpoints:
+            add("toxicity", endpoint["raw"], "duXinDiv/毒理生态", extra=endpoint)
+
+        safety_values = cls._safety_values(safety_text)
+        sections["safety"].update(safety_values)
+        for key, value in safety_values.items():
+            if value:
+                add("ghs_classification" if key not in {"un_number", "packing_group"} else "transport_hazard", str(value), f"安全/{key}")
+
+        # JSON-LD is supplementary: it can add values but never suppresses DOM.
+        items.extend(cls._chemsrc_chinese_property_evidence(
+            page_html,
+            source_url=source_url,
+            source_updated_at=source_updated_at,
+        ))
+        present_fields = {str(item.get("field") or "") for item in items}
+        for field_name in (
+            "flash_point", "boiling_point", "toxicity", "ghs_classification",
+            "corrosive", "oxidizing", "flammable", "water_reactive", "explosive_risk",
+        ):
+            if field_name in present_fields:
+                continue
+            items.append({
+                "field": field_name,
+                "value": "",
+                "raw_value": "",
+                "normalized_value": "",
+                "unit": "",
+                "status": "unknown",
+                "source": "Chemsrc",
+                "source_url": source_url.split("#", 1)[0],
+                "source_section": "field_absent_from_page",
+                "source_updated_at": source_updated_at,
+                "source_type": "static_dom_page",
+                "retrieved_at": retrieved_at,
+            })
+        return cls._merge_property_evidence(items), sections
+
+    @staticmethod
+    def _html_section_by_id(page_html: str, section_id: str) -> str:
+        match = re.search(rf"(?is)<(?P<tag>[a-z0-9]+)[^>]*\bid=[\"']{re.escape(section_id)}[\"'][^>]*>", page_html or "")
+        if not match:
+            return ""
+        start = match.start()
+        # Chemsrc's top-level content blocks are sibling containers.  Stopping
+        # at the next known id avoids swallowing navigation and product prose.
+        if match.group("tag").lower() == "table":
+            closing = re.search(r"(?is)</table\s*>", (page_html or "")[match.end():])
+            end = match.end() + closing.end() if closing else len(page_html or "")
+        else:
+            next_match = re.search(
+                r"(?is)<div[^>]*\bid=[\"'](?:wuHuaDiv|MSDSDiv|duXinDiv|anQuanDiv)[\"'][^>]*>",
+                (page_html or "")[match.end():],
+            )
+            end = match.end() + next_match.start() if next_match else len(page_html or "")
+        return (page_html or "")[start:end]
+
+    @staticmethod
+    def _section_containing_heading(page_html: str, headings: tuple[str, ...]) -> str:
+        for heading in headings:
+            hit = (page_html or "").find(heading)
+            if hit >= 0:
+                start = max(0, (page_html or "").rfind("<div", 0, hit))
+                return (page_html or "")[start:start + 20000]
+        return ""
+
+    @classmethod
+    def _html_table_rows(cls, section_html: str) -> dict[str, str]:
+        rows: dict[str, str] = {}
+        for row in re.findall(r"(?is)<tr[^>]*>(.*?)</tr>", section_html or ""):
+            cells = [cls._html_to_text(cell) for cell in re.findall(r"(?is)<(?:th|td)[^>]*>(.*?)</(?:th|td)>", row)]
+            cells = [cell for cell in cells if cell]
+            if len(cells) >= 2:
+                rows[cells[0].strip()] = " ".join(cells[1:]).strip()
+        return rows
+
+    @staticmethod
+    def _split_msds_sections(text_value: str) -> dict[str, str]:
+        numeral_map = {"一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9,
+                       "十": 10, "十一": 11, "十二": 12, "十三": 13, "十四": 14, "十五": 15, "十六": 16}
+        pattern = re.compile(r"第\s*([一二三四五六七八九十]{1,3}|\d{1,2})\s*部分\s*[:：]?", re.I)
+        matches = list(pattern.finditer(text_value or ""))
+        output: dict[str, str] = {}
+        for index, match in enumerate(matches):
+            token = match.group(1)
+            number = int(token) if token.isdigit() else numeral_map.get(token)
+            if not number or not 1 <= number <= 16:
+                continue
+            end = matches[index + 1].start() if index + 1 < len(matches) else len(text_value or "")
+            output[str(number)] = re.sub(r"\s+", " ", (text_value or "")[match.end():end]).strip()
+        return output
+
+    @staticmethod
+    def _toxicity_endpoints(text_value: str) -> list[dict[str, Any]]:
+        endpoints: list[dict[str, Any]] = []
+        pattern = re.compile(
+            r"\b(LD50|LC50|EC50|IC50)\b\s*[:：]?\s*([<>≤≥~]?\s*\d+(?:\.\d+)?(?:\s*[~-]\s*\d+(?:\.\d+)?)?)\s*"
+            r"(mg/kg|mg/L|g/L|g/kg|ppm|ppb)(?:\s*（([^）]{0,120})）|\s*\(([^)]{0,120})\))?",
+            re.I,
+        )
+        for match in pattern.finditer(text_value or ""):
+            context = (match.group(4) or match.group(5) or "").strip()
+            route = next((value for token, value in (("口服", "oral"), ("经口", "oral"), ("吸入", "inhalation"), ("经皮", "dermal"), ("静脉", "intravenous")) if token in context), "unknown")
+            duration = ""
+            duration_match = re.search(r"\b(\d+(?:\.\d+)?)\s*(h|hr|小时|d|天)\b", context, re.I)
+            if duration_match:
+                duration = "".join(duration_match.groups())
+            endpoints.append({
+                "endpoint": match.group(1).upper(),
+                "route": route,
+                "value_text": re.sub(r"\s+", "", match.group(2)),
+                "unit_dimension": match.group(3).lower(),
+                "exposure_duration": duration,
+                "medium": context,
+                "raw": re.sub(r"\s+", " ", match.group(0)).strip(),
+            })
+        return endpoints
+
+    @staticmethod
+    def _safety_values(text_value: str) -> dict[str, Any]:
+        text_value = re.sub(r"\s+", " ", text_value or "").strip()
+        h_statements = sorted(set(re.findall(r"\bH\d{3}[A-Za-z]?\b", text_value)))
+        p_statements = sorted(set(re.findall(r"\bP\d{3}(?:\+P\d{3})*\b", text_value)))
+        un_match = re.search(r"\bUN\s*(\d{4})\b", text_value, re.I)
+        packing = re.search(r"(?:包装等级|Packing\s+Group)\s*[:：]?\s*([I]{1,3}|[123])\b", text_value, re.I)
+        signal = next((word for word in ("危险", "警告", "Danger", "Warning") if word.lower() in text_value.lower()), "")
+        return {
+            "signal_word": signal,
+            "hazard_statements": h_statements,
+            "precautionary_statements": p_statements,
+            "un_number": un_match.group(1) if un_match else "",
+            "packing_group": packing.group(1) if packing else "",
+        }
 
     @classmethod
     def _chemsrc_chinese_property_evidence(
@@ -3183,14 +3759,98 @@ class ChemicalSearcher:
         for field_name, values in grouped.items():
             unique_values = {re.sub(r"\s+", " ", str(item.get("value") or "").strip().lower()) for item in values}
             conflict = len(unique_values - {""}) > 1
-            ranked = sorted(values, key=cls._property_evidence_sort_key, reverse=True)
+            if field_name == "flash_point":
+                comparable: list[tuple[float, dict[str, Any]]] = []
+                for item in values:
+                    parsed = cls._temperature_lower_bound_c(str(item.get("value") or ""))
+                    if parsed is not None:
+                        number, comparator = parsed
+                        item["normalized_value"] = number
+                        item["unit"] = "°C"
+                        item["comparison_operator"] = comparator
+                        comparable.append((number, item))
+                selected_item = min(comparable, key=lambda pair: pair[0])[1] if comparable else None
+                ranked = sorted(values, key=cls._property_evidence_sort_key, reverse=True)
+                for position, item in enumerate(ranked):
+                    item["conflict"] = conflict
+                    item["selected"] = item is selected_item if selected_item is not None else position == 0
+                    item["selection_basis"] = "lowest_comparable_flash_point" if selected_item is not None else "latest_source_selected"
+                    output.append(item)
+                continue
+            if field_name == "toxicity":
+                cls._mark_toxicity_group_minima(values)
+                ranked = sorted(values, key=cls._property_evidence_sort_key, reverse=True)
+            else:
+                ranked = sorted(values, key=cls._property_evidence_sort_key, reverse=True)
             for position, item in enumerate(ranked):
                 item["conflict"] = conflict
-                item["selected"] = position == 0
+                if field_name == "toxicity" and item.get("toxicity_group_comparable"):
+                    item["selected"] = bool(item.get("group_selected"))
+                else:
+                    item["selected"] = position == 0
                 if conflict:
-                    item["selection_basis"] = "latest_source_selected"
+                    item.setdefault("selection_basis", "latest_source_selected")
                 output.append(item)
         return output
+
+    @staticmethod
+    def _temperature_lower_bound_c(value: str) -> tuple[float, str] | None:
+        text_value = str(value or "").replace("−", "-").replace("–", "-")
+        match = re.search(
+            r"([<>≤≥~]?)\s*(-?\d+(?:\.\d+)?)"
+            r"(?:\s*(?:~|-|至)\s*(-?\d+(?:\.\d+)?))?"
+            r"(?:\s*(?:±|\+/-)\s*\d+(?:\.\d+)?)?\s*°?\s*([CFK])\b",
+            text_value,
+            re.I,
+        )
+        if not match:
+            return None
+        comparator = match.group(1) or "="
+        values = [float(match.group(2))]
+        if match.group(3) is not None:
+            values.append(float(match.group(3)))
+        number = min(values)
+        unit = match.group(4).upper()
+        if unit == "F":
+            number = (number - 32.0) * 5.0 / 9.0
+        elif unit == "K":
+            number -= 273.15
+        return round(number, 6), comparator
+
+    @classmethod
+    def _mark_toxicity_group_minima(cls, values: list[dict[str, Any]]) -> None:
+        groups: dict[tuple[str, str, str, str, str], list[tuple[float, dict[str, Any]]]] = {}
+        for item in values:
+            endpoint = str(item.get("endpoint") or "").upper()
+            route = str(item.get("route") or "unknown").lower()
+            unit = str(item.get("unit_dimension") or item.get("unit") or "").lower().replace(" ", "")
+            duration = str(item.get("exposure_duration") or "").lower()
+            medium = str(item.get("medium") or "").lower()
+            value_text = str(item.get("value_text") or item.get("value") or "")
+            number_match = re.search(r"[-+]?\d+(?:\.\d+)?", value_text)
+            if not endpoint or not unit or not number_match:
+                continue
+            number = float(number_match.group(0))
+            # Convert only within dimensions that are mechanically compatible.
+            if unit == "g/kg":
+                number *= 1000.0
+                unit = "mg/kg"
+            elif unit == "g/l":
+                number *= 1000.0
+                unit = "mg/l"
+            key = (endpoint, route, unit, duration, medium)
+            item.update({
+                "toxicity_group": "|".join(key),
+                "toxicity_group_comparable": True,
+                "normalized_value": number,
+                "unit": unit,
+            })
+            groups.setdefault(key, []).append((number, item))
+        for entries in groups.values():
+            selected = min(entries, key=lambda pair: pair[0])[1]
+            for _number, item in entries:
+                item["group_selected"] = item is selected
+                item["selection_basis"] = "lowest_value_within_same_toxicity_endpoint_route_unit_duration_medium"
 
     @staticmethod
     def _property_evidence_sort_key(item: dict[str, Any]) -> tuple[float, float, str]:
@@ -3440,19 +4100,67 @@ class ChemicalSearcher:
         query: str,
         validation_names: list[str] | None = None,
     ) -> dict[str, Any] | None:
+        mapping = self._persistent_cache().get_detail_mapping("chemsrc", query)
+        if mapping and mapping.get("url"):
+            mapped_url = str(mapping["url"])
+            mapped_cas = str(mapping.get("cas") or self._extract_cas(mapped_url) or "")
+            mapped_url = self._chemsrc_chinese_detail_url(mapped_url, mapped_cas, "Chemsrc") or mapped_url
+            mapped = self._best_detail_result(
+                candidates=[SearchCandidate(
+                    url=mapped_url,
+                    title=str(mapping.get("title") or ""),
+                    cas=mapped_cas,
+                )],
+                source="Chemsrc",
+                name=name,
+                cas=cas,
+                validation_names=validation_names,
+            )
+            if mapped:
+                mapped["detail_mapping_cache"] = "hit"
+                return mapped
         search_url = f"https://search.chemsrc.com/api/en/search?keyword={quote_plus(query)}"
         search_html = self._fetch(search_url)
         if not search_html:
             return None
 
         candidates = self._chemsrc_search_result_candidates(search_html, search_url)
-        return self._best_detail_result(
+        # The search page already exposes both the internal record id and CAS.
+        # Build the Chinese detail URL directly so the record itself is fetched
+        # once; URL fragments are document anchors, not separate resources.
+        chinese_candidates: list[SearchCandidate] = []
+        for candidate in candidates:
+            baike_match = re.search(r"/en/baike/(\d+)\.html", candidate.url, flags=re.I)
+            cas_page_match = re.search(r"/en/cas/(\d{2,7}-\d{2}-\d)_(\d+)\.html", candidate.url, flags=re.I)
+            record_id = baike_match.group(1) if baike_match else cas_page_match.group(2) if cas_page_match else ""
+            candidate_cas = candidate.cas or (cas_page_match.group(1) if cas_page_match else "") or self._extract_cas(candidate.title)
+            if record_id and candidate_cas:
+                chinese_candidates.append(SearchCandidate(
+                    url=f"https://www.chemsrc.com/cas/{candidate_cas}_{record_id}.html",
+                    title=candidate.title,
+                    cas=candidate_cas,
+                ))
+        if chinese_candidates:
+            candidates = chinese_candidates
+        result = self._best_detail_result(
             candidates=candidates,
             source="Chemsrc",
             name=name,
             cas=cas,
             validation_names=validation_names,
         )
+        if result and result.get("url"):
+            self._persistent_cache().put_detail_mapping(
+                "chemsrc",
+                query,
+                {
+                    "url": str(result.get("url") or "").split("#", 1)[0],
+                    "title": str(result.get("matched_site_name") or result.get("name") or ""),
+                    "cas": str(result.get("candidate_cas") or result.get("cas") or ""),
+                },
+                ttl_days=int((((self.settings or {}).get("chemical_search", {}) or {}).get("cache", {}) or {}).get("detail_mapping_ttl_days", 180) or 180),
+            )
+        return result
 
     def _search_chemicalbook(
         self,
@@ -3597,20 +4305,29 @@ class ChemicalSearcher:
             return self._lookup_budget_seconds()
         return max(0.0, deadline - time.monotonic())
 
-    def _requests_per_second(self) -> float:
+    def _requests_per_second(self, source_key: str = "") -> float:
         settings = (self.settings or {}).get("chemical_search", {}) or {}
         try:
-            return max(0.2, min(5.0, float(settings.get("requests_per_second", 2))))
+            configured = settings.get("source_requests_per_second", {}) or {}
+            value = configured.get(source_key, settings.get("requests_per_second", 2))
+            return max(0.05, min(5.0, float(value)))
         except (TypeError, ValueError):
             return 2.0
 
     def _wait_for_host_rate_limit(self, url: str) -> None:
         host = (urlparse(url).hostname or "unknown").lower()
-        interval = 1.0 / self._requests_per_second()
+        source_key = "chemsrc" if host.endswith("chemsrc.com") else "chemicalbook" if host.endswith("chemicalbook.com") else "pubchem" if host.endswith("pubchem.ncbi.nlm.nih.gov") else host
+        interval = 1.0 / self._requests_per_second(source_key)
+        settings = (self.settings or {}).get("chemical_search", {}) or {}
+        jitter_range = settings.get("request_jitter_seconds", {}).get(source_key, [0.0, 0.0]) if isinstance(settings.get("request_jitter_seconds", {}), dict) else [0.0, 0.0]
+        try:
+            jitter = random.uniform(float(jitter_range[0]), float(jitter_range[1]))
+        except (TypeError, ValueError, IndexError):
+            jitter = 0.0
         with self._source_lock:
             now = time.monotonic()
-            wait_seconds = max(0.0, self._host_last_request.get(host, 0.0) + interval - now)
-            self._host_last_request[host] = now + wait_seconds
+            wait_seconds = max(0.0, self._host_last_request.get(source_key, 0.0) + interval + jitter - now)
+            self._host_last_request[source_key] = now + wait_seconds
         if wait_seconds:
             time.sleep(wait_seconds)
 
@@ -3631,8 +4348,9 @@ class ChemicalSearcher:
                 continue
             url = urljoin(base_url, html.unescape(baike_match.group(1)))
             title = cls._chemsrc_title_from_row(row, url)
+            row_cas = cls._extract_cas(cls._html_to_text(row))
             if url and not any(candidate.url == url for candidate in candidates):
-                candidates.append(SearchCandidate(url=url, title=title))
+                candidates.append(SearchCandidate(url=url, title=title, cas=row_cas))
             if len(candidates) >= limit:
                 return candidates
 
@@ -3727,7 +4445,8 @@ class ChemicalSearcher:
 
         best_result: dict[str, Any] | None = None
         best_score = -1.0
-        for candidate in normalized_candidates:
+        matched_candidates: list[tuple[float, str, str]] = []
+        for candidate in normalized_candidates[:3] if not cas else normalized_candidates:
             raw_html = self._fetch(candidate.url)
             raw_text = self._html_to_text(raw_html)
             if not raw_text:
@@ -3740,9 +4459,16 @@ class ChemicalSearcher:
                 preferred_name=candidate.title,
                 validation_names=names_for_validation,
             )
+            page_cas = self._detail_page_bound_cas(raw_html, candidate.url, source)
+            if cas and page_cas and self._same_cas(cas, page_cas):
+                relevance.update({
+                    "relevance_passed": True,
+                    "passed": True,
+                    "cas_matched": True,
+                    "identity_conflict_reason": "",
+                })
             score = float(relevance.get("name_similarity", 0.0))
             if relevance.get("passed") and score > best_score:
-                page_cas = self._extract_cas(raw_text)
                 result = self._result(
                     name=name,
                     cas=page_cas or cas,
@@ -3754,7 +4480,28 @@ class ChemicalSearcher:
                     result["query_cas"] = cas
                 if page_cas:
                     result["candidate_cas"] = page_cas
+                    result["candidate_cas_page_bound"] = True
+                    result["candidate_cas_validation_status"] = "page_bound"
+                    result["candidate_cas_page_name"] = candidate.title
+                elif not cas:
+                    result["candidate_cas_page_bound"] = False
+                    result["candidate_cas_validation_status"] = "missing_page_bound_cas"
+                    result["candidate_cas_validation_reason"] = "详情页未提供可绑定到当前物质记录的明确 CAS 字段。"
                 result["property_detail_links"] = self._property_detail_links(raw_html, candidate.url, source)
+                candidate_path = urlparse(candidate.url).path.lower()
+                if source == "Chemsrc" and "/cas/" in candidate_path and not candidate_path.startswith("/en/"):
+                    items, sections = self._chemsrc_full_page_evidence(
+                        raw_html,
+                        source_url=candidate.url.split("#", 1)[0],
+                        source_updated_at=self._page_updated_at(raw_text),
+                    )
+                    result["evidence_items"] = items
+                    result["chemsrc_sections"] = sections
+                    result["property_detail_links"] = []
+                    structured_text = self._chemsrc_rule_text(sections)
+                    if structured_text:
+                        result["raw_text"] = structured_text
+                        result["hazard_keywords"] = self._hazard_keywords(structured_text)
                 chinese_detail_url = self._chemsrc_chinese_detail_url(
                     candidate.url,
                     page_cas or cas,
@@ -3772,10 +4519,48 @@ class ChemicalSearcher:
                 best_result = result
                 best_score = score
 
+            if relevance.get("passed") and page_cas:
+                matched_candidates.append((score, page_cas, candidate.title))
+
             if cas and relevance.get("relevance_passed"):
                 return best_result
 
+        if best_result and not cas:
+            near_best = {
+                candidate_cas
+                for score, candidate_cas, _title in matched_candidates
+                if score >= max(0.82, best_score - 0.03)
+            }
+            best_result["source_candidate_cas_count"] = len(near_best)
+            best_result["source_candidate_cas_values"] = sorted(near_best)
+            if len(near_best) > 1:
+                best_result.update({
+                    "identity_status": "ambiguous",
+                    "need_manual_review": True,
+                    "relevance_passed": False,
+                    "failure_reason": "名称在同一来源命中多个相近但不同的 CAS，不能唯一确认身份。",
+                })
         return best_result
+
+    @staticmethod
+    def _chemsrc_rule_text(sections: dict[str, Any]) -> str:
+        """Put decision-bearing sections first so downstream bounded inputs keep them."""
+        physical = sections.get("physicochemical") or {}
+        msds = (sections.get("msds") or {}).get("sections") or {}
+        toxicity = sections.get("toxicology_ecology") or {}
+        safety = sections.get("safety") or {}
+        parts = [
+            f"安全信息: {safety.get('raw_text') or ''}",
+            f"毒理和生态: {toxicity.get('raw_text') or ''}",
+            "物理化学性质: " + "; ".join(
+                f"{key}: {value}" for key, value in (physical.get("rows") or {}).items()
+            ),
+        ]
+        for number in (2, 5, 9, 10, 11, 12, 14, 3, 1, 4, 6, 7, 8, 13, 15, 16):
+            value = str(msds.get(str(number)) or "").strip()
+            if value:
+                parts.append(f"MSDS 第{number}部分: {value}")
+        return "\n".join(part for part in parts if part.strip()).strip()[:20000]
 
     def _rank_candidates_by_title(self, candidates: list[SearchCandidate], names: list[str]) -> list[SearchCandidate]:
         targets = [self._normalize_for_similarity(name) for name in names if name]
@@ -3811,7 +4596,10 @@ class ChemicalSearcher:
         if str(source or "").strip().lower() != "chemsrc":
             return ""
         normalized_cas = ChemicalSearcher._extract_cas(str(cas or ""))
-        match = re.search(r"/en/baike/(\d+)\.html(?:$|[?#])", str(detail_url or ""), flags=re.I)
+        detail_url = str(detail_url or "")
+        match = re.search(r"/en/baike/(\d+)\.html(?:$|[?#])", detail_url, flags=re.I)
+        if not match:
+            match = re.search(r"/en/cas/\d{2,7}-\d{2}-\d_(\d+)\.html(?:$|[?#])", detail_url, flags=re.I)
         if not normalized_cas or not match:
             return ""
         return f"https://www.chemsrc.com/cas/{normalized_cas}_{match.group(1)}.html"
@@ -3826,13 +4614,55 @@ class ChemicalSearcher:
 
     @staticmethod
     def _extract_cas(raw_text: str) -> str:
-        match = re.search(r"\b\d{2,7}-\d{2}-\d\b", raw_text)
+        normalized = ChemicalSearcher._normalize_cas_input(raw_text)
+        match = re.search(r"\b\d{2,7}-\d{2}-\d\b", normalized)
         return match.group(0) if match else ""
+
+    @classmethod
+    def _detail_page_bound_cas(cls, page_html: str, page_url: str, source: str) -> str:
+        """Extract a CAS only from the current detail entity, never page-wide text.
+
+        Search and product pages frequently contain recommended products and
+        navigation content.  Taking the first page-wide CAS caused unrelated
+        values to be reused as a candidate identity.
+        """
+        source_key = str(source or "").strip().lower()
+        if source_key == "chemsrc":
+            url_match = re.search(r"/cas/(\d{2,7}-\d{2}-\d)_\d+\.html", str(page_url or ""), flags=re.I)
+            if url_match and cls._is_valid_cas(url_match.group(1)):
+                return url_match.group(1)
+        body = str(page_html or "")
+        # A labeled CAS field is accepted only when it is in a small DOM/text
+        # fragment.  This excludes a CAS embedded in scripts, navigation, or a
+        # related-product card elsewhere on the page.
+        labeled_patterns = (
+            r"(?is)(?:CAS\s*(?:No\.?|Number|#)?|CAS号|CAS编号)\s*(?:</[^>]+>\s*){0,3}(?:[:：#]\s*)?(?:<[^>]+>\s*){0,3}(\d{2,7}-\d{2}-\d)",
+            r"(?is)(?:CAS\s*(?:No\.?|Number|#)?|CAS号|CAS编号)\s*[:：#]\s*(\d{2,7}-\d{2}-\d)",
+        )
+        values: list[str] = []
+        for pattern in labeled_patterns:
+            for match in re.finditer(pattern, body):
+                leading_context = cls._html_to_text(body[max(0, match.start() - 120):match.start()]).lower()
+                if any(token in leading_context for token in (
+                    "recommended", "related product", "similar product", "推荐", "相关产品", "相似产品",
+                )):
+                    continue
+                candidate = cls._extract_cas(match.group(1))
+                if candidate and cls._is_valid_cas(candidate) and candidate not in values:
+                    values.append(candidate)
+        return values[0] if len(values) == 1 else ""
+
+    @staticmethod
+    def _normalize_cas_input(value: str) -> str:
+        return re.sub(r"[‐‑‒–—−]", "-", str(value or "")).strip()
 
     @staticmethod
     def _is_valid_cas(value: str) -> bool:
         """Validate a CAS Registry Number's layout and checksum before trusting ERP input."""
-        match = re.fullmatch(r"(\d{2,7})-(\d{2})-(\d)", str(value or "").strip())
+        match = re.fullmatch(
+            r"(\d{2,7})-(\d{2})-(\d)",
+            ChemicalSearcher._normalize_cas_input(value),
+        )
         if not match:
             return False
         body = f"{match.group(1)}{match.group(2)}"

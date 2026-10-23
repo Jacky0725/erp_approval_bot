@@ -114,3 +114,45 @@ vm.runInContext(helper, context);
 '''
     result = subprocess.run([node, "-e", program], cwd=root, capture_output=True, text=True, timeout=20)
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_dashboard_refreshes_once_when_a_stale_page_receives_csrf_403():
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("Node.js is required for the isolated JavaScript request checks")
+    root = Path(__file__).resolve().parents[1]
+    program = r'''
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const vm = require('node:vm');
+const source = fs.readFileSync('src/static/dashboard.js', 'utf8');
+const helper = 'let csrfRefreshPending = false;\n' + source.slice(source.indexOf('    async function recoverFromInvalidCsrf('),
+                                                          source.indexOf('    window.fetch = '));
+let scheduled = null, replaced = '';
+const context = vm.createContext({
+  URL,
+  window: {
+    location: {href: 'http://127.0.0.1:8000/run', replace: value => { replaced = value; }},
+    setTimeout: fn => { scheduled = fn; return 1; },
+  },
+});
+vm.runInContext(helper, context);
+(async () => {
+  const response = {status: 403, clone: () => ({json: async () => ({detail: 'CSRF 令牌无效。'})})};
+  assert.equal(await context.recoverFromInvalidCsrf(response, true), response);
+  assert.ok(scheduled);
+  scheduled();
+  assert.match(replaced, /csrf_recovered=1/);
+
+  scheduled = null;
+  context.window.location.href = replaced;
+  await context.recoverFromInvalidCsrf(response, true);
+  assert.equal(scheduled, null);
+
+  const other = {status: 403, clone: () => ({json: async () => ({detail: '请求来源无效。'})})};
+  await context.recoverFromInvalidCsrf(other, true);
+  assert.equal(scheduled, null);
+})().catch(error => { console.error(error); process.exitCode = 1; });
+'''
+    result = subprocess.run([node, "-e", program], cwd=root, capture_output=True, text=True, timeout=20)
+    assert result.returncode == 0, result.stdout + result.stderr

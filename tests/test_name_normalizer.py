@@ -94,6 +94,34 @@ class NameNormalizerTest(unittest.TestCase):
         self.assertNotIn("unit", payload)
         self.assertNotIn("extra_fields", payload)
 
+    def test_llm_normalization_result_is_auditable(self) -> None:
+        class FakeCompletions:
+            def create(self, **kwargs: object) -> SimpleNamespace:
+                return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=json.dumps({
+                    "standard_name": "乙醇",
+                    "english_name": "ethanol",
+                    "name_candidates": ["乙醇", "酒精"],
+                    "confidence": 0.9,
+                    "reason": "fixture",
+                }, ensure_ascii=False)))])
+
+        normalizer = NameNormalizer(root_dir=ROOT_DIR, enable_llm=True)
+        normalizer._has_api_key = lambda: True  # type: ignore[method-assign]
+        normalizer._client = lambda: SimpleNamespace(chat=SimpleNamespace(completions=FakeCompletions()))  # type: ignore[method-assign]
+
+        result = normalizer.normalize(raw_name="乙醇错别写法")
+
+        self.assertTrue(result["llm_normalization_attempted"])
+        self.assertEqual(result["llm_normalization_status"], "success")
+        self.assertTrue(result["llm_normalization_model"])
+        self.assertEqual(result["candidate_names"], ["乙醇", "酒精", "ethanol"])
+
+    def test_disabled_llm_normalization_is_auditable(self) -> None:
+        result = NameNormalizer(root_dir=ROOT_DIR, enable_llm=False).normalize(raw_name="无法匹配的名称")
+
+        self.assertFalse(result["llm_normalization_attempted"])
+        self.assertEqual(result["llm_normalization_status"], "disabled")
+
     def test_unmatched_name_needs_manual_review_without_llm(self) -> None:
         result = self.normalizer.normalize(raw_name="客户自编号未知混合液 1M")
 

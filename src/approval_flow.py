@@ -20,25 +20,169 @@ from audit_logger import AuditLogger
 from category_mapper import erp_property_options, is_non_writable_rule_category, to_erp_property
 from chemical_searcher import ChemicalSearcher
 from enrichment_metrics import EnrichmentMetrics
-from enrichment_v2 import EnrichmentV2
 from erp_api_client import ErpApiClient, normalize_erp_write_backend
 from erp_api_discovery import ApiDiscoveryAnalyzer, ApiDiscoveryRecorder, ErpApiConfigurator
 from llm_extractor import LlmExtractor
 from name_normalizer import NameNormalizer
 from non_reagent_classifier import NonReagentClassifier
 from reagent_name_rules import UNKNOWN_CATEGORY, unknown_reagent_name_reason
+from reagent_data_minimizer import minimize_reagent_record
 from reagent_memory import ReagentMemory
-from rule_engine import RuleEngine
+from rule_engine import NORMAL_CATEGORY, RuleEngine
 from rule_maintainer import RuleMaintainer
 from stage_logger import StageLogger
 from ui_waits import wait_until_row_value, wait_until_spinner_hidden
-from v3_web_search import V3WebSearchClient, rule_bundle
 from write_failure_diagnostics import build_write_failure_debug_payload
 
 
 class ApprovalFlowMixin:
 
+    def run_workbuddy_handoff(self, *, import_results: bool = False) -> None:
+        """File bridge pilot; never routes through model-fallback or AUTO_PASS."""
+        from workbuddy_bridge import WorkBuddyBridge
+
+        bridge = WorkBuddyBridge(self.root_dir, self.settings)
+
+        def after_login(page: Page) -> None:
+            client = ErpApiClient(page, self.settings)
+            numbers = list(getattr(self, "target_list_numbers", []) or [])
+            single = str(getattr(self, "target_list_number", "") or "").strip()
+            if single and single not in numbers:
+                numbers.append(single)
+            if import_results:
+                dry_run = self.dry_run_enabled() or self.approval_write_mode() == "disabled"
+                if not numbers and not self._truthy(os.getenv("PROCESS_ALL_TODOS", "false")):
+                    raise RuntimeError("请先选择待办清单，或明确勾选处理全部待办，再导入结果。")
+                if not dry_run and not bridge.config.get("write_enabled", False):
+                    raise RuntimeError("WorkBuddy 正式写入尚未启用；请先完成单批验证。")
+                if not dry_run and self.erp_write_backend() != "api_write_with_web_verify":
+                    raise RuntimeError("WorkBuddy 回写目前只支持已验证 ERP API，请选择接口写入后端。")
+                if not dry_run and not client.write_enabled():
+                    raise RuntimeError("WorkBuddy 回写需要已验证且启用的 ERP API；当前禁止写入。")
+                memory = ReagentMemory.from_settings(self.settings, self.root_dir)
+                processed = 0
+                for state in bridge.batches():
+                    batch_numbers = {i["input"]["试剂清单号"] for i in state["items"]}
+                    if numbers and not batch_numbers.issubset(set(numbers)):
+                        print(f"[workbuddy] 跳过 {state['batch_id']}：该批次包含本次未选择的清单。")
+                        continue
+                    if state["status"] == "completed":
+                        if not dry_run and not state.get("cleaned"):
+                            bridge.cleanup(state)
+                        continue
+                    if state["rules_sha256"] != hashlib.sha256(bridge.rules_path().read_bytes()).hexdigest():
+                        print(f"[workbuddy attention] 跳过旧规则批次 {state['batch_id']}，请准备新批次重新判定；旧文件保留。")
+                        continue
+                    if not (bridge.batch_path(state) / "result.xlsx").exists():
+                        continue
+                    bridge.process(state, client, memory, dry_run=dry_run)
+                    processed += 1
+                print(f"[workbuddy] 已处理结果批次：{processed}；dry_run={dry_run}")
+                return
+            if not numbers:
+                if not self._truthy(os.getenv("PROCESS_ALL_TODOS", "false")):
+                    raise RuntimeError("请先选择待办清单，或明确勾选处理全部待办。")
+                numbers = [str(r.get("清单号") or r.get("试剂清单号") or r.get("name") or "").strip() for r in client.fetch_todo_tasks(all_pages=True)]
+            def records():
+                for number in numbers:
+                    for record in client.fetch_reagent_detail(number):
+                        yield {**record, "试剂清单号": number}
+            state = bridge.prepare(records())
+            if state is None:
+                print("[workbuddy] 没有新的未判定试剂；已有失败项请从原批次恢复。")
+                return
+            path = bridge.batch_path(state)
+            if not {i["input"]["试剂清单号"] for i in state["items"]}.issubset(set(numbers)):
+                raise RuntimeError("存在其他清单的未完成批次；请先处理原批次，未投递新清单。")
+            print(f"[workbuddy] 批次：{state['batch_id']}，{len(state['items'])} 条。")
+            print(f"[workbuddy] 任务文本：{path / 'prompt.txt'}")
+            print(f"[workbuddy] 请在 WorkBuddy 试剂审批项目执行该任务；结果保存：{path / 'result.xlsx'}")
+
+        with bridge.exclusive():
+            self.run_after_login_capture("workbuddy.png", "workbuddy.html", after_login)
+
+    def run_workbuddy_loop(self) -> None:
+        """Serial batches; the existing process manager provides Stop/kill control."""
+        import time
+        from workbuddy_bridge import WorkBuddyBridge
+        from workbuddy_desktop import WorkBuddyDesktop
+
+        bridge = WorkBuddyBridge(self.root_dir, self.settings)
+        if not bridge.config.get("desktop_enabled", False):
+            raise RuntimeError("WorkBuddy 自动投递尚未启用；请先完成客户端适配验证，或使用准备/导入入口。")
+        dry_run = self.dry_run_enabled() or self.approval_write_mode() == "disabled"
+        if not dry_run and not bridge.config.get("write_enabled", False):
+            raise RuntimeError("WorkBuddy 正式写入尚未启用；请先完成单批验证。")
+        if not dry_run and self.erp_write_backend() != "api_write_with_web_verify":
+            raise RuntimeError("WorkBuddy 回写目前只支持已验证 ERP API，请选择接口写入后端。")
+
+        def after_login(page: Page) -> None:
+            client = ErpApiClient(page, self.settings)
+            if not dry_run and not client.write_enabled():
+                raise RuntimeError("ERP API 未验证或未启用，禁止 WorkBuddy 回写。")
+            memory = ReagentMemory.from_settings(self.settings, self.root_dir)
+            desktop = WorkBuddyDesktop(bridge.config)
+            while True:
+                numbers = list(getattr(self, "target_list_numbers", []) or [])
+                single = str(getattr(self, "target_list_number", "") or "").strip()
+                if single and single not in numbers:
+                    numbers.append(single)
+                if not numbers:
+                    if not self._truthy(os.getenv("PROCESS_ALL_TODOS", "false")):
+                        raise RuntimeError("请先选择清单或勾选处理全部待办。")
+                    numbers = [str(r.get("清单号") or r.get("name") or "").strip() for r in client.fetch_todo_tasks(all_pages=True)]
+                def records():
+                    for number in numbers:
+                        for record in client.fetch_reagent_detail(number):
+                            yield {**record, "试剂清单号": number}
+                # Resume a prepared/imported batch before fetching a new one.
+                digest = hashlib.sha256(bridge.rules_path().read_bytes()).hexdigest()
+                outstanding = [s for s in bridge.batches() if s["status"] in {"waiting_result", "imported"} and s["rules_sha256"] == digest]
+                state = outstanding[0] if outstanding else bridge.prepare(records())
+                if state is None:
+                    print("[workbuddy] 当前范围无新记录，循环结束；失败项保留原批次。")
+                    return
+                if not {i["input"]["试剂清单号"] for i in state["items"]}.issubset(set(numbers)):
+                    raise RuntimeError("未完成批次不属于本次清单范围，已停止，未投递或写入。")
+                path = bridge.batch_path(state)
+                if not (path / "result.xlsx").exists():
+                    if state.get("dispatch_state") == "sending":
+                        raise RuntimeError(f"批次 {state['batch_id']} 上次投递结果不明；请核对 WorkBuddy，禁止自动重发。")
+                    if not state.get("dispatch_state"):
+                        state["dispatch_state"] = "sending"
+                        bridge.save(state)
+                        desktop.send((path / "prompt.txt").read_text(encoding="utf-8"))
+                        state["dispatch_state"] = "submitted"
+                        bridge.save(state)
+                    deadline = time.monotonic() + int(bridge.config.get("result_timeout_seconds", 900))
+                    while not (path / "result.xlsx").exists():
+                        if time.monotonic() >= deadline:
+                            raise RuntimeError(f"WorkBuddy 结果等待超时：{path}；保留批次，不重发。")
+                        time.sleep(2)
+                desktop.wait_until_idle(int(bridge.config.get("result_timeout_seconds", 900)))
+                bridge.process(state, client, memory, dry_run=dry_run)
+                if dry_run:
+                    print("[workbuddy] 单批测试完成：未写入 ERP、未入记忆、未删除 Excel。")
+                    return
+                if any(i.get("error_code") in {"ERP_ERROR", "ERP_WRITE"} for i in state["items"]):
+                    raise RuntimeError("ERP 保存或回读异常，已保留文件并暂停循环。")
+
+        with bridge.exclusive():
+            self.run_after_login_capture("workbuddy_loop.png", "workbuddy_loop.html", after_login)
+
     REJECT_DECISION_CATEGORIES = {"不建议接收类", "拒收类"}
+
+    @staticmethod
+    def should_verify_api_page(row_index: int, is_canary: bool, api_settings: dict[str, Any]) -> bool:
+        if is_canary:
+            return True
+        if not bool(api_settings.get("web_verify_after_api_write", True)):
+            return False
+        try:
+            sample_every = max(1, int(api_settings.get("web_verify_sample_every", 1)))
+        except (TypeError, ValueError):
+            sample_every = 1
+        return row_index % sample_every == 0
 
     @classmethod
     def is_terminal_reject_decision(cls, category: Any) -> bool:
@@ -65,18 +209,19 @@ class ApprovalFlowMixin:
 
     @classmethod
     def terminal_reject_auto_write_allowed(cls, suggestion: dict[str, Any]) -> bool:
-        """A reject needs a deterministic rule or a fully verified V3 identity."""
+        """Allow a deterministic reject rule to write directly to ERP.
+
+        A terminal procurement decision must not be held for manual identity
+        confirmation once a formal rule has matched.  An advisory-only or
+        unverified V3 model response is still not a formal reject decision.
+        """
         if not cls.is_terminal_reject_decision(suggestion.get("最终建议类别")):
             return False
         if cls._truthy(suggestion.get("LLM辅助意见仅供复核")) or cls._truthy(suggestion.get("V3模型未核实")):
             return False
-        if not str(suggestion.get("命中规则ID") or "").strip() and not cls._truthy(suggestion.get("V3可核验直写")):
-            return False
-        status = str(suggestion.get("身份状态") or suggestion.get("身份验证状态") or "").strip().lower()
-        reason = str(suggestion.get("规则原因") or "")
-        return ("无许可资质" in reason or "无处置能力" in reason) or status in {
-            "verified", "cas_verified", "name_verified_pubchem", "conflict"
-        }
+        return bool(str(suggestion.get("命中规则ID") or "").strip()) or cls._truthy(
+            suggestion.get("V3可核验直写")
+        )
 
     @staticmethod
     def apply_unknown_auto_write_policy(suggestion: dict[str, Any]) -> dict[str, Any]:
@@ -88,6 +233,169 @@ class ApprovalFlowMixin:
         suggestion["未知类判定状态"] = "统一自动写入"
         return suggestion
 
+    @classmethod
+    def apply_unresolved_product_unknown_policy(
+        cls,
+        suggestion: dict[str, Any],
+        search_result: dict[str, Any],
+        name_result: dict[str, Any],
+        classification: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Write an explicitly unresolvable product/formulation as Unknown.
+
+        This is a business label for an absent chemical identity, never a
+        safety conclusion.  It is intentionally narrower than a generic web
+        lookup failure: valid CAS records, confirmed mixture components, and
+        deterministic risk-rule hits retain their existing handling.
+        """
+        if str(suggestion.get("最终建议类别") or "").strip() == UNKNOWN_CATEGORY:
+            return cls.apply_unknown_auto_write_policy(suggestion)
+        if not cls._unresolved_product_is_unknown_eligible(search_result, name_result, classification, suggestion):
+            return suggestion
+        reason = (
+            "ERP 未提供有效 CAS；名称属于商品名、未知配方或组分不完整的混合物，"
+            "且未获得可核验的化学身份或有效物化信息，按业务口径写入未知类。"
+        )
+        suggestion.update({
+            "最终建议类别": UNKNOWN_CATEGORY,
+            "命中类别": UNKNOWN_CATEGORY,
+            "命中规则ID": "BUS-UNKNOWN-UNRESOLVED-PRODUCT",
+            "规则原因": reason,
+            "证据": reason,
+            "置信度": 1.0,
+            "需人工复核": False,
+            "未知类判定依据": "unresolved_product_or_incomplete_formula_without_valid_cas",
+        })
+        return cls.apply_unknown_auto_write_policy(suggestion)
+
+    @classmethod
+    def _unresolved_product_is_unknown_eligible(
+        cls,
+        search_result: dict[str, Any],
+        name_result: dict[str, Any],
+        classification: dict[str, Any],
+        suggestion: dict[str, Any],
+    ) -> bool:
+        raw_cas = cls.normalize_cas(str(suggestion.get("CAS号") or ""))
+        if cls._checksum_valid_cas(raw_cas):
+            return False
+        if classification.get("final_category") and not classification.get("need_manual_review", True):
+            return False
+        if classification.get("matched_rule_ids"):
+            return False
+        if any(search_result.get(key) for key in ("component_categories", "mixture_risk_categories", "sds_categories")):
+            return False
+        status = str(search_result.get("identity_status") or "unresolved").strip().lower()
+        if status in {"verified", "cas_verified", "name_verified", "name_verified_pubchem", "verified_by_enrichment"}:
+            return False
+        is_incomplete_mixture = bool(search_result.get("is_mixture")) and not bool(search_result.get("composition_complete"))
+        raw_name = str(suggestion.get("试剂名称") or name_result.get("raw_name") or "").strip()
+        product_like = bool(re.search(
+            r"(?:混合|配方|浆料|乳液|硅油|商品|型号|\b(?:lot|code)\b|"
+            r"\b[A-Z]{2,}[A-Z0-9]*[-_][A-Z0-9-]*\d[A-Z0-9-]*\b|"
+            r"\b[A-Z]{3,}(?:\s+[A-Z]{3,})+\b)",
+            raw_name,
+        ))
+        # "unresolved" is the lookup outcome, not evidence that a named
+        # chemical is a product with an unknown formula.  Treating it as a
+        # product type turned ordinary network failures into ERP Unknown writes.
+        return bool(is_incomplete_mixture or product_like)
+
+    @staticmethod
+    def _v1_clear_chemical_name(name: str, name_result: dict[str, Any]) -> bool:
+        """Recognize an explicit chemical name for the approved no-evidence policy.
+
+        A model-suggested replacement alone is not an explicit ERP name. Product
+        codes, incomplete formulations and names marked invalid remain outside
+        this policy.
+        """
+        compact = re.sub(r"\s+", "", str(name or "").strip())
+        if not compact or len(compact) > 100 or unknown_reagent_name_reason(compact):
+            return False
+        if name_result.get("suspected_invalid_name"):
+            return False
+        if re.search(r"(?:配方|混合|商品|型号|偶联剂|试剂盒|[A-Z]{2,}[\-_]?\d{2,})", compact, re.I):
+            return False
+        # Require a chemical/material naming feature in the ERP name itself.
+        # In particular, a free-form product title must not become Ordinary
+        # merely because an LLM proposed a plausible standard name.
+        return bool(re.search(
+            r"(?:酸|醇|酚|酮|醚|酯|胺|铵|烷|烯|炔|苯|糖|盐|氧化|硫化|氯化|氟化|"
+            r"溴化|碘化|水合物|多糖|蛋白|聚合物|橡胶|石墨烯|乙烯|丙烯|甲烷|乙烷)",
+            compact,
+        ))
+
+    def v1_classify_without_web_evidence(
+        self,
+        reagent: dict[str, Any],
+        name_result: dict[str, Any],
+        search_result: dict[str, Any],
+        classification: dict[str, Any],
+        rule_engine: RuleEngine,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Use local rules, then the explicit-name Ordinary business fallback.
+
+        No website failure text or LLM proposal is treated as hazard evidence.
+        The result is V1-only and remains marked as a no-evidence business
+        decision in the suggestion and eventual ERP-write audit.
+        """
+        if self._current_pipeline_version() != "v1" or self._search_has_trusted_web_evidence(search_result):
+            return classification, search_result
+        raw_name = str(reagent.get("试剂名称") or "").strip()
+        if not self._v1_clear_chemical_name(raw_name, name_result):
+            return classification, search_result
+        if search_result.get("is_mixture") and not search_result.get("composition_complete"):
+            return classification, search_result
+        local = rule_engine.classify({
+            "reagent_name": raw_name,
+            "name": raw_name,
+            "standard_name": str(name_result.get("standard_name") or raw_name),
+            "cleaned_name": str(name_result.get("cleaned_name") or raw_name),
+            "ordinary_evidence_complete": False,
+            "allow_default_normal": False,
+        })
+        category = str(local.get("final_category") or "").strip()
+        if category == UNKNOWN_CATEGORY:
+            return classification, search_result
+        if category and not local.get("need_manual_review"):
+            selected = dict(local)
+            selected["reason"] = (
+                f"{local.get('reason') or ''} 网站资料不可用；依据已启用的本地名称规则判定。"
+            ).strip()
+            policy = "local_name_rule"
+        elif category:
+            return classification, search_result
+        else:
+            selected = {
+                "final_category": NORMAL_CATEGORY,
+                "matched_categories": [NORMAL_CATEGORY],
+                "matched_rule_ids": ["BUS-NOR-CLEAR-NAME-NO-EVIDENCE-001"],
+                "rule_version": rule_engine.rule_version,
+                "reason": (
+                    "ERP 原名具有明确化学命名特征，但未取得可用的本地危险性或网页证据；"
+                    "按用户确认的无证据业务兜底归普通类。此结论不表示已证明无危险性。"
+                ),
+                "confidence": 0.8,
+                "need_manual_review": False,
+            }
+            policy = "clear_name_without_evidence"
+        selected["v1_no_web_evidence_policy"] = policy
+        result = dict(search_result)
+        result["identity_status"] = "v1_local_clear_name"
+        result["identity_decision_basis"] = policy
+        result["v1_no_web_evidence_policy"] = policy
+        result["need_manual_review"] = False
+        return selected, result
+
+    @staticmethod
+    def _checksum_valid_cas(value: str) -> bool:
+        candidate = re.sub(r"[‐‑‒–—−]", "-", str(value or "").strip())
+        if not re.fullmatch(r"\d{2,7}-\d{2}-\d", candidate):
+            return False
+        digits = candidate.replace("-", "")
+        checksum = sum(int(digit) * index for index, digit in enumerate(reversed(digits[:-1]), start=1)) % 10
+        return checksum == int(digits[-1])
+
     def enrichment_metrics(self) -> EnrichmentMetrics:
         metrics = getattr(self, "_enrichment_metrics", None)
         if metrics is None:
@@ -96,138 +404,12 @@ class ApprovalFlowMixin:
             self._enrichment_metrics = metrics
         return metrics
 
-    def v2_pipeline_enabled(self) -> bool:
-        approval = ((getattr(self, "settings", {}) or {}).get("approval", {}) or {})
-        configured = approval.get("pipeline_version", "v1")
-        selected = str(os.getenv("APPROVAL_PIPELINE_VERSION") or configured).strip().lower()
-        if selected == "doubao_web_v2":
-            print("Deprecated approval pipeline 'doubao_web_v2' was normalized to V1.")
-            return False
-        return selected == "v2"
 
-    def enrichment_v2_shadow_enabled(self) -> bool:
-        config = (getattr(self, "settings", {}) or {}).get("enrichment_v2", {}) or {}
-        return self._truthy(config.get("shadow_mode")) and not self.v2_pipeline_enabled()
 
-    def enrichment_v2_production_enabled(self) -> bool:
-        config = (getattr(self, "settings", {}) or {}).get("enrichment_v2", {}) or {}
-        return self.v2_pipeline_enabled() or (
-            self._truthy(config.get("enabled")) and not self._truthy(config.get("shadow_mode"))
-        )
 
-    def run_enrichment_v2_shadow(
-        self,
-        reagent: dict[str, Any],
-        rule_engine: RuleEngine,
-        legacy_suggestion: dict[str, Any],
-    ) -> None:
-        """Evaluate V2 for comparison only; it never changes the suggestion."""
-        service = getattr(self, "_enrichment_v2", None)
-        if service is None:
-            service = EnrichmentV2(settings=self.settings, root_dir=self.root_dir)
-            self._enrichment_v2 = service
-        try:
-            evaluation = service.evaluate(reagent, rule_engine)
-            comparison = service.compare_legacy(legacy_suggestion, evaluation)
-            self.enrichment_metrics().record("shadow_comparison", **comparison)
-        except Exception as error:  # Shadow diagnostics must not block the legacy approval flow.
-            self.enrichment_metrics().record("shadow_failure", error_type=type(error).__name__)
 
-    def run_enrichment_v2_shadow_batch(
-        self,
-        items: list[dict[str, Any]],
-        rule_engine: RuleEngine,
-        suggestions_by_index: dict[int, dict[str, Any]],
-    ) -> None:
-        """Run one batched V2 shadow lookup for the current reagent page."""
-        if not items:
-            return
-        service = getattr(self, "_enrichment_v2", None)
-        if service is None:
-            service = EnrichmentV2(settings=self.settings, root_dir=self.root_dir)
-            self._enrichment_v2 = service
-        try:
-            evaluations = service.evaluate_many([item["reagent"] for item in items], rule_engine)
-            for item, evaluation in zip(items, evaluations):
-                legacy = suggestions_by_index.get(item["index"], {})
-                legacy_snapshot = dict(legacy)
-                if self.enrichment_v2_production_enabled():
-                    self.apply_enrichment_v2_evaluation_to_suggestion(legacy, evaluation)
-                comparison = service.compare_legacy(legacy_snapshot, evaluation)
-                self.enrichment_metrics().record("shadow_comparison", **comparison)
-                if self.enrichment_v2_production_enabled() and legacy.get("需人工复核"):
-                    self.add_manual_review_item_from_suggestion(
-                        item["reagent"],
-                        item.get("name_result") or {},
-                        item.get("search_result") or {},
-                        item.get("extracted") or {},
-                        (evaluation.get("classification") or {}),
-                        legacy,
-                    )
-        except Exception as error:  # Shadow diagnostics must not block V1; selected V2 fails safely to review.
-            self.enrichment_metrics().record("shadow_failure", error_type=type(error).__name__)
-            if self.enrichment_v2_production_enabled():
-                for item in items:
-                    suggestion = suggestions_by_index.get(item["index"])
-                    if suggestion is None:
-                        continue
-                    suggestion["审批链路"] = "v2"
-                    suggestion["最终建议类别"] = UNKNOWN_CATEGORY
-                    suggestion["规则原因"] = f"V2 物化信息判定失败，已转人工复核：{type(error).__name__}"
-                    suggestion["置信度"] = 0.0
-                    suggestion["需人工复核"] = True
-                    self.add_manual_review_item_from_suggestion(
-                        item["reagent"], item.get("name_result") or {}, item.get("search_result") or {},
-                        item.get("extracted") or {}, {}, suggestion,
-                    )
 
     @staticmethod
-    def apply_enrichment_v2_evaluation_to_suggestion(
-        suggestion: dict[str, Any],
-        evaluation: dict[str, Any],
-    ) -> None:
-        classification = evaluation.get("classification") or {}
-        identity = evaluation.get("identity") or {}
-        suggestion["最终建议类别"] = str(classification.get("final_category") or "未知类")
-        suggestion["命中类别"] = ", ".join(classification.get("matched_categories", []) or [])
-        suggestion["规则原因"] = str(classification.get("reason") or "")
-        suggestion["置信度"] = max(0.0, min(1.0, float(classification.get("confidence") or 0.0)))
-        suggestion["身份验证状态"] = str(identity.get("status") or "unresolved")
-        suggestion["数据获取状态"] = "v2_structured_evidence"
-        suggestion["数据源诊断"] = json.dumps(evaluation.get("provider_diagnostics") or [], ensure_ascii=False)
-        suggestion["字段证据"] = json.dumps(evaluation.get("evidence") or [], ensure_ascii=False)
-        identity_resolution = evaluation.get("identity_resolution") or {}
-        suggestion["身份解析详情"] = json.dumps(identity_resolution, ensure_ascii=False)
-        suggestion["名称身份"] = json.dumps(identity_resolution.get("name_identity") or {}, ensure_ascii=False)
-        suggestion["CAS身份"] = json.dumps(identity_resolution.get("cas_identity") or {}, ensure_ascii=False)
-        suggestion["身份状态"] = str(identity_resolution.get("status") or identity.get("status") or "unresolved")
-        suggestion["身份候选"] = json.dumps(
-            {"name": identity_resolution.get("name_candidates", []), "cas": identity_resolution.get("cas_candidates", [])},
-            ensure_ascii=False,
-        )
-        opinion = evaluation.get("llm_second_opinion") or {}
-        suggestion["LLM身份第二意见"] = json.dumps(opinion, ensure_ascii=False)
-        suggestion["LLM身份意见"] = opinion.get("identity_opinion", "")
-        suggestion["LLM名称身份意见"] = opinion.get("name_identity_opinion", "")
-        suggestion["LLMCAS身份意见"] = opinion.get("cas_identity_opinion", "")
-        suggestion["LLM辅助建议类别"] = opinion.get("candidate_category", "")
-        suggestion["LLM辅助物性意见"] = opinion.get("physicochemical_summary_cn", "")
-        suggestion["LLM辅助判定理由"] = opinion.get("reason_cn", "")
-        suggestion["LLM辅助规则依据"] = opinion.get("matched_rule_summary_cn", "")
-        suggestion["LLM辅助不确定项"] = "；".join(opinion.get("uncertainties_cn", []) or [])
-        suggestion["LLM辅助置信度"] = opinion.get("advisory_confidence", "")
-        suggestion["LLM辅助依据类型"] = opinion.get("evidence_basis", "")
-        identity_status = str(identity_resolution.get("status") or identity.get("status") or "unresolved")
-        identity_review_triggered = identity_status in {"cas_missing", "conflict", "ambiguous", "unresolved"}
-        suggestion["LLM辅助意见仅供复核"] = bool(opinion.get("used_llm") or identity_review_triggered)
-        suggestion["是否生成LLM身份第二意见"] = bool(opinion.get("used_llm"))
-        suggestion["V2正式判定"] = True
-        suggestion["审批链路"] = "v2"
-        suggestion["需人工复核"] = bool(classification.get("need_manual_review", True))
-        ApprovalFlowMixin.apply_unknown_auto_write_policy(suggestion)
-        if str(identity_resolution.get("status") or "").strip() in {"cas_missing", "conflict", "ambiguous", "unresolved"}:
-            suggestion["需人工复核"] = True
-        ApprovalFlowMixin.apply_terminal_reject_policy(suggestion)
 
     def run_debug_capture(self) -> None:
         self.run_after_login_capture(
@@ -945,7 +1127,7 @@ class ApprovalFlowMixin:
 
         with stage_logger.stage("read_current_page_unmatched", f"page {page_label}".strip()):
             unmatched_reagents = [
-                record
+                minimize_reagent_record(record)
                 for record in self.read_current_page_reagents(page)
                 if record.get(property_key, "").strip() == "-"
             ]
@@ -1096,27 +1278,6 @@ class ApprovalFlowMixin:
                     )
                     continue
 
-            if self.v3_pipeline_enabled():
-                local = rule_engine.classify({
-                    "reagent_name": reagent_name,
-                    "name": name_result.get("standard_name") or reagent_name,
-                    "standard_name": name_result.get("standard_name", ""),
-                    "cleaned_name": name_result.get("cleaned_name", ""),
-                    "cas": cas,
-                    "text": " ".join(filter(None, [reagent_name, name_result.get("standard_name", "")])),
-                    "allow_default_normal": False,
-                })
-                if (
-                    not self.v3_retry_requested_for(reagent)
-                    and local.get("final_category")
-                    and local.get("matched_rule_ids")
-                    and not local.get("need_manual_review")
-                ):
-                    suggestion = self._direct_business_suggestion(reagent, reagent_name, local, str(local.get("reason") or "V3 本地规则命中"))
-                    suggestion["审批链路"] = "v3"
-                    suggestion["V3自动来源"] = "local_rule"
-                    suggestions_by_index[index] = suggestion
-                    continue
             pending_reagents.append({"index": index, "progress": progress, "reagent": reagent, "name_result": name_result})
 
         if not pending_reagents:
@@ -1126,19 +1287,6 @@ class ApprovalFlowMixin:
                 self.remember_erp_suggestion(memory, suggestion)
             self.audit_approval_suggestions(ordered_suggestions, rule_engine)
             return ordered_suggestions
-
-        if self.v3_pipeline_enabled():
-            v3_suggestions = self.process_v3_pending_reagents(pending_reagents, rule_engine)
-            suggestions_by_index.update(v3_suggestions)
-            ordered_suggestions = [suggestions_by_index[index] for index in sorted(suggestions_by_index)]
-            ordered_suggestions = self.enforce_duplicate_suggestion_consistency(ordered_suggestions)
-            # V3's model-only rows are never remembered here.  Local V3 rows are
-            # persisted only after the existing ERP write-and-verify path succeeds.
-            for suggestion in ordered_suggestions:
-                self.remember_erp_suggestion(memory, suggestion)
-            self.audit_approval_suggestions(ordered_suggestions, rule_engine)
-            return ordered_suggestions
-
 
         with stage_logger.stage("chemical_search", f"parallel {len(pending_reagents)} reagent(s)"):
             search_results = self.search_reagents_parallel(pending_reagents)
@@ -1195,10 +1343,7 @@ class ApprovalFlowMixin:
                     extracted,
                     classification,
                 )
-                if (
-                    suggestions_by_index[item["index"]].get("需人工复核")
-                    and not self.enrichment_v2_production_enabled()
-                ):
+                if suggestions_by_index[item["index"]].get("需人工复核"):
                     with stage_logger.stage("add_manual_review_item", reagent_name):
                         self.add_manual_review_item_from_suggestion(
                             reagent,
@@ -1212,8 +1357,6 @@ class ApprovalFlowMixin:
             if callable(flush_review_batch):
                 flush_review_batch()
 
-        if self.enrichment_v2_shadow_enabled() or self.enrichment_v2_production_enabled():
-            self.run_enrichment_v2_shadow_batch(prepared_items, rule_engine, suggestions_by_index)
         ordered_suggestions = [suggestions_by_index[index] for index in sorted(suggestions_by_index)]
         ordered_suggestions = self.enforce_duplicate_suggestion_consistency(ordered_suggestions)
         for suggestion in ordered_suggestions:
@@ -1221,266 +1364,14 @@ class ApprovalFlowMixin:
         self.audit_approval_suggestions(ordered_suggestions, rule_engine)
         return ordered_suggestions
 
-    def v3_pipeline_enabled(self) -> bool:
-        configured = ((getattr(self, "settings", {}) or {}).get("approval", {}) or {}).get("pipeline_version", "v1")
-        return str(os.getenv("APPROVAL_PIPELINE_VERSION") or configured).strip().lower() == "v3"
 
-
-    def process_v3_pending_reagents(
-        self,
-        pending_reagents: list[dict[str, Any]],
-        rule_engine: RuleEngine,
-    ) -> dict[int, dict[str, Any]]:
-        """Run V3 model-first batches and web-search only unresolved disagreements."""
-        config = ((getattr(self, "settings", {}) or {}).get("approval", {}) or {}).get("v3", {}) or {}
-        retrieval_mode = str(config.get("retrieval_mode") or "model_first").strip().lower()
-        if retrieval_mode not in {"model_first", "always_web"}:
-            retrieval_mode = "model_first"
-        retry_items = [item for item in pending_reagents if self.v3_retry_requested_for(item["reagent"])]
-        if os.getenv("V3_RETRY_ITEM_KEY"):
-            pending_reagents = retry_items
-        batch_size = max(1, min(20, int(config.get("batch_size", 5))))
-        client = V3WebSearchClient(self.settings, self.root_dir)
-        bundle = rule_bundle(rule_engine)
-        list_number = str(self.current_detail_list_number() or "")
-        output: dict[int, dict[str, Any]] = {}
-        begin = getattr(self, "begin_manual_review_batch", None)
-        flush = getattr(self, "flush_manual_review_batch", None)
-        if callable(begin):
-            begin()
-        try:
-            batches = [pending_reagents[start:start + batch_size] for start in range(0, len(pending_reagents), batch_size)]
-            configured_parallelism = max(1, min(2, int(config.get("parallel_batches", 1))))
-            batch_results: dict[int, dict[str, Any]] = {}
-            next_position = 0
-            degraded_to_single = False
-            with ThreadPoolExecutor(max_workers=configured_parallelism) as executor:
-                active: dict[Any, int] = {}
-                while next_position < len(batches) or active:
-                    active_limit = 1 if degraded_to_single else configured_parallelism
-                    while next_position < len(batches) and len(active) < active_limit:
-                        active[executor.submit(
-                            client.request_batch,
-                            batches[next_position],
-                            bundle,
-                            list_number,
-                            use_web_search=retrieval_mode == "always_web",
-                        )] = next_position
-                        next_position += 1
-                    done, _ = wait(active, return_when=FIRST_COMPLETED)
-                    for future in done:
-                        position = active.pop(future)
-                        result = future.result()
-                        batch_results[position] = result
-                        if result.get("network_unstable") and not degraded_to_single:
-                            degraded_to_single = True
-                            print("V3 detected a recoverable network failure; remaining batches will run serially.")
-            for position, batch in enumerate(batches):
-                result = batch_results[position]
-                self.record_v3_batch_metrics(result, list_number, len(batch))
-                if result.get("retrieval_mode") == "model_only":
-                    initial_by_sequence = {str(row.get("sequence") or ""): row for row in result.get("items", [])}
-                    fallback_items: list[dict[str, Any]] = []
-                    for item in batch:
-                        model = initial_by_sequence.get(str(item["reagent"].get("序号") or ""), {})
-                        probe = {
-                            "identity_status": str(model.get("identity_status") or "unresolved"),
-                            "identity_decision_basis": str(model.get("identity_basis") or ""),
-                        }
-                        classification = rule_engine.classify(
-                            self._classification_input(item["reagent"], probe, self.v3_model_properties_to_extracted(model.get("properties") or {}))
-                        )
-                        if not self.v3_auto_decision_allowed(model, item["reagent"], item.get("name_result") or {}, classification):
-                            fallback_items.append(item)
-                    if fallback_items:
-                        fallback = client.request_batch(fallback_items, bundle, list_number, use_web_search=True)
-                        self.record_v3_batch_metrics(fallback, list_number, len(fallback_items))
-                        replacement = {str(row.get("sequence") or ""): row for row in fallback.get("items", [])}
-                        result = dict(result)
-                        result["items"] = [replacement.get(str(row.get("sequence") or ""), row) for row in result.get("items", [])]
-                        result["web_search_calls"] = int(fallback.get("web_search_calls") or 0)
-                        result["fallback_web_search_calls"] = int(fallback.get("web_search_calls") or 0)
-                        result["retrieval_mode"] = "mixed"
-                result_by_sequence = {str(row.get("sequence") or ""): row for row in result.get("items", [])}
-                print(
-                    f"V3 batch {position + 1} ({result.get('retrieval_mode') or retrieval_mode}): {len(batch)} item(s), "
-                    f"ok={result.get('ok', False)}, elapsed={float(result.get('elapsed_seconds') or 0):.1f}s"
-                )
-                for item in batch:
-                    reagent = item["reagent"]
-                    name_result = item.get("name_result") or {}
-                    model = result_by_sequence.get(str(reagent.get("序号") or ""), {})
-                    candidate = str(model.get("candidate_category") or "").strip()
-                    sources = model.get("source_urls") or []
-                    extracted = self.v3_model_properties_to_extracted(model.get("properties") or {})
-                    identity_status = str(model.get("identity_status") or "unresolved")
-                    model_retrieval_mode = str(model.get("retrieval_mode") or result.get("retrieval_mode") or "model_only")
-                    search_result = {
-                        "source": "aliyun_bailian_v3_web_search" if model_retrieval_mode == "web_search" else "aliyun_bailian_v3_model",
-                        "url": " | ".join(str(url) for url in sources),
-                        "candidate_cas": str(model.get("identified_cas") or ""),
-                        "original_erp_cas": "",
-                        "identity_status": identity_status,
-                        "ordinary_evidence_complete": bool(model.get("ordinary_evidence_complete")),
-                        "need_manual_review": False,
-                        "relevance_passed": True,
-                        "source_confidence": 1.0,
-                        "evidence_quality": "v3_web_search" if model_retrieval_mode == "web_search" else "v3_model_knowledge",
-                        "retrieval_status": "v3_model_advisory" if model.get("ok") else "v3_model_invalid",
-                        "failure_reason": "" if model.get("ok") else str(model.get("reason") or result.get("error") or "V3 模型结果无效"),
-                        "llm_advisory_only": False,
-                        "llm_advisory_category": candidate,
-                        "llm_advisory_summary_cn": json.dumps(model.get("properties") or {}, ensure_ascii=False),
-                        "llm_advisory_reason_cn": str(model.get("reason") or ""),
-                        "llm_advisory_uncertainties_cn": "；".join(str(x) for x in (model.get("uncertainties") or [])),
-                        "identity_decision_basis": str(model.get("identity_basis") or ""),
-                        "llm_advisory_evidence_basis": "Responses web_search（结构化来源摘要）" if model_retrieval_mode == "web_search" else "Responses 模型知识（未联网）",
-                    }
-                    classification = rule_engine.classify(self._classification_input(reagent, search_result, extracted))
-                    agreement = self.v3_auto_decision_allowed(model, reagent, name_result, classification)
-                    if agreement:
-                        classification = {
-                            "final_category": candidate, "matched_categories": [candidate],
-                            "matched_rule_ids": classification.get("matched_rule_ids") or [],
-                            "reason": f"V3 本次搜索类别证据：{model.get('reason') or ''}",
-                            "confidence": 0.9, "need_manual_review": False,
-                        }
-                    invalid_model_result = not bool(model.get("ok"))
-                    if not agreement:
-                        search_result["need_manual_review"] = True
-                        search_result["llm_advisory_only"] = True
-                        search_result["failure_reason"] = (
-                            search_result.get("failure_reason")
-                            or f"V3 自动写入条件未满足：模型类别={candidate or '空'}；"
-                            f"规则引擎类别={classification.get('final_category') or '空'}；身份依据={model.get('identity_basis') or '空'}。"
-                        )
-                        if invalid_model_result:
-                            classification = {
-                                "final_category": "",
-                                "matched_categories": [],
-                                "matched_rule_ids": [],
-                                "reason": search_result["failure_reason"],
-                                "confidence": 0.0,
-                                "need_manual_review": False,
-                            }
-                    suggestion = self._approval_suggestion_row(reagent, name_result, search_result, extracted, classification)
-                    suggestion.update({
-                        "审批链路": "v3", "V3模型候选类别": candidate,
-                        "V3规则引擎类别": classification.get("final_category", ""),
-                        "V3类别一致": agreement,
-                        "V3 身份依据": str(model.get("identity_basis") or ""),
-                        "V3规则包指纹": str(result.get("rules_fingerprint") or bundle.get("fingerprint") or ""),
-                        "V3检索方式": model_retrieval_mode,
-                        "V3模型CAS": str(model.get("identified_cas") or ""),
-                        "V3 CAS状态": str(model.get("cas_status") or ""),
-                        "V3搜索调用次数": 1 if model_retrieval_mode == "web_search" else 0,
-                        "V3普通类排除完整": bool(model.get("ordinary_evidence_complete")),
-                        "V3证据合格": bool(model.get("category_evidence_valid")),
-                    })
-                    if agreement:
-                        suggestion["V3模型已规则复核"] = True
-                        suggestion["需人工复核"] = False
-                        suggestion["身份验证状态"] = identity_status
-                        suggestion["V3可核验直写"] = True
-                    else:
-                        suggestion["V3模型未核实"] = True
-                    if invalid_model_result:
-                        suggestion["V3无效结果"] = True
-                        suggestion["需人工复核"] = True
-                        suggestion["ERP写入状态"] = "manual_review_invalid_v3"
-                        suggestion["ERP写入说明"] = "V3 模型响应无效，已记录为可重跑结果并转人工复核。"
-                        self.record_v3_invalid_result(
-                            list_number=list_number,
-                            batch_position=position,
-                            reagent=reagent,
-                            name_result=name_result,
-                            result=result,
-                            model=model,
-                        )
-                    output[item["index"]] = suggestion
-                    if not agreement:
-                        self.add_manual_review_item_from_suggestion(reagent, name_result, search_result, extracted, classification, suggestion)
-        finally:
-            if callable(flush):
-                flush()
-        return output
-
-    @staticmethod
-    def v3_retry_requested_for(reagent: dict[str, Any]) -> bool:
-        raw = str(os.getenv("V3_RETRY_ITEM_KEY") or "").strip()
-        if not raw:
-            return False
-        try:
-            wanted = json.loads(raw)
-        except json.JSONDecodeError:
-            return False
-        if not isinstance(wanted, dict):
-            return False
-        return (
-            str(wanted.get("sequence") or "") == str(reagent.get("序号") or "")
-            and str(wanted.get("reagent_name") or "") == str(reagent.get("试剂名称") or "")
-            and str(wanted.get("cas") or "") == str(reagent.get("CAS号") or "")
-        )
-
-    def record_v3_invalid_result(
-        self,
-        *,
-        list_number: str,
-        batch_position: int,
-        reagent: dict[str, Any],
-        name_result: dict[str, Any],
-        result: dict[str, Any],
-        model: dict[str, Any],
-    ) -> None:
-        """Persist invalid provider rows outside the manual-review queue."""
-        at = pd.Timestamp.now().isoformat()
-        identity = {
-            "list_number": list_number,
-            "sequence": str(reagent.get("序号") or ""),
-            "reagent_name": str(reagent.get("试剂名称") or ""),
-            "cas": str(reagent.get("CAS号") or ""),
-        }
-        event_id = hashlib.sha256(json.dumps([at, identity], ensure_ascii=False).encode("utf-8")).hexdigest()[:20]
-        payload = {
-            "event_id": event_id,
-            "at": at,
-            "status": "ignored_retriable",
-            "retryable": True,
-            "batch_position": batch_position + 1,
-            "attempts": int(result.get("attempts") or 1),
-            "failure_reason": str(model.get("reason") or result.get("error") or "V3 模型结果无效"),
-            "identity": identity,
-            "reagent": reagent,
-            "name_result": name_result,
-            "rules_fingerprint": str(result.get("rules_fingerprint") or ""),
-        }
-        try:
-            path = Path(self.root_dir) / "data" / "logs" / "v3_invalid_results.jsonl"
-            path.parent.mkdir(parents=True, exist_ok=True)
-            with path.open("a", encoding="utf-8") as handle:
-                handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
-        except Exception as error:  # Invalid-result logging must never make a batch reviewable.
-            print(f"Could not record V3 invalid result: {error}")
 
 
     @staticmethod
-    def v3_auto_decision_allowed(model: dict[str, Any], reagent: dict[str, Any], name_result: dict[str, Any], classification: dict[str, Any]) -> bool:
-        if not model.get("ok"):
-            return False
-        category = str(model.get("candidate_category") or "").strip()
-        if str(model.get("identity_basis") or "") not in {"name", "cas_fallback"} or not category or model.get("review_required") is not False:
-            return False
-        erp_cas = str(reagent.get("CAS号") or "").strip()
-        if not V3WebSearchClient._valid_cas(erp_cas):
-            return False
-        if str(model.get("cas_status") or "") != "matched" or str(model.get("identified_cas") or "").strip() != erp_cas:
-            return False
-        ruled = str(classification.get("final_category") or "").strip()
-        # A local result is an independent classifier and must agree.  When it
-        # genuinely has no category, the user-approved V3 model decision is used.
-        if ruled and ruled != category:
-            return False
-        return True
+
+
+
+    @staticmethod
 
     @staticmethod
     def apply_selected_property_evidence(extracted: dict[str, Any], search_result: dict[str, Any]) -> dict[str, Any]:
@@ -1502,73 +1393,21 @@ class ApprovalFlowMixin:
                 merged[field_name] = True if status == "present" else False if status == "absent" else None
             if value:
                 evidence.append(f"{field_name}: {value} ({item.get('source') or '-'})")
+        selected_toxicity = search_result.get("selected_toxicity_evidence") or []
+        if isinstance(selected_toxicity, list):
+            toxicity_values = [
+                str(item.get("value") or item.get("raw_value") or "").strip()
+                for item in selected_toxicity if isinstance(item, dict)
+                and str(item.get("status") or "measured") == "measured"
+            ]
+            toxicity_values = list(dict.fromkeys(value for value in toxicity_values if value))
+            if toxicity_values:
+                merged["toxicity"] = " | ".join(toxicity_values)
+                merged["toxicity_status"] = "measured"
+                for value in toxicity_values:
+                    evidence.append(f"toxicity: {value} (分组最低值)")
         merged["evidence"] = list(dict.fromkeys(str(item) for item in evidence if str(item).strip()))
         return merged
-
-    @staticmethod
-    def v3_model_properties_to_extracted(properties: dict[str, Any]) -> dict[str, Any]:
-        """Map the fixed V3 contract into the existing rule-engine evidence shape.
-
-        Candidate category is intentionally excluded: the rule engine must reach
-        its result from the name and structured physical-property fields alone.
-        """
-        properties = properties if isinstance(properties, dict) else {}
-        extracted: dict[str, Any] = {}
-        flash_point = properties.get("flash_point") or {}
-        if isinstance(flash_point, dict) and flash_point.get("status") == "measured":
-            value = str(flash_point.get("value_c") or flash_point.get("value") or "").strip()
-            extracted["flash_point"] = f"{flash_point.get('operator', '=')}{value}" if value else ""
-        else:
-            extracted["flash_point"] = ""
-        extracted["flash_point_status"] = str(flash_point.get("status") or "unknown") if isinstance(flash_point, dict) else "unknown"
-        extracted["flash_point_reason"] = str(flash_point.get("reason") or "") if isinstance(flash_point, dict) else ""
-        boiling_point = properties.get("boiling_point") or {}
-        boiling_value = str(boiling_point.get("value_c") or boiling_point.get("value") or "").strip() if isinstance(boiling_point, dict) else ""
-        extracted["boiling_point"] = f"{boiling_point.get('operator', '=')}{boiling_value}" if isinstance(boiling_point, dict) and boiling_point.get("status") == "measured" and boiling_value else ""
-        for field in ("corrosive", "oxidizing", "flammable", "water_reactive", "explosive_risk", "heavy_metal"):
-            value = properties.get(field) or {}
-            extracted[field] = True if isinstance(value, dict) and value.get("status") == "present" else False if isinstance(value, dict) and value.get("status") == "absent" else None
-        toxicity = properties.get("toxicity") or {}
-        if isinstance(toxicity, dict) and toxicity.get("status") == "measured":
-            extracted["toxicity"] = f"{toxicity.get('endpoint')} {toxicity.get('value')} {toxicity.get('unit')} {toxicity.get('route')}"
-        elif isinstance(toxicity, dict) and toxicity.get("status") == "classified":
-            extracted["toxicity"] = str(toxicity.get("ghs_classification") or "")
-        else:
-            extracted["toxicity"] = ""
-        extracted["suggested_categories"] = []
-        extracted["evidence"] = [str(properties.get("hazard_text") or "").strip()] if str(properties.get("hazard_text") or "").strip() else []
-        return extracted
-
-    def record_v3_batch_metrics(self, result: dict[str, Any], list_number: str, item_count: int) -> None:
-        """Append compact, non-sensitive V3 timing/usage records for later comparison."""
-        usage = result.get("usage") or {}
-        input_tokens = float(usage.get("input_tokens") or usage.get("prompt_tokens") or 0)
-        output_tokens = float(usage.get("output_tokens") or usage.get("completion_tokens") or 0)
-        cached_tokens = float((usage.get("input_tokens_details") or {}).get("cached_tokens") or 0)
-        price = ((getattr(self, "settings", {}) or {}).get("approval", {}) or {}).get("v3", {}) or {}
-        cost = ((max(0, input_tokens - cached_tokens) * float(price.get("input_price_per_million", 2))
-                 + cached_tokens * float(price.get("cached_input_price_per_million", 0.4))
-                 + output_tokens * float(price.get("output_price_per_million", 8))) / 1_000_000
-                + float(result.get("web_search_calls") or 0) * float(price.get("web_search_price", 0.004)))
-        payload = {"at": pd.Timestamp.now().isoformat(), "list_number": list_number, "items": item_count,
-                   "ok": bool(result.get("ok")), "elapsed_seconds": round(float(result.get("elapsed_seconds") or 0), 3),
-                   "web_search_calls": int(result.get("web_search_calls") or 0), "input_tokens": input_tokens,
-                   "attempts": int(result.get("attempts") or 1), "network_unstable": bool(result.get("network_unstable")),
-                   "cached_tokens": cached_tokens, "output_tokens": output_tokens, "estimated_cost_cny": round(cost, 6),
-                   "rules_fingerprint": str(result.get("rules_fingerprint") or ""), "error": str(result.get("error") or "")}
-        try:
-            path = Path(self.root_dir) / "data" / "logs" / "v3_approval_metrics.jsonl"
-            path.parent.mkdir(parents=True, exist_ok=True)
-            with path.open("a", encoding="utf-8") as handle:
-                handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
-            total = float(getattr(self, "_v3_task_estimated_cost", 0.0)) + cost
-            self._v3_task_estimated_cost = total
-            threshold = float(price.get("cost_warning_cny", 10))
-            if total >= threshold > 0 and not getattr(self, "_v3_cost_warning_emitted", False):
-                self._v3_cost_warning_emitted = True
-                print(f"V3 estimated task cost ¥{total:.4f} reached the ¥{threshold:.2f} reminder threshold; continuing.")
-        except Exception as error:  # Metrics may not interrupt an approval run.
-            print(f"Could not record V3 metrics: {error}")
 
     def audit_approval_suggestions(
         self,
@@ -1731,6 +1570,28 @@ class ApprovalFlowMixin:
             )
             if name_match:
                 return name_match
+
+            # A plainly named aqueous solution may reuse a verified pure
+            # component decision under the approved V1 business policy.  This
+            # is intentionally narrow: only ``<single component>[strength]水溶液``
+            # forms qualify, never formulations that name another solvent or
+            # a second component.  The flag is retained on the returned row so
+            # the approval detail can disclose that the category came from the
+            # pure-component record.
+            primary_component = cls.memory_solution_primary_component(
+                raw_name, standard_name, cleaned_name
+            )
+            if primary_component:
+                pure_match = memory.lookup(
+                    raw_name=primary_component,
+                    standard_name=primary_component,
+                    cleaned_name=primary_component,
+                )
+                if pure_match and str(pure_match.get("source") or "").strip().lower() == "verified_erp_write":
+                    matched = dict(pure_match)
+                    matched["_memory_solution_reuse"] = True
+                    matched["_memory_solution_primary_component"] = primary_component
+                    return matched
             return None
         normalized_cas = cls.normalize_cas(cas)
         if normalized_cas and normalized_cas not in {"-", "无", "n/a", "na", "none"}:
@@ -1738,6 +1599,30 @@ class ApprovalFlowMixin:
             if cas_match:
                 return cas_match
         return None
+
+    @staticmethod
+    def memory_solution_primary_component(*names: str) -> str:
+        """Return the sole component of a clearly named aqueous solution.
+
+        It deliberately does not parse formulations such as ``X乙醇分散液``
+        or multi-component products.  Aqueous-solution reuse is a V1 business
+        policy and must remain visible to the caller rather than silently
+        broadening ordinary name matching.
+        """
+        for value in names:
+            compact = re.sub(r"[\s\u200b\u200c\u200d\ufeff]+", "", str(value or ""))
+            match = re.fullmatch(
+                r"(?P<component>.+?)(?:[（(]?(?:\d+(?:\.\d+)?%|\d+(?:\.\d+)?(?:mol/l|mol\s*/\s*l|m))[）)]?)?水溶(?:液)?",
+                compact,
+                flags=re.IGNORECASE,
+            )
+            if not match:
+                continue
+            component = str(match.group("component") or "").strip("-_（）() ")
+            if not component or any(token in component for token in ("、", "+", "和", "与", "/", "乙醇", "甲醇", "丙酮")):
+                continue
+            return component
+        return ""
 
     def queue_manual_review_if_suggestion_requires_it(
         self,
@@ -1880,10 +1765,6 @@ class ApprovalFlowMixin:
         }
 
     def remember_erp_suggestion(self, memory: ReagentMemory, suggestion: dict[str, Any]) -> bool:
-        # V3 writes to memory only from remember_verified_approval_suggestion,
-        # after ERP has confirmed the property value.
-        if self.v3_pipeline_enabled():
-            return False
         if str(suggestion.get("查询来源") or "").strip() == "reagent_memory":
             return False
         if self._truthy(suggestion.get("LLM辅助意见仅供复核")):
@@ -1899,10 +1780,6 @@ class ApprovalFlowMixin:
         return memory.remember_suggestion(normalized)
 
     def remember_verified_approval_suggestion(self, suggestion: dict[str, Any], erp_category: str) -> bool:
-        if self._truthy(suggestion.get("需人工复核")):
-            return False
-        if self._truthy(suggestion.get("LLM辅助意见仅供复核")):
-            return False
         memory = ReagentMemory.from_settings(self.settings, self.root_dir)
         verified = dict(suggestion)
         verified["最终建议类别"] = erp_category
@@ -1915,18 +1792,41 @@ class ApprovalFlowMixin:
                 or self._truthy(verified.get("identity_enrichment_candidate_cas_verified"))
             )
             and original_cas in {"", "-", "--"}
-            and V3WebSearchClient._valid_cas(candidate_cas)
+            and self._checksum_valid_cas(candidate_cas)
         )
         if cas_promoted:
             verified["CAS号"] = candidate_cas
         reason = str(verified.get("规则原因") or "").strip()
+        formal_rule_ids = list(dict.fromkeys(
+            re.findall(r"\b[A-Z][A-Z0-9]*(?:-[A-Z0-9]+){2,}\b", str(verified.get("命中规则ID") or ""))
+        ))
+        if formal_rule_ids:
+            reason = f"{reason}\n正式规则ID: {', '.join(formal_rule_ids)}".strip()
         backend_evidence = (
             f"ERP 接口稳定记录 ID {verified.get('_erp_record_id')} 两次回读确认 {erp_category}。"
             if verified.get("_erp_record_id") else f"ERP 网页保存后校验物化特性为 {erp_category}。"
         )
         verified["规则原因"] = f"{reason}\n{backend_evidence}".strip()
         try:
-            stored = memory.remember_suggestion(verified)
+            # A successful ERP write with a stable-ID read-back is the final
+            # business confirmation.  Persist every such result for exact
+            # future reagent-name reuse, including product names and entries
+            # whose earlier model advice had remained advisory-only.
+            stored = memory.add_record(
+                raw_name=str(verified.get("试剂名称") or "").strip(),
+                cleaned_name=str(verified.get("清洗后名称") or "").strip(),
+                standard_name=str(verified.get("标准化名称") or "").strip(),
+                cas=str(verified.get("CAS号") or "").strip(),
+                final_category=erp_category,
+                confidence=1.0,
+                reason=verified["规则原因"],
+                source="verified_erp_write",
+                url=str(verified.get("查询URL") or "").strip(),
+                need_manual_review=False,
+                manual_verified=True,
+                track_conflicts=False,
+                force_reusable=True,
+            )
             if stored and cas_promoted:
                 audit_name = (
                     "v3_candidate_cas_audit.jsonl"
@@ -1957,6 +1857,12 @@ class ApprovalFlowMixin:
         if ReagentMemory.is_unsafe_reusable_evidence(memory_row):
             return False
         final_category = str(memory_row.get("final_category") or "").strip()
+        # An ERP readback proves that Unknown was saved, not that the
+        # underlying identity/formula was correctly deemed unknowable.  Recheck
+        # these entries when they recur; explicit unknown names are handled by
+        # the earlier deterministic name rule.
+        if final_category == UNKNOWN_CATEGORY:
+            return False
         if final_category in {"易燃类", "易燃液体"}:
             return self._flammable_memory_match_is_safe(reagent, memory_row, name_result, rule_engine)
         if final_category != "普通类":
@@ -2186,6 +2092,12 @@ class ApprovalFlowMixin:
             ),
             "original_erp_cas": suggestion.get("原ERP CAS号", search_result.get("original_erp_cas", "")),
             "candidate_cas": suggestion.get("网页候选CAS", search_result.get("candidate_cas", "")),
+            "candidate_cas_validation_status": suggestion.get("候选CAS校验状态", search_result.get("candidate_cas_validation_status", "")),
+            "candidate_cas_validation_reason": suggestion.get("候选CAS拒绝原因", search_result.get("candidate_cas_validation_reason", "")),
+            "candidate_cas_page_name": suggestion.get("候选CAS页面名称", search_result.get("candidate_cas_page_name", "")),
+            "candidate_cas_secondary_confirmation_source": suggestion.get("候选CAS二次确认来源", search_result.get("candidate_cas_secondary_confirmation_source", "")),
+            "candidate_cas_secondary_confirmation_url": suggestion.get("候选CAS二次确认URL", search_result.get("candidate_cas_secondary_confirmation_url", "")),
+            "candidate_cas_memory_eligible": bool(suggestion.get("候选CAS可写入记忆库")),
             "corrected_cas": suggestion.get("修正CAS号", search_result.get("corrected_cas", "")),
             "cas_name_conflict": suggestion.get("CAS名称冲突", search_result.get("cas_name_conflict", False)),
             "cas_correction_candidate": suggestion.get("CAS修正候选", search_result.get("cas_correction_candidate", False)),
@@ -2349,6 +2261,16 @@ class ApprovalFlowMixin:
                 rule_engine,
                 search_result.get("failure_reason") or "No trusted web evidence; LLM skipped for obvious product/mixture/manual-review item.",
             )
+            classification, search_result = self.v1_classify_without_web_evidence(
+                reagent,
+                item.get("name_result") or {},
+                search_result,
+                classification,
+                rule_engine,
+            )
+            item["search_result"] = search_result
+            if classification.get("v1_no_web_evidence_policy"):
+                return extracted, classification
             classification = dict(classification)
             classification["need_manual_review"] = True
             classification["reason"] = (
@@ -2464,19 +2386,30 @@ class ApprovalFlowMixin:
             }
             component_classification = rule_engine.classify(component_info)
             component_result["classification"] = component_classification
-            for category in component_classification.get("matched_categories", []) or []:
+            component_candidates = list(component_classification.get("matched_categories", []) or [])
+            if component_classification.get("final_category"):
+                component_candidates.insert(0, component_classification["final_category"])
+            for category in component_candidates:
                 category = str(category or "").strip()
-                if category and category not in {"普通类", "未知类"} and category not in component_categories:
+                if category and category != "未知类" and category not in component_categories:
                     component_categories.append(category)
         if component_categories:
             search_result["component_categories"] = component_categories
             search_result["mixture_risk_categories"] = list(component_categories)
+            search_result["mixture_selected_category"] = rule_engine.highest_priority_category(component_categories)
+            search_result["mixture_classification_basis"] = "highest_rule_priority_of_confirmed_components"
         classification = rule_engine.classify(self._classification_input(reagent, search_result, extracted))
         if search_result.get("is_mixture") and not search_result.get("composition_complete", False):
             classification = dict(classification)
             classification["need_manual_review"] = True
             classification["reason"] = (
                 f"{classification.get('reason') or ''} 混合物组成不完整，已采用已知最高风险类别并转人工复核。"
+            ).strip()
+        elif search_result.get("is_mixture") and search_result.get("composition_complete", False):
+            classification = dict(classification)
+            classification["reason"] = (
+                f"{classification.get('reason') or ''} 混合物按全部已确认组分中的最高规则优先级保守分类，"
+                "不因低浓度而降级。"
             ).strip()
         if search_result.get("used_llm_knowledge_fallback") or search_result.get("used_llm_rule_fallback"):
             classification = dict(classification)
@@ -2495,6 +2428,21 @@ class ApprovalFlowMixin:
                 f"{classification.get('reason') or ''} "
                 "LLM fallback evidence is advisory only and requires manual review."
             ).strip()
+        classification, search_result = self.v1_primary_component_classification(
+            reagent,
+            search_result,
+            extracted,
+            classification,
+            rule_engine,
+        )
+        classification, search_result = self.v1_classify_without_web_evidence(
+            reagent,
+            item.get("name_result") or {},
+            search_result,
+            classification,
+            rule_engine,
+        )
+        item["search_result"] = search_result
         if (
             hasattr(extractor, "generate_manual_review_advice")
             and self.llm_manual_review_advice_enabled()
@@ -2529,6 +2477,13 @@ class ApprovalFlowMixin:
             item["search_result"] = search_result
             extracted = dict(extracted)
             extracted.update(self._manual_advice_extracted_fields(advice))
+            if self.llm_rule_gap_auto_adopt_enabled():
+                classification, search_result = self._adopt_llm_rule_gap_opinion(
+                    classification=classification,
+                    search_result=search_result,
+                    advice=advice,
+                )
+                item["search_result"] = search_result
         print(
             f"[parallel llm] END {item['progress']} {reagent_name} "
             f"-> {classification.get('final_category') or '<manual_review>'}"
@@ -2560,6 +2515,62 @@ class ApprovalFlowMixin:
         if value is None:
             value = approval_settings.get("enable_llm_manual_review_advice", True)
         return self._truthy(value)
+
+    def llm_rule_gap_auto_adopt_enabled(self) -> bool:
+        """Whether a non-empty LLM second opinion fills an otherwise empty rule result.
+
+        This is intentionally narrower than replacing a rule-engine decision: it
+        applies only when the engine produced no ERP-mappable category at all.
+        The resulting suggestion remains explicitly marked for audit and is only
+        written through the normal ERP save-and-readback path.
+        """
+        approval_settings = self.settings.get("approval", {}) or {}
+        value = os.getenv("ADOPT_LLM_SECOND_OPINION_WHEN_RULE_UNRESOLVED")
+        if value is None:
+            value = approval_settings.get("adopt_llm_second_opinion_when_rule_unresolved", False)
+        return self._truthy(value)
+
+    def _adopt_llm_rule_gap_opinion(
+        self,
+        *,
+        classification: dict[str, Any],
+        search_result: dict[str, Any],
+        advice: dict[str, Any],
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Promote a valid LLM second opinion only when rules yielded no category."""
+        current_category = str(classification.get("final_category") or "").strip()
+        if current_category and to_erp_property(current_category, self.settings):
+            return classification, search_result
+        candidate = str(advice.get("candidate_category") or "").strip()
+        if not candidate or not to_erp_property(candidate, self.settings):
+            return classification, search_result
+        if not self._truthy(advice.get("used_llm")):
+            return classification, search_result
+
+        adopted = dict(classification)
+        reason = str(advice.get("reason_cn") or "").strip()
+        rule_summary = str(advice.get("matched_rule_summary_cn") or "").strip()
+        adopted.update({
+            "final_category": candidate,
+            "matched_categories": [candidate],
+            "matched_rule_ids": [],
+            "confidence": self._float_confidence(advice.get("advisory_confidence")),
+            "need_manual_review": False,
+            "llm_second_opinion_adopted": True,
+            "reason": (
+                "规则引擎未形成可写入 ERP 的类别；按启用的 LLM 第二意见兜底采用"
+                f"“{candidate}”。"
+                + (f" 理由：{reason}" if reason else "")
+                + (f" 规则摘要：{rule_summary}" if rule_summary else "")
+            ),
+        })
+        result = dict(search_result)
+        result.update({
+            "llm_advisory_only": False,
+            "llm_second_opinion_adopted": True,
+            "need_manual_review": False,
+        })
+        return adopted, result
 
     def _classification_requires_manual_advice(
         self,
@@ -2709,6 +2720,8 @@ class ApprovalFlowMixin:
         name_result: dict[str, Any],
         reagent_name: str,
     ) -> bool:
+        if search_result.get("product_model_identity_blocked", False):
+            return True
         if not search_result.get("need_manual_review", False):
             return False
         if cls._search_has_trusted_web_evidence(search_result):
@@ -2720,6 +2733,8 @@ class ApprovalFlowMixin:
         normalized = re.sub(r"[\s\-_()/\\\[\]{}（）]+", "", str(text or "").lower())
         if not normalized:
             return False
+        if re.fullmatch(r"[a-z]{1,8}(?:[-_][a-z0-9]{1,16})+(?:\s+\d+(?:\.\d+){1,3})?", str(text or "").strip().lower()):
+            return True
         return any(
             token in normalized
             for token in (
@@ -2740,6 +2755,8 @@ class ApprovalFlowMixin:
                 "耗材",
                 "roll",
                 "pvdf",
+                "偶联剂tm",
+                "偶联剂kh",
             )
         )
 
@@ -2828,6 +2845,32 @@ class ApprovalFlowMixin:
         if basic_suggestion:
             return basic_suggestion
 
+        # V1 can safely classify a clearly named *elemental* heavy metal before
+        # web lookup.  This does not apply to salts, oxides, alloys or products.
+        if self._current_pipeline_version() == "v1":
+            elemental_heavy_metal = rule_engine.explicit_heavy_metal_element_rule({
+                "reagent_name": reagent_name,
+                "name": reagent_name,
+                "standard_name": reagent_name,
+                "cleaned_name": reagent_name,
+            })
+            if elemental_heavy_metal:
+                suggestion = self._direct_business_suggestion(
+                    reagent,
+                    reagent_name,
+                    elemental_heavy_metal,
+                    str(elemental_heavy_metal["reason"]),
+                )
+                suggestion.update({
+                    "审批链路": "v1",
+                    "查询来源": "v1_local_rule",
+                    "证据质量": "v1_local_rule",
+                    "V1本地规则来源": "elemental_heavy_metal",
+                    "身份验证状态": "v1_local_elemental_heavy_metal",
+                    "身份判定依据": "v1_local_rule",
+                })
+                return suggestion
+
         # Evaluate explicit hazards before any broad product/kit/ordinary shortcut.
         # A hazardous name continues through the evidence lookup path instead of
         # being silently downgraded to ordinary.
@@ -2881,6 +2924,95 @@ class ApprovalFlowMixin:
             classification,
             str(classification.get("reason") or "\u547d\u4e2d\u666e\u901a\u7c7b\u4e1a\u52a1\u89c4\u5219"),
         )
+
+    def _current_pipeline_version(self) -> str:
+        return "v1"
+
+    @staticmethod
+    def v1_primary_component_profile(reagent_name: str) -> dict[str, str] | None:
+        """Extract a named principal material from simple dilution/dispersion labels."""
+        raw = str(reagent_name or "").strip()
+        if not raw:
+            return None
+        working = re.sub(r"[\u200b\u200c\u200d\ufeff]", "", raw).strip()
+        modifiers: list[str] = []
+        prefix = re.match(r"^(?:稀释|稀释了?)\s*(\d+(?:\.\d+)?)\s*倍\s*", working, flags=re.I)
+        if prefix:
+            modifiers.append(f"稀释{prefix.group(1)}倍")
+            working = working[prefix.end():].strip()
+        suffix = re.search(r"(?:水性)?(分散液|悬浊液|乳液|溶液)$", working, flags=re.I)
+        if suffix:
+            modifiers.append(suffix.group(0))
+            working = working[:suffix.start()].strip(" -_，,；;")
+        # A named carrier solvent is a material hazard clue, not a removable
+        # formulation suffix.  Let the normal lookup/rule path inspect it.
+        if re.search(r"(?:乙醇|甲醇|异丙醇|丙酮|乙腈|dmf|二甲基甲酰胺|四氢呋喃|thf)$", working, flags=re.I):
+            return None
+        if not modifiers or len(working) < 2:
+            return None
+        return {"raw_name": raw, "primary_component": working, "modifiers": "、".join(modifiers)}
+
+    def v1_primary_component_classification(
+        self,
+        reagent: dict[str, str],
+        search_result: dict[str, Any],
+        extracted: dict[str, Any],
+        classification: dict[str, Any],
+        rule_engine: RuleEngine,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Apply a deterministic principal-component rule after known hazards win."""
+        if self._current_pipeline_version() != "v1":
+            return classification, search_result
+        profile = self.v1_primary_component_profile(reagent.get("试剂名称", ""))
+        if not profile:
+            return classification, search_result
+        # Existing extracted evidence and any non-ordinary rule result are
+        # authoritative.  A name shortcut must never downgrade a known hazard.
+        current_category = str(classification.get("final_category") or "").strip()
+        confirmed_hazard = current_category not in {"", UNKNOWN_CATEGORY, NORMAL_CATEGORY}
+        confirmed_hazard = confirmed_hazard or any(
+            extracted.get(field) is True
+            for field in ("corrosive", "oxidizing", "flammable", "water_reactive", "explosive_risk", "heavy_metal")
+        )
+        if confirmed_hazard:
+            updated = dict(search_result)
+            updated["primary_component"] = profile["primary_component"]
+            updated["primary_component_modifiers"] = profile["modifiers"]
+            updated["primary_component_hazard_overridden"] = True
+            return classification, updated
+        component_result = rule_engine.classify({
+            "reagent_name": profile["primary_component"],
+            "name": profile["primary_component"],
+            "standard_name": profile["primary_component"],
+            "cleaned_name": profile["primary_component"],
+            "text": profile["primary_component"],
+            "allow_default_normal": False,
+        })
+        if component_result.get("final_category") not in rule_engine.priority or component_result.get("need_manual_review", True):
+            return classification, search_result
+        updated = dict(search_result)
+        updated.update({
+            "primary_component": profile["primary_component"],
+            "primary_component_modifiers": profile["modifiers"],
+            "primary_component_rule_ids": list(component_result.get("matched_rule_ids") or []),
+            "primary_component_hazard_overridden": False,
+            "source": "v1_local_primary_component",
+            "source_confidence": 1.0,
+            "evidence_quality": "v1_local_rule",
+            "relevance_passed": True,
+            "need_manual_review": False,
+            "identity_status": "v1_local_primary_component",
+            "identity_decision_basis": "v1_local_rule",
+            "llm_advisory_only": False,
+        })
+        component_result = dict(component_result)
+        component_result["reason"] = (
+            f"按名称主成分“{profile['primary_component']}”判定；已剥离修饰：{profile['modifiers']}。"
+            f" {component_result.get('reason') or ''}"
+        ).strip()
+        component_result["confidence"] = max(float(component_result.get("confidence") or 0.0), 0.95)
+        component_result["need_manual_review"] = False
+        return component_result, updated
 
     def basic_reagent_rule_suggestion(self, reagent: dict[str, str]) -> dict[str, Any] | None:
         reagent_name = str(reagent.get("\u8bd5\u5242\u540d\u79f0", "") or "").strip()
@@ -3139,7 +3271,40 @@ class ApprovalFlowMixin:
                 )
             ),
         }
-        return self._approval_suggestion_row(suggestion_reagent, name_result, search_result, extracted, classification)
+        suggestion = self._approval_suggestion_row(suggestion_reagent, name_result, search_result, extracted, classification)
+        # ERP-verified records retain their original formal rule provenance in
+        # the free-text audit reason.  Restore those identifiers on a memory
+        # reuse so terminal reject decisions can pass the same audited-write
+        # gate as the source record; model-only or ordinary web-memory rows
+        # never gain that privilege.
+        if str(memory_row.get("source") or "").strip().lower() == "verified_erp_write":
+            rule_ids = self.memory_formal_rule_ids(memory_row)
+            if rule_ids:
+                suggestion["命中规则ID"] = ", ".join(rule_ids)
+                suggestion["试剂记忆库正式规则复用"] = True
+        if self._truthy(memory_row.get("_memory_solution_reuse")):
+            primary_component = str(memory_row.get("_memory_solution_primary_component") or "").strip()
+            suggestion["主成分判定"] = primary_component
+            suggestion["试剂记忆库水溶液复用"] = True
+            suggestion["规则原因"] = (
+                f"{suggestion.get('规则原因') or ''}\n"
+                f"按 V1 水溶液复用口径，使用已验证纯品“{primary_component}”的判定结论。"
+            ).strip()
+        return suggestion
+
+    @staticmethod
+    def memory_formal_rule_ids(memory_row: dict[str, Any]) -> list[str]:
+        if str(memory_row.get("source") or "").strip().lower() != "verified_erp_write":
+            return []
+        reason = str(memory_row.get("reason") or "")
+        # Prefer the explicitly persisted list.  This permits a later rule
+        # migration to supersede legacy evidence identifiers without granting
+        # an obsolete threshold rule new write authority.
+        explicit = re.search(r"正式规则ID\s*[:：]\s*([^\n]+)", reason)
+        source_text = explicit.group(1) if explicit else reason
+        # Workbook and threshold rule IDs use uppercase segments separated by
+        # hyphens, e.g. BUS-TOX-ACUTE-CAT3-001 or T-ACU-DERM-001.
+        return list(dict.fromkeys(re.findall(r"\b[A-Z][A-Z0-9]*(?:-[A-Z0-9]+){2,}\b", source_text)))
 
     @staticmethod
     def extract_cas_from_url(url: str) -> str:
@@ -3175,6 +3340,10 @@ class ApprovalFlowMixin:
             print("Approval write mode is disabled; no webpage fields will be changed.")
             result["handled"].update(self.suggestion_work_key(suggestion) for suggestion in suggestions)
             return result
+
+        # A source-verified candidate CAS is retained only in the local identity
+        # memory.  It never modifies the ERP CAS field.
+        self.remember_verified_v1_candidate_identities(suggestions)
 
         candidates = self.high_confidence_write_candidates(suggestions)
         candidate_keys = {self.suggestion_work_key(suggestion) for suggestion in candidates}
@@ -3300,6 +3469,7 @@ class ApprovalFlowMixin:
                 except Exception as error:
                     print(f"[api_record_resolve] sequence={sequence} failed={error}")
 
+
             if write_backend == "api_write_with_web_verify":
                 is_canary = canary_pending and not canary_attempted
                 api_result = (api_client or ErpApiClient(page, self.settings)).save_physicochemical_property(
@@ -3349,10 +3519,12 @@ class ApprovalFlowMixin:
                         print("ERP API candidate was rejected and rolled back; continuing with webpage writes.")
 
             if verified:
+                api_settings = self.settings.get("erp_api") or {}
+                page_check_ok = True
                 if (
                     write_backend == "api_write_with_web_verify"
                     and api_client is not None
-                    and bool((self.settings.get("erp_api") or {}).get("web_verify_after_api_write", True))
+                    and self.should_verify_api_page(row_index, is_canary, api_settings)
                 ):
                     try:
                         page.reload(wait_until="domcontentloaded")
@@ -3368,15 +3540,23 @@ class ApprovalFlowMixin:
                                     page_value = self.read_reagent_property_by_sequence(page, sequence)
                             except Exception as error:
                                 print(f"[api_property_verify] sequence={sequence} detail_reopen_failed={error}")
-                    if not self.property_value_matches(page_value, category, writer):
+                    page_check_ok = self.property_value_matches(page_value, category, writer)
+                    if not page_check_ok:
+                        warning = "stable_id_confirmed_page_mismatch" if page_value else "stable_id_confirmed_page_not_located"
                         print(
-                            f"[api_property_verify] sequence={sequence} warning=stable_id_confirmed_page_stale "
+                            f"[api_property_verify] sequence={sequence} warning={warning} "
                             f"page_value={page_value or '<not located>'}; no duplicate save"
                         )
                         result.setdefault("warnings", set()).add(work_key)
                     if page_value:
                         print(f"[api_property_verify] sequence={sequence} webpage_value={page_value}")
-                if verified and is_canary:
+                if verified and is_canary and not page_check_ok:
+                    api_configurator.reject("API canary readback passed, but webpage readback could not be confirmed")
+                    write_backend = "web_ui"
+                    api_client = None
+                    canary_pending = False
+                    print("ERP API canary was not activated; subsequent writes use webpage fallback.")
+                if verified and is_canary and page_check_ok:
                     api_configurator.activate()
                     erp_api_settings = self.settings.setdefault("erp_api", {})
                     erp_api_settings["enabled_for_write"] = True
@@ -3740,11 +3920,31 @@ class ApprovalFlowMixin:
             ).strip(),
             "write_failure_reason": str(reason or "").strip(),
         }
+        is_cas_fill_failure = "CAS 自动补齐" in str(reason or "") or "CAS update" in str(reason or "")
         manual_reason = (
-            f"网页写入失败：{reason}。程序没有确认物化特性已成功写入 ERP 行内，"
-            "需要人工在网页端核对并处理该试剂。"
+            f"ERP CAS 自动补齐失败：{reason}。程序未继续写入物化特性，需人工核验 CAS 后重试。"
+            if is_cas_fill_failure
+            else f"网页写入失败：{reason}。程序没有确认物化特性已成功写入 ERP 行内，需要人工在网页端核对并处理该试剂。"
         )
-        self.add_manual_review_item(reagent, name_result, reason=manual_reason)
+        search_result = {
+            "source": suggestion.get("候选CAS确认来源") or suggestion.get("查询来源") or "",
+            "url": suggestion.get("候选CAS确认URL") or suggestion.get("查询URL") or "",
+            "candidate_cas": suggestion.get("网页候选CAS") or "",
+            "original_erp_cas": suggestion.get("原ERP CAS号") or suggestion.get("CAS号") or "",
+            "candidate_cas_confirmation_source": suggestion.get("候选CAS确认来源") or "",
+            "candidate_cas_confirmation_url": suggestion.get("候选CAS确认URL") or "",
+            "erp_cas_fill_status": "failed" if is_cas_fill_failure else "",
+            "erp_cas_fill_note": str(reason or "") if is_cas_fill_failure else "",
+            "need_manual_review": True,
+        }
+        try:
+            self.add_manual_review_item(reagent, name_result, reason=manual_reason, search_result=search_result)
+        except TypeError as error:
+            # Lightweight test and integration subclasses created before the
+            # audit payload extension may expose the legacy three-argument hook.
+            if "search_result" not in str(error):
+                raise
+            self.add_manual_review_item(reagent, name_result, reason=manual_reason)
 
     def add_manual_review_item_from_low_confidence_suggestion(
         self,
@@ -4207,11 +4407,93 @@ class ApprovalFlowMixin:
             return value
         return str(value or "").strip().lower() in {"1", "true", "yes", "y", "on"}
 
+    def remember_verified_v1_candidate_identities(self, suggestions: list[dict[str, Any]]) -> None:
+        """Persist verified candidate CAS values locally; never modify ERP CAS."""
+        if self._current_pipeline_version() != "v1":
+            return
+        from reagent_memory import ReagentMemory
+
+        memory = ReagentMemory.from_settings(self.settings, Path(self.root_dir))
+        for suggestion in suggestions:
+            if not self._truthy(suggestion.get("候选CAS可写入记忆库")):
+                continue
+            candidate = str(suggestion.get("网页候选CAS") or "").strip()
+            if not candidate:
+                continue
+            stored = memory.remember_verified_identity(
+                raw_name=str(suggestion.get("试剂名称") or ""),
+                cleaned_name=str(suggestion.get("清洗后名称") or ""),
+                standard_name=str(suggestion.get("标准化名称") or ""),
+                cas=candidate,
+                source=str(suggestion.get("候选CAS确认来源") or suggestion.get("查询来源") or ""),
+                url=str(suggestion.get("候选CAS确认URL") or suggestion.get("查询URL") or ""),
+                reason="V1 名称检索的来源唯一确认 CAS；只写入身份记忆库，不修改 ERP CAS。",
+            )
+            suggestion["候选CAS记忆库状态"] = "已写入" if stored else "未写入"
+            self.record_v1_candidate_cas_memory_audit(suggestion, candidate_cas=candidate, stored=stored)
+            print(f"[v1_identity_memory] sequence={suggestion.get('序号') or '-'} cas={candidate} stored={stored}")
+
+    def v1_candidate_cas_memory_eligible(
+        self,
+        *,
+        erp_cas: str,
+        candidate_cas: str,
+        search_result: dict[str, Any],
+    ) -> bool:
+        """Whether a unique, source-verified CAS may enter local identity memory."""
+        settings = getattr(self, "settings", {}) or {}
+        approval = settings.get("approval", {}) or {}
+        if self._current_pipeline_version() != "v1":
+            return False
+        policy = (approval.get("v1", {}) or {}).get("candidate_cas_memory", {}) or {}
+        if not self._truthy(policy.get("enabled", False)):
+            return False
+        candidate = self.normalize_cas(candidate_cas)
+        if not self._checksum_valid_cas(candidate):
+            return False
+        if not self._truthy(search_result.get("candidate_cas_source_verified")):
+            return False
+        if not self._truthy(search_result.get("candidate_cas_eligible_for_memory")):
+            return False
+        source = str(search_result.get("source") or "").strip()
+        is_web_source = source.lower() in {"chemsrc", "chemicalbook"}
+        if self._truthy(policy.get("require_page_bound_web_cas", False)) and is_web_source:
+            if not self._truthy(search_result.get("candidate_cas_page_bound")):
+                return False
+        if self._truthy(policy.get("require_secondary_confirmation_for_web_sources", False)) and is_web_source:
+            if not str(search_result.get("candidate_cas_secondary_confirmation_source") or "").strip():
+                return False
+        if str(search_result.get("identity_status") or "").strip() not in {"name_verified", "verified_by_enrichment"}:
+            return False
+        if not ChemicalSearcher.is_trusted_source(str(search_result.get("source") or "")):
+            return False
+        if not search_result.get("relevance_passed", False):
+            return False
+        return True
+
+    def record_v1_candidate_cas_memory_audit(
+        self, suggestion: dict[str, Any], *, candidate_cas: str, stored: bool
+    ) -> None:
+        path = Path(self.root_dir) / "data" / "logs" / "v1_candidate_cas_memory_audit.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        event = {
+            "at": pd.Timestamp.now().isoformat(), "pipeline": "v1",
+            "list_number": suggestion.get("试剂清单号") or suggestion.get("清单号") or "",
+            "sequence": suggestion.get("序号") or "", "raw_name": suggestion.get("试剂名称") or "",
+            "candidate_cas": candidate_cas, "stored": stored,
+            "source": suggestion.get("候选CAS确认来源") or suggestion.get("查询来源") or "",
+            "source_url": suggestion.get("候选CAS确认URL") or suggestion.get("查询URL") or "",
+            "candidate_validation_status": suggestion.get("候选CAS校验状态") or "",
+        }
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(event, ensure_ascii=False) + "\n")
+
     def high_confidence_write_candidates(self, suggestions: list[dict[str, Any]]) -> list[dict[str, Any]]:
         threshold = self.approval_write_min_confidence()
         output: list[dict[str, Any]] = []
         for suggestion in suggestions:
             self.apply_unknown_auto_write_policy(suggestion)
+            llm_rule_gap_adopted = self._truthy(suggestion.get("llm_second_opinion_adopted"))
             rule_category = str(suggestion.get("\u6700\u7ec8\u5efa\u8bae\u7c7b\u522b") or "").strip()
             if not rule_category:
                 continue
@@ -4244,21 +4526,45 @@ class ApprovalFlowMixin:
                     normalized["\u89c4\u5219\u5224\u5b9a\u7c7b\u522b"] = rule_category
                 output.append(normalized)
                 continue
-            if str(suggestion.get("\u9700\u4eba\u5de5\u590d\u6838")).strip().lower() in {"true", "1", "yes"}:
+            formal_rule_direct_precheck = (
+                self._truthy(((self.settings.get("approval", {}) or {}).get("v1", {}) or {}).get("formal_rule_direct_write", True))
+                and bool(str(suggestion.get("\u547d\u4e2d\u89c4\u5219ID") or "").strip())
+                and not self._truthy(suggestion.get("\u5546\u54c1\u578b\u53f7\u8eab\u4efd\u4fdd\u62a4"))
+            )
+            if (
+                str(suggestion.get("\u9700\u4eba\u5de5\u590d\u6838")).strip().lower() in {"true", "1", "yes"}
+                and not (llm_rule_gap_adopted or formal_rule_direct_precheck)
+            ):
                 continue
             identity_status = str(suggestion.get("身份状态") or suggestion.get("身份验证状态") or "").strip()
             legacy_name_conflict = identity_status == "conflict" and str(suggestion.get("身份判定依据") or "").strip() in {"名称身份", "name_identity"}
             v3_identity_verified = self._truthy(suggestion.get("V3可核验直写")) and identity_status in {"name_verified", "cas_verified"}
-            if (identity_status in {"cas_missing", "ambiguous", "unresolved"} and not v3_identity_verified) or (identity_status == "conflict" and not v3_identity_verified):
+            v1_local_identity = identity_status in {
+                "v1_local_elemental_heavy_metal", "v1_local_primary_component", "v1_local_clear_name",
+            }
+            has_formal_rule_match = bool(str(suggestion.get("命中规则ID") or "").strip())
+            v1_formal_rule_direct = (
+                self._truthy(((self.settings.get("approval", {}) or {}).get("v1", {}) or {}).get("formal_rule_direct_write", True))
+                and has_formal_rule_match
+                and not self._truthy(suggestion.get("商品型号身份保护"))
+            )
+            if ((identity_status in {"cas_missing", "ambiguous", "unresolved"} and not (v3_identity_verified or v1_local_identity or v1_formal_rule_direct)) or (identity_status == "conflict" and not (v3_identity_verified or v1_formal_rule_direct))) and not llm_rule_gap_adopted:
                 if not legacy_name_conflict:
                     continue
-            if rule_category != UNKNOWN_CATEGORY and self._truthy(suggestion.get("LLM辅助意见仅供复核")) and not (v3_identity_verified or legacy_name_conflict):
+            # A second opinion is supplementary.  Once the rule engine has
+            # formally matched a rule and the preceding identity/source gates
+            # passed, it must not suppress the rule category's ERP write.
+            if (
+                rule_category != UNKNOWN_CATEGORY
+                and self._truthy(suggestion.get("LLM辅助意见仅供复核"))
+                and not (v3_identity_verified or legacy_name_conflict or v1_local_identity or has_formal_rule_match)
+            ):
                 continue
             try:
                 confidence = float(suggestion.get("\u7f6e\u4fe1\u5ea6") or 0.0)
             except (TypeError, ValueError):
                 confidence = 0.0
-            if confidence < threshold:
+            if confidence < threshold and not llm_rule_gap_adopted:
                 continue
             normalized = dict(suggestion)
             normalized["\u6700\u7ec8\u5efa\u8bae\u7c7b\u522b"] = erp_category
@@ -4283,7 +4589,7 @@ class ApprovalFlowMixin:
         ]
         identity_status = str(search_result.get("identity_status") or "").strip().lower()
         identity_basis = str(search_result.get("identity_decision_basis") or "").strip().lower()
-        identity_reliable = identity_status in {"verified", "cas_verified", "name_verified_pubchem"} or (
+        identity_reliable = identity_status in {"verified", "cas_verified", "name_verified", "name_verified_pubchem"} or (
             identity_status == "conflict" and identity_basis == "name_identity"
         )
         hazard_fields = ("corrosive", "oxidizing", "flammable", "water_reactive", "explosive_risk", "heavy_metal")
@@ -4356,14 +4662,27 @@ class ApprovalFlowMixin:
     ) -> dict[str, Any]:
         erp_cas = str(reagent.get("CAS\u53f7", "") or "").strip()
         corrected_cas = str(search_result.get("corrected_cas") or name_result.get("corrected_cas") or "").strip()
-        # A provider CAS is only a candidate when the ERP record omitted CAS. It must
-        # not silently become the formal identity used by ERP or the memory library.
-        effective_cas = corrected_cas if erp_cas and corrected_cas else erp_cas
+        # Existing checksum-valid ERP CAS values are authoritative.  A source-
+        # verified candidate can only fill a missing/invalid value later in the
+        # stable-ID ERP transaction; it never replaces an existing valid CAS.
+        effective_cas = erp_cas
+        erp_cas_is_valid = self._checksum_valid_cas(self.normalize_cas(erp_cas))
+        if erp_cas_is_valid:
+            corrected_cas = ""
         candidate_cas = str(
             search_result.get("candidate_cas")
             or name_result.get("candidate_cas")
-            or ((search_result.get("cas") or name_result.get("cas") or "") if not erp_cas else "")
+            or (search_result.get("cas") or name_result.get("cas") or "")
         ).strip()
+        candidate_cas_memory = self.v1_candidate_cas_memory_eligible(
+            erp_cas=erp_cas,
+            candidate_cas=candidate_cas,
+            search_result=search_result,
+        )
+        # A rejected or insufficiently verified CAS is diagnostic noise, not a
+        # candidate identity.  Keep it only in non-user-facing source audit
+        # records; never expose it in suggestions or the review queue.
+        display_candidate_cas = candidate_cas if candidate_cas_memory else ""
         enrichment_candidate_verified = bool(
             search_result.get("identity_status") == "verified_by_enrichment" and candidate_cas
         )
@@ -4377,18 +4696,30 @@ class ApprovalFlowMixin:
         suggestion = {
             "identity_enrichment_candidate_cas_verified": enrichment_candidate_verified,
             "identity_enrichment_english_name": enrichment_english_name,
+            "候选CAS可写入记忆库": candidate_cas_memory,
+            "候选CAS记忆库状态": "待写入" if candidate_cas_memory else "",
+            "候选CAS确认来源": search_result.get("candidate_cas_confirmation_source") or search_result.get("source") or "",
+            "候选CAS确认URL": search_result.get("candidate_cas_confirmation_url") or search_result.get("url") or "",
+            "候选CAS校验状态": search_result.get("candidate_cas_validation_status") or "",
+            "候选CAS拒绝原因": search_result.get("candidate_cas_validation_reason") or "",
+            "候选CAS页面名称": search_result.get("candidate_cas_page_name") or search_result.get("matched_site_name") or "",
+            "候选CAS二次确认来源": search_result.get("candidate_cas_secondary_confirmation_source") or "",
+            "候选CAS二次确认URL": search_result.get("candidate_cas_secondary_confirmation_url") or "",
             "\u5e8f\u53f7": reagent.get("\u5e8f\u53f7", ""),
             "\u8bd5\u5242\u540d\u79f0": reagent.get("\u8bd5\u5242\u540d\u79f0", ""),
             "CAS\u53f7": effective_cas,
-            "\u7f51\u9875\u5019\u9009CAS": candidate_cas,
+            "\u7f51\u9875\u5019\u9009CAS": display_candidate_cas,
             "\u539fERP CAS\u53f7": search_result.get("original_erp_cas") or name_result.get("original_erp_cas") or "",
             "\u4fee\u6b63CAS\u53f7": corrected_cas,
             "CAS\u540d\u79f0\u51b2\u7a81": search_result.get("cas_name_conflict") or name_result.get("cas_name_conflict") or False,
             "CAS\u540d\u79f0\u51b2\u7a81\u8bb0\u5f55": search_result.get("identity_conflict_recorded") or False,
             "CAS\u540d\u79f0\u51b2\u7a81\u8bf4\u660e": search_result.get("identity_conflict_reason") or "",
             "CAS\u67e5\u8be2\u72b6\u6001": search_result.get("cas_lookup_status") or "",
+            "CAS校验状态": search_result.get("cas_validation_status") or "",
+            "查询状态": search_result.get("lookup_status") or search_result.get("retrieval_status") or "",
+            "实际查询键": search_result.get("actual_query_key") or search_result.get("query") or "",
             "CAS\u4fee\u6b63\u5019\u9009": search_result.get("cas_correction_candidate") or name_result.get("cas_correction_candidate") or False,
-            "CAS\u4fee\u6b63\u5df2\u5e94\u7528": search_result.get("cas_correction_applied") or name_result.get("cas_correction_applied") or False,
+            "CAS\u4fee\u6b63\u5df2\u5e94\u7528": False if erp_cas_is_valid else (search_result.get("cas_correction_applied") or name_result.get("cas_correction_applied") or False),
             "CAS\u4fee\u6b63\u539f\u56e0": search_result.get("cas_correction_reason") or name_result.get("cas_correction_reason") or "",
             "CAS\u4fee\u6b63\u6765\u6e90": search_result.get("cas_correction_source") or name_result.get("cas_correction_source") or "",
             "CAS\u4fee\u6b63URL": search_result.get("cas_correction_url") or name_result.get("cas_correction_url") or "",
@@ -4403,6 +4734,10 @@ class ApprovalFlowMixin:
             "\u540d\u79f0\u6807\u51c6\u5316\u7f6e\u4fe1\u5ea6": name_result.get("confidence", 0.0),
             "\u540d\u79f0\u9700\u4eba\u5de5\u590d\u6838": name_result.get("need_manual_review", True),
             "\u540d\u79f0\u6807\u51c6\u5316\u539f\u56e0": name_result.get("reason", ""),
+            "LLM名称标准化是否调用": name_result.get("llm_normalization_attempted", False),
+            "LLM名称标准化状态": name_result.get("llm_normalization_status", "not_needed"),
+            "LLM名称标准化模型": name_result.get("llm_normalization_model", ""),
+            "LLM名称标准化错误": name_result.get("llm_normalization_error", ""),
             "\u7591\u4f3c\u9519\u8bef\u540d\u79f0": name_result.get("suspected_invalid_name", False),
             "\u5019\u9009\u4fee\u6b63\u540d\u79f0": ", ".join(name_result.get("candidate_names", []) or []),
             "\u7591\u4f3c\u9519\u8bef\u539f\u56e0": name_result.get("suspected_invalid_reason", ""),
@@ -4410,6 +4745,8 @@ class ApprovalFlowMixin:
             "\u67e5\u8be2URL": search_result.get("url", ""),
             "\u67e5\u8be2\u9700\u4eba\u5de5": search_result.get("need_manual_review", False),
             "\u7f51\u7ad9\u5339\u914d\u540d\u79f0": search_result.get("matched_site_name", ""),
+            "网站返回物质名称": search_result.get("website_returned_name") or search_result.get("matched_site_name", ""),
+            "网站返回CAS": search_result.get("candidate_cas") or search_result.get("cas") or "",
             "\u540d\u79f0\u76f8\u4f3c\u5ea6": search_result.get("name_similarity", 0.0),
             "\u67e5\u8be2\u76f8\u5173\u6027\u901a\u8fc7": search_result.get("relevance_passed", False),
             "\u515c\u5e95\u67e5\u8be2\u6765\u6e90": search_result.get("fallback_source", ""),
@@ -4428,11 +4765,22 @@ class ApprovalFlowMixin:
             ),
             "\u67e5\u8be2\u5931\u8d25\u539f\u56e0": search_result.get("failure_reason", ""),
             "身份验证状态": search_result.get("identity_status", ""),
+            "商品型号身份保护": bool(search_result.get("product_model_identity_blocked", False)),
             "名称身份": json.dumps(search_result.get("name_identity") or {}, ensure_ascii=False),
             "CAS身份": json.dumps(search_result.get("cas_identity") or {}, ensure_ascii=False),
             "数据获取状态": search_result.get("retrieval_status", ""),
             "是否混合物": search_result.get("is_mixture", False),
             "字段证据": json.dumps(search_result.get("evidence_items", []) or [], ensure_ascii=False),
+            "化源网完整区块": json.dumps(search_result.get("chemsrc_sections") or {}, ensure_ascii=False),
+            "选用物化证据": json.dumps(search_result.get("selected_property_evidence") or {}, ensure_ascii=False),
+            "选用毒理证据": json.dumps(search_result.get("selected_toxicity_evidence") or [], ensure_ascii=False),
+            "混合物判定依据": search_result.get("mixture_classification_basis") or "",
+            "混合物最终类别": search_result.get("mixture_selected_category") or "",
+            "主成分": search_result.get("primary_component") or "",
+            "主成分修饰": search_result.get("primary_component_modifiers") or "",
+            "主成分规则ID": ", ".join(search_result.get("primary_component_rule_ids") or []),
+            "主成分是否被危险证据覆盖": bool(search_result.get("primary_component_hazard_overridden")),
+            "V1无网页证据业务口径": search_result.get("v1_no_web_evidence_policy") or "",
             "数据源诊断": json.dumps(search_result.get("provider_results", []) or [], ensure_ascii=False),
             "\u662f\u5426\u4f7f\u7528\u5927\u6a21\u578b\u751f\u6210\u5019\u9009\u540d": search_result.get("used_llm_search_candidates", False),
             "\u5927\u6a21\u578b\u5019\u9009\u641c\u7d22\u8bcd": ", ".join(search_result.get("llm_search_candidates", []) or []),
@@ -4445,6 +4793,7 @@ class ApprovalFlowMixin:
             "LLM辅助置信度": search_result.get("llm_advisory_confidence", ""),
             "LLM辅助依据类型": search_result.get("llm_advisory_evidence_basis", ""),
             "LLM辅助意见仅供复核": search_result.get("llm_advisory_only", False),
+            "llm_second_opinion_adopted": bool(classification.get("llm_second_opinion_adopted")),
             "\u95ea\u70b9": extracted.get("flash_point", ""),
             "\u6cb8\u70b9": extracted.get("boiling_point", ""),
             "\u6bd2\u6027": extracted.get("toxicity", ""),
@@ -4468,7 +4817,12 @@ class ApprovalFlowMixin:
                 classification,
             ),
         }
-        return self.apply_unknown_auto_write_policy(suggestion)
+        return self.apply_unresolved_product_unknown_policy(
+            self.apply_unknown_auto_write_policy(suggestion),
+            search_result,
+            name_result,
+            classification,
+        )
 
     def _effective_classification_confidence(
         self,
@@ -4508,7 +4862,13 @@ class ApprovalFlowMixin:
         extracted: dict[str, Any],
         classification: dict[str, Any],
     ) -> bool:
+        if str(search_result.get("identity_status") or "").strip() in {
+            "v1_local_elemental_heavy_metal", "v1_local_primary_component", "v1_local_clear_name",
+        }:
+            return False
         if self.is_terminal_reject_decision(classification.get("final_category")):
+            return False
+        if classification.get("llm_second_opinion_adopted"):
             return False
         evidence = extracted.get("evidence", []) or []
         llm_failed = any("LLM extraction failed" in str(item) for item in evidence)
@@ -4717,6 +5077,7 @@ class ApprovalFlowMixin:
             "\u8d44\u6599\u53ef\u4fe1\u5ea6",
             "\u8bc1\u636e\u8d28\u91cf",
             "\u67e5\u8be2\u5931\u8d25\u539f\u56e0",
+            "V1无网页证据业务口径",
             "\u662f\u5426\u4f7f\u7528\u5927\u6a21\u578b\u751f\u6210\u5019\u9009\u540d",
             "\u5927\u6a21\u578b\u5019\u9009\u641c\u7d22\u8bcd",
             "\u95ea\u70b9",

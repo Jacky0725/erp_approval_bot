@@ -27,13 +27,13 @@ DEFAULT_RULE_TO_ERP_ALIASES = {
     "易燃类": ["易燃液体"],
     "拒收类": ["不建议接收类"],
     "不建议接收类": ["拒收类"],
+    "剧毒品": ["不建议接收类", "拒收类"],
     "未知类": ["未知类"],
 }
 
-# ``剧毒品`` remains an explicit human-controlled non-writable decision. A
-# structured ``不建议接收类`` rule maps to the ERP's ``拒收类`` option and is
-# written by the approval flow without entering manual review.
-NON_WRITABLE_RULE_CATEGORIES = {"剧毒品"}
+# V5 defines ``剧毒品`` as an internal recognition category whose ERP outcome
+# is the writable reject option. Categories in this set remain review-only.
+NON_WRITABLE_RULE_CATEGORIES: set[str] = set()
 
 
 def erp_property_options(settings: dict[str, Any] | None = None) -> list[str]:

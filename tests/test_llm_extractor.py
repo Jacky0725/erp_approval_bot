@@ -239,6 +239,24 @@ class LlmExtractorFallbackTest(unittest.TestCase):
         self.assertNotIn("氧化剂", result["suggested_categories"])
         self.assertFalse(any("oxidizing agent" in item.lower() for item in result["evidence"]))
 
+    def test_chinese_oxidizer_incompatibility_is_not_an_oxidizer_signal(self) -> None:
+        extractor = LlmExtractor()
+        raw_text = "本品易燃；与强氧化剂不相容；避免接触氧化剂。"
+        self.assertFalse(extractor._has_positive_oxidizing_signal(raw_text))
+        result = extractor._suppress_incompatibility_only_oxidizing(
+            {
+                "oxidizing": True,
+                "suggested_categories": ["氧化剂"],
+                "evidence": ["Source text contains oxidizing hazard signal."],
+            },
+            raw_text,
+        )
+        self.assertFalse(result["oxidizing"])
+        self.assertNotIn("氧化剂", result["suggested_categories"])
+
+    def test_affirmative_chinese_oxidizer_statement_remains_positive(self) -> None:
+        self.assertTrue(LlmExtractor._has_positive_oxidizing_signal("该物质具有强氧化性，为氧化性固体。"))
+
     def test_h272_is_positive_oxidizer_signal(self) -> None:
         extractor = LlmExtractor()
         result = extractor._suppress_incompatibility_only_oxidizing(

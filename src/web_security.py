@@ -27,8 +27,9 @@ def normalize_run_confirmation_options(payload: Mapping[str, Any] | None = None)
     def boolean_value(name: str) -> str:
         return "true" if text_value(name).lower() in {"1", "true", "yes", "on"} else "false"
 
-    pipeline = text_value("pipeline_version", "v1").lower() or "v1"
-    pipeline = pipeline if pipeline in {"v1", "v2", "v3"} else "v1"
+    # Confirmation semantics are version-independent now that V1 is the only
+    # supported execution pipeline. Endpoints reject explicit retired values.
+    pipeline = "v1"
 
     return {
         "action": text_value("action"),

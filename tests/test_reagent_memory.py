@@ -119,6 +119,29 @@ class ReagentMemoryTest(unittest.TestCase):
             )
             self.assertIsNone(memory.lookup(raw_name="llm only"))
 
+    def test_verified_erp_write_is_reusable_despite_preliminary_llm_reason(self) -> None:
+        tmp, memory = self.make_memory()
+        with tmp:
+            self.assertTrue(
+                memory.add_record(
+                    raw_name="FTGX-B-0019",
+                    cleaned_name="FTGX-B-0019",
+                    standard_name="FTGX-B-0019",
+                    final_category="未知类",
+                    confidence=1.0,
+                    reason="LLM知识托底，仅供复核。ERP 接口稳定记录 ID 42 两次回读确认 未知类。",
+                    source="verified_erp_write",
+                    manual_verified=True,
+                    track_conflicts=False,
+                    force_reusable=True,
+                )
+            )
+            match = memory.lookup(raw_name="FTGX-B-0019")
+            self.assertIsNotNone(match)
+            assert match is not None
+            self.assertEqual(match["final_category"], "未知类")
+            self.assertEqual(match["source"], "verified_erp_write")
+
     def test_lookup_skips_legacy_reusable_write_failure_record(self) -> None:
         tmp, memory = self.make_memory()
         with tmp:

@@ -35,6 +35,19 @@ class OxidizerStructuredRulesTest(unittest.TestCase):
                 self.assertIn("重金属类", result["matched_categories"])
                 self.assertFalse(result["need_manual_review"])
 
+    def test_identified_inorganic_nitrates_are_oxidizers(self) -> None:
+        for name in ("硝酸锂一水", "硝酸锆五水", "硝酸钴六水", "zirconium nitrate pentahydrate"):
+            with self.subTest(name=name):
+                result = self.engine.classify({"reagent_name": name, "text": name, "allow_default_normal": True})
+                self.assertEqual(result["final_category"], "氧化剂")
+                self.assertFalse(result["need_manual_review"])
+
+    def test_nitric_acid_and_nitrate_esters_are_not_caught_by_salt_rule(self) -> None:
+        for name in ("硝酸", "硝酸甘油"):
+            with self.subTest(name=name):
+                result = self.engine.classify({"reagent_name": name, "text": name, "allow_default_normal": True})
+                self.assertNotIn("无机硝酸盐", result.get("reason", ""))
+
 
 if __name__ == "__main__":
     unittest.main()

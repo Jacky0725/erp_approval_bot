@@ -11,6 +11,7 @@ from erp_api_client import ErpApiClient, ErpApiUnsupported, normalize_erp_write_
 from erp_api_discovery import (  # noqa: E402
     ApiDiscoveryRecorder,
     ApiDiscoveryAnalyzer,
+    compact_discovery_event,
     DiscoveryCandidate,
     ErpApiConfigurator,
     classify_api_action,
@@ -381,6 +382,37 @@ def test_discovery_analyzer_requires_two_verified_distinct_saves() -> None:
     }
     assert candidate.config["field_mapping"]["序号"] == ["sequence"]
     assert candidate.config["field_mapping"]["试剂名称"] == ["reagentName"]
+
+
+def test_persisted_discovery_events_exclude_business_payload_and_remain_analyzable(tmp_path: Path) -> None:
+    events = _discovery_events()
+    for event in events:
+        event["request_payload"] = dict(event.get("request_payload") or {}, contact_person="张三", address="敏感地址")
+        event["response_payload"] = dict(event.get("response_payload") or {}, contact_phone="010-12345678")
+    compact = [compact_discovery_event(event) for event in events]
+    serialized = yaml.safe_dump(compact, allow_unicode=True)
+    assert "张三" not in serialized
+    assert "敏感地址" not in serialized
+    assert "010-12345678" not in serialized
+    assert "request_payload" not in serialized
+    assert ApiDiscoveryAnalyzer().analyze(compact).status == "candidate"
+
+    settings_path = tmp_path / "config" / "settings.yaml"
+    settings_path.parent.mkdir(parents=True)
+    settings_path.write_text("erp_api: {}\n", encoding="utf-8")
+    configurator = ErpApiConfigurator(tmp_path, settings_path)
+    configurator.save_candidate(ApiDiscoveryAnalyzer().analyze(events), events)
+    assert "敏感地址" not in (tmp_path / "data" / "logs" / "erp_api_candidate.yaml").read_text(encoding="utf-8")
+    assert ApiDiscoveryAnalyzer().analyze(configurator.load_events()).status == "candidate"
+
+    recorder = ApiDiscoveryRecorder(tmp_path / "reports")
+    recorder.events = events
+    json_path, md_path = recorder.save()
+    for path in (json_path, md_path):
+        report = path.read_text(encoding="utf-8")
+        assert "敏感地址" not in report
+        assert "010-12345678" not in report
+        assert "张三" not in report
 
 
 def test_discovery_analyzer_does_not_promote_one_save() -> None:

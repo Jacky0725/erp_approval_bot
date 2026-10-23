@@ -17,12 +17,15 @@ REQUIRED_COLUMNS = {
     "thresholds": {"threshold_id", "category", "field", "operator", "value", "unit", "enabled"},
 }
 VALID_OPERATORS = {"<", "<=", "=", "==", ">=", ">", "between", "contains", "any"}
-VALID_MATCH_TYPES = {"keyword", "exact", "equals", "regex"}
+# `business_policy` rows document cross-field algorithms implemented in the
+# executor (CAS routing, comparable-value selection, mixture aggregation). They
+# are validated metadata and are never treated as ordinary keyword rules.
+VALID_MATCH_TYPES = {"keyword", "exact", "equals", "regex", "dictionary", "business_policy"}
 VALID_FIELD_SCOPES = {
-    "name", "text", "evidence", "reagent_name", "chemical_name", "standard_name",
+    "name", "text", "evidence", "reagent_name", "chemical_name", "standard_name", "aliases",
     "cleaned_name", "english_name", "cas", "cas_no", "spec", "remark",
     "flash_point", "boiling_point", "toxicity", "oxidizing", "flammable",
-    "water_reactive", "explosive_risk", "heavy_metal",
+    "water_reactive", "explosive_risk", "heavy_metal", "composition", "structure",
 }
 EXECUTABLE_THRESHOLD_FIELDS = {
     "flash_point", "oral_ld50", "dermal_ld50",

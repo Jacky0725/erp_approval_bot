@@ -241,7 +241,20 @@ class LlmExtractor:
             )
             return base
 
-        prompt = f"""
+        auto_adopt_rule_gap = bool(
+            ((self.settings or {}).get("approval", {}) or {}).get(
+                "adopt_llm_second_opinion_when_rule_unresolved", False
+            )
+        )
+        adoption_instruction = (
+            "Rule-engine gap policy is enabled. When current_rule_category is empty, "
+            "return one best allowed candidate_category whenever chemically possible; "
+            "your category will be used as the formal fallback after ERP write verification. "
+            "Never fabricate web evidence; label model knowledge as model knowledge."
+            if auto_adopt_rule_gap
+            else ""
+        )
+        prompt = f"""{adoption_instruction}
 请针对需要人工复核的试剂，结合当前判定规则、已有网页资料和你的通用化学知识，
 给出一份仅供人工复核参考的物化特性第二意见。不得决定审批结果，不得声称模型知识是网页证据。
 
@@ -784,8 +797,14 @@ raw_text:
             r"\bstrong\s+oxidizer\b",
             r"\boxidizer\b",
             r"\boxidising\s+(solid|liquid|gas|substance)\b",
-            r"氧化剂",
-            r"氧化性物质",
+            # Bare “氧化剂” is not an oxidizer classification: SDS sections
+            # routinely say “与氧化剂不相容” for an ordinary combustible
+            # material.  Accept it only in an affirmative identity or hazard
+            # statement, or through the unambiguous GHS/transport patterns
+            # above.
+            r"(?:本品|该物质|此物质|属于|为|是|具有).{0,10}(?:强)?氧化性(?:物质)?",
+            r"(?:本品|该物质|此物质).{0,10}(?:为|是)(?:强)?氧化剂",
+            r"(?:强)?氧化性(?:固体|液体|气体|物质)",
         ]
         return any(re.search(pattern, normalized, flags=re.I) for pattern in positive_patterns)
 

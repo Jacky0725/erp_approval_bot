@@ -25,7 +25,7 @@ PACKAGING_PATTERN = re.compile(
 )
 PURITY_PATTERN = re.compile(
     r"(?i)\b(?:AR|GR|CP|HPLC|ACS|GC|LCMS|UPLC|reagent\s*grade|analytical\s*grade)\b|"
-    r"(?:分析纯|优级纯|化学纯|色谱纯|基准试剂|实验试剂|工业级|试剂级|食品级|电子级|无水|水合物)"
+    r"(?:分析纯|优级纯|化学纯|色谱纯|基准试剂|实验试剂|工业级|试剂级|食品级|电子级)"
 )
 NOISE_PATTERN = re.compile(
     r"(?:≥|>=|≤|<=)?\s*\d+(?:\.\d+)?\s*%?\s*(?:纯度|含量|浓度)?|"
@@ -63,6 +63,10 @@ DEFAULT_RESULT = {
     "candidate_names": [],
     "suspected_invalid_name": False,
     "suspected_invalid_reason": "",
+    "llm_normalization_attempted": False,
+    "llm_normalization_status": "not_needed",
+    "llm_normalization_model": "",
+    "llm_normalization_error": "",
     "confidence": 0.0,
     "need_manual_review": True,
     "reason": "",
@@ -83,6 +87,12 @@ class NameNormalizer:
             self.aliases_path = root_dir / paths.get("name_aliases_yaml", "config/name_aliases.yaml")
         self.alias_data = self._load_aliases(self.aliases_path)
         self.client: OpenAI | None = None
+        self._last_llm_normalization_audit: dict[str, Any] = {
+            "llm_normalization_attempted": False,
+            "llm_normalization_status": "not_needed",
+            "llm_normalization_model": "",
+            "llm_normalization_error": "",
+        }
 
     def normalize(
         self,
@@ -182,7 +192,7 @@ class NameNormalizer:
                     )
                 return llm_result
 
-            return self._result(
+            result = self._result(
                 raw_name=raw_name,
                 cleaned_name=cleaned_name,
                 standard_name=cleaned_name,
@@ -199,6 +209,8 @@ class NameNormalizer:
                 suspected_invalid_name=bool(non_informative_reason),
                 suspected_invalid_reason=non_informative_reason,
             )
+            result.update(self._last_llm_normalization_audit)
+            return result
 
         return self._result(
             raw_name=raw_name,
@@ -335,7 +347,21 @@ class NameNormalizer:
         cas: str,
         concentration: str,
     ) -> dict[str, Any] | None:
-        if not self.enable_llm or not self._has_api_key():
+        if not self.enable_llm:
+            self._last_llm_normalization_audit = {
+                "llm_normalization_attempted": False,
+                "llm_normalization_status": "disabled",
+                "llm_normalization_model": "",
+                "llm_normalization_error": "",
+            }
+            return None
+        if not self._has_api_key():
+            self._last_llm_normalization_audit = {
+                "llm_normalization_attempted": False,
+                "llm_normalization_status": "missing_api_key",
+                "llm_normalization_model": "",
+                "llm_normalization_error": "LLM API Key 未配置。",
+            }
             return None
 
         llm_settings = (self.settings or {}).get("llm", {})
@@ -346,6 +372,12 @@ class NameNormalizer:
             or llm_settings.get("model")
             or "deepseek-ai/DeepSeek-V3.2"
         )
+        self._last_llm_normalization_audit = {
+            "llm_normalization_attempted": True,
+            "llm_normalization_status": "failure",
+            "llm_normalization_model": str(model),
+            "llm_normalization_error": "",
+        }
         try:
             response = self._client().chat.completions.create(
                 model=model,
@@ -357,10 +389,13 @@ class NameNormalizer:
                             "a likely standard chemical name for chemical website search. "
                             "standard_name must be a Chinese standard chemical name. "
                             "english_name must be a widely searchable English chemical name. "
-                            "Remove concentration, purity, grade, package size, and vendor text. "
+                            "Remove purity grade, package size, and vendor text. Preserve concentration, "
+                            "solution state, ion/counterion, oxidation state, hydrate count, acid/basic salt, "
+                            "and anhydrous state because they affect identity. "
                             "Prefer a widely searchable English chemical name when possible. "
                             "If the ERP name is a mixture, solution, kit, or unclear trade name, "
-                            "set confidence below 0.8 and explain why. Do not decide approval."
+                            "set confidence below 0.8 and explain why. Return at most three ranked name_candidates. "
+                            "Do not invent or assert a CAS number and do not decide approval."
                         ),
                     },
                     {
@@ -378,6 +413,7 @@ class NameNormalizer:
                                     "main_component",
                                     "is_mixture_or_solution",
                                     "aliases",
+                                    "name_candidates",
                                     "confidence",
                                     "reason",
                                 ],
@@ -390,7 +426,8 @@ class NameNormalizer:
                 temperature=0,
             )
             parsed = json.loads(response.choices[0].message.content or "{}")
-        except Exception:
+        except Exception as error:
+            self._last_llm_normalization_audit["llm_normalization_error"] = type(error).__name__
             return None
 
         standard_name = str(
@@ -401,13 +438,15 @@ class NameNormalizer:
             or ""
         ).strip()
         if not standard_name:
+            self._last_llm_normalization_audit["llm_normalization_status"] = "invalid_response"
+            self._last_llm_normalization_audit["llm_normalization_error"] = "模型未返回标准名称。"
             return None
 
         aliases = self._string_list(parsed.get("aliases"))
         english_name = str(parsed.get("english_name") or "").strip()
         confidence = self._normalize_confidence(parsed.get("confidence"), default=0.70)
         reason = str(parsed.get("reason") or "Generated candidate standard name by LLM.").strip()
-        return self._result(
+        result = self._result(
             raw_name=raw_name,
             cleaned_name=cleaned_name,
             standard_name=standard_name,
@@ -419,6 +458,27 @@ class NameNormalizer:
             confidence=confidence,
             reason=reason,
         )
+        candidates = self._string_list(parsed.get("name_candidates"))
+        result["candidate_names"] = list(dict.fromkeys(
+            value for value in [*candidates, standard_name, english_name, *aliases] if value
+        ))[:3]
+        result["llm_search_candidates_only"] = True
+        result.update({
+            "llm_normalization_attempted": True,
+            "llm_normalization_status": "success",
+            "llm_normalization_model": str(model),
+            "llm_normalization_error": "",
+        })
+        self._last_llm_normalization_audit = {
+            "llm_normalization_attempted": True,
+            "llm_normalization_status": "success",
+            "llm_normalization_model": str(model),
+            "llm_normalization_error": "",
+        }
+        # An LLM-supplied CAS is intentionally ignored even if a provider adds
+        # one to an otherwise valid JSON response.
+        result["cas"] = cas
+        return result
 
     def update_aliases_after_approval(
         self,
@@ -596,6 +656,9 @@ class NameNormalizer:
                 "cas": cas,
                 "concentration": concentration,
                 "aliases": aliases,
+                "candidate_names": list(dict.fromkeys(
+                    value for value in [standard_name, english_name, *aliases] if value
+                ))[:3],
                 "confidence": confidence,
                 "need_manual_review": confidence < 0.8,
                 "reason": reason,

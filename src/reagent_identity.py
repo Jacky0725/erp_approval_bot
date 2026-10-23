@@ -85,6 +85,8 @@ class ReagentIdentityResolver:
         unit: str = "",
     ) -> IdentityRecord:
         raw_name = str(raw_name or "").strip()
+        specification = ""
+        unit = ""
         supplied_cas = self._extract_cas(cas) or self._extract_cas(raw_name)
         normalized = self.normalizer.normalize(
             raw_name,
@@ -99,7 +101,7 @@ class ReagentIdentityResolver:
         normalized_cas = self._extract_cas(str(normalized.get("cas") or ""))
         valid_supplied_cas = bool(supplied_cas and self.is_valid_cas(supplied_cas))
         valid_normalized_cas = bool(normalized_cas and self.is_valid_cas(normalized_cas))
-        mixture_state = self._mixture_state(raw_name, cleaned, specification)
+        mixture_state = self._mixture_state(raw_name, cleaned, "")
         conflicts: list[str] = []
 
         if supplied_cas and not valid_supplied_cas:

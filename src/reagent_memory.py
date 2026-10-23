@@ -75,6 +75,34 @@ class ReagentMemory:
         """
         with closing(self._connect()) as conn:
             with conn:
+                # An ERP-verified product may share a normalized standard name
+                # with another vendor product.  Prefer its exact ERP name so a
+                # broad standard-name collision cannot suppress reuse.
+                raw_name_key = values["raw_name"]
+                if raw_name_key:
+                    raw_candidates = [
+                        candidate
+                        for candidate in conn.execute(
+                            sql.replace(f"({' OR '.join(clauses)})", "raw_name_key = ?"),
+                            [raw_name_key],
+                        ).fetchall()
+                        if not self.is_unsafe_reusable_evidence(candidate)
+                    ]
+                    if raw_candidates:
+                        raw_values = {"cas": "", "standard_name": "", "cleaned_name": "", "raw_name": raw_name_key}
+                        if self._lookup_candidates_have_category_conflict(raw_candidates, raw_values):
+                            ids = [int(candidate["id"]) for candidate in raw_candidates]
+                            conn.executemany(
+                                "UPDATE reagent_memory SET conflict = 1, reusable = 0, updated_at = ? WHERE id = ?",
+                                [(self._now(), record_id) for record_id in ids],
+                            )
+                            return None
+                        row = raw_candidates[0]
+                        conn.execute(
+                            "UPDATE reagent_memory SET use_count = use_count + 1, last_used_at = ? WHERE id = ?",
+                            (self._now(), row["id"]),
+                        )
+                        return dict(row)
                 candidates = [
                     candidate
                     for candidate in conn.execute(sql, params).fetchall()
@@ -99,6 +127,40 @@ class ReagentMemory:
                     (self._now(), row["id"]),
                 )
                 return dict(row)
+
+    def record_workbuddy_result(
+        self, batch_id: str, item_key: str, identity: dict[str, Any],
+        result: dict[str, Any], *, synced: bool = False,
+    ) -> None:
+        """Retain independent model results without overwriting verified memory.
+
+        ERP transport success is not manual verification or permission to reuse
+        the conclusion for a different product/concentration.
+        """
+        self._ensure_schema()
+        source = f"workbuddy:{batch_id}:{item_key}"
+        now = self._now()
+        name = str(identity.get("试剂名称") or "").strip()
+        cas = str(identity.get("CAS号") or "").strip()
+        category = str(result.get("物化特性类别") or "").strip()
+        unresolved = category in {"", "需人工复核", "无法判定", "证据不足"}
+        reason = (
+            f"{result.get('判断依据') or ''}\n"
+            f"WorkBuddy 独立判定；ERP同步={'成功' if synced else '待同步'}；未经人工核实。"
+        )
+        with closing(self._connect()) as conn:
+            with conn:
+                existing = conn.execute("SELECT id FROM reagent_memory WHERE source = ? LIMIT 1", (source,)).fetchone()
+                if existing:
+                    conn.execute("UPDATE reagent_memory SET updated_at=?, reason=? WHERE id=?", (now, reason, existing["id"]))
+                    return
+                conn.execute(
+                    """INSERT INTO reagent_memory
+                    (created_at, updated_at, raw_name, raw_name_key, cas, cas_key,
+                     final_category, reason, source, need_manual_review, manual_verified, reusable, confidence)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0)""",
+                    (now, now, name, self._norm(name), cas, self._norm_cas(cas), category, reason, source, int(unresolved)),
+                )
 
     @staticmethod
     def _lookup_candidates_have_category_conflict(
@@ -185,8 +247,8 @@ class ReagentMemory:
                 reason=unknown_reason,
                 source=str(suggestion.get(SOURCE_KEY) or "").strip() or "approval_flow",
                 url=str(suggestion.get(URL_KEY) or "").strip(),
-                specification=str(suggestion.get(SPECIFICATION_KEY) or "").strip(),
-                unit=str(suggestion.get(UNIT_KEY) or "").strip(),
+                specification="",
+                unit="",
                 need_manual_review=False,
                 manual_verified=True,
             )
@@ -210,11 +272,93 @@ class ReagentMemory:
             reason=reason,
             source=source,
             url=str(suggestion.get(URL_KEY) or "").strip(),
-            specification=str(suggestion.get(SPECIFICATION_KEY) or "").strip(),
-            unit=str(suggestion.get(UNIT_KEY) or "").strip(),
+            specification="",
+            unit="",
             need_manual_review=False,
             manual_verified=False,
         )
+
+    def remember_verified_identity(
+        self,
+        *,
+        raw_name: str,
+        cleaned_name: str = "",
+        standard_name: str = "",
+        cas: str,
+        source: str,
+        url: str = "",
+        reason: str = "",
+    ) -> bool:
+        """Store a source-verified identity without creating a category decision."""
+        self._ensure_schema()
+        cas_key = self._norm_cas(cas)
+        if not cas_key:
+            return False
+        raw_key = self._norm(raw_name)
+        cleaned_key = self._norm(cleaned_name)
+        standard_key = self._norm(standard_name)
+        if not any((raw_key, cleaned_key, standard_key)):
+            return False
+        now = self._now()
+        with closing(self._connect()) as conn:
+            with conn:
+                existing = conn.execute(
+                    """
+                    SELECT id FROM reagent_identity_memory
+                    WHERE cas_key = ? AND raw_name_key = ? AND cleaned_name_key = ? AND standard_name_key = ?
+                    LIMIT 1
+                    """,
+                    (cas_key, raw_key, cleaned_key, standard_key),
+                ).fetchone()
+                values = (now, raw_name.strip(), raw_key, cleaned_name.strip(), cleaned_key,
+                          standard_name.strip(), standard_key, str(cas).strip(), cas_key,
+                          source.strip(), url.strip(), reason.strip())
+                if existing:
+                    conn.execute(
+                        """
+                        UPDATE reagent_identity_memory
+                        SET updated_at = ?, raw_name = ?, raw_name_key = ?, cleaned_name = ?, cleaned_name_key = ?,
+                            standard_name = ?, standard_name_key = ?, cas = ?, cas_key = ?, source = ?, url = ?, reason = ?
+                        WHERE id = ?
+                        """,
+                        (*values, int(existing["id"])),
+                    )
+                else:
+                    conn.execute(
+                        """
+                        INSERT INTO reagent_identity_memory (
+                            created_at, updated_at, raw_name, raw_name_key, cleaned_name, cleaned_name_key,
+                            standard_name, standard_name_key, cas, cas_key, source, url, reason
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (now, *values),
+                    )
+        return True
+
+    def lookup_verified_identity(
+        self,
+        *,
+        raw_name: str = "",
+        cleaned_name: str = "",
+        standard_name: str = "",
+    ) -> dict[str, Any] | None:
+        """Return an identity only when supplied names map to one remembered CAS."""
+        self._ensure_schema()
+        clauses, params = [], []
+        for column, value in (("raw_name", raw_name), ("cleaned_name", cleaned_name), ("standard_name", standard_name)):
+            normalized = self._norm(value)
+            if normalized:
+                clauses.append(f"{column}_key = ?")
+                params.append(normalized)
+        if not clauses:
+            return None
+        with closing(self._connect()) as conn:
+            rows = conn.execute(
+                f"SELECT * FROM reagent_identity_memory WHERE {' OR '.join(clauses)} ORDER BY updated_at DESC, id DESC",
+                params,
+            ).fetchall()
+        cas_values = {str(row["cas_key"] or "") for row in rows}
+        return dict(rows[0]) if len(cas_values) == 1 and rows else None
 
     def list_records(
         self,
@@ -538,6 +682,7 @@ class ReagentMemory:
         need_manual_review: bool = False,
         manual_verified: bool = False,
         track_conflicts: bool = True,
+        force_reusable: bool = False,
     ) -> bool:
         self._ensure_schema()
         final_category = self._normalize_final_category(final_category)
@@ -558,11 +703,14 @@ class ReagentMemory:
                     and any(str(row["final_category"] or "").strip() != final_category for row in identity_rows)
                 )
                 reusable = bool(
-                    final_category
-                    and not need_manual_review
-                    and not conflict
-                    and confidence >= self.min_confidence
-                    and not self.is_unsafe_reusable_evidence({"source": source, "reason": reason})
+                    force_reusable
+                    or (
+                        final_category
+                        and not need_manual_review
+                        and not conflict
+                        and confidence >= self.min_confidence
+                        and not self.is_unsafe_reusable_evidence({"source": source, "reason": reason})
+                    )
                 )
                 existing = next(
                     (
@@ -592,6 +740,7 @@ class ReagentMemory:
                         manual_verified=manual_verified,
                         conflict=conflict,
                         reusable=reusable,
+                        force_reusable=force_reusable,
                     )
                     if conflict:
                         self._mark_conflicts(conn, cas, standard_name, cleaned_name, raw_name)
@@ -703,6 +852,7 @@ class ReagentMemory:
         manual_verified: bool,
         conflict: bool,
         reusable: bool,
+        force_reusable: bool = False,
     ) -> None:
         merged_reason = str(reason or existing.get("reason") or "").strip()
         old_reason = str(existing.get("reason") or "").strip()
@@ -732,9 +882,12 @@ class ReagentMemory:
             "manual_verified": int(bool(manual_verified) or bool(existing.get("manual_verified"))),
             "conflict": int(bool(conflict)),
             "reusable": int(
-                bool(reusable)
-                and not self.is_unsafe_reusable_evidence(
-                    {"source": source or existing.get("source"), "reason": merged_reason}
+                bool(force_reusable)
+                or (
+                    bool(reusable)
+                    and not self.is_unsafe_reusable_evidence(
+                        {"source": source or existing.get("source"), "reason": merged_reason}
+                    )
                 )
             ),
         }
@@ -783,6 +936,10 @@ class ReagentMemory:
     def is_unsafe_reusable_evidence(row: dict[str, Any] | sqlite3.Row) -> bool:
         reason = str(row.get("reason") or "").strip() if hasattr(row, "get") else str(row["reason"] or "").strip()
         source = str(row.get("source") or "").strip() if hasattr(row, "get") else str(row["source"] or "").strip()
+        # Stable-record-ID confirmation after an ERP save is a stronger
+        # provenance signal than preliminary web or model evidence.
+        if source.lower() == "verified_erp_write":
+            return False
         text = f"{source}\n{reason}".lower()
         unsafe_tokens = (
             "网页写入失败",
@@ -834,6 +991,22 @@ class ReagentMemory:
                     )
                     """
                 )
+                conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS reagent_identity_memory (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        raw_name TEXT NOT NULL DEFAULT '', raw_name_key TEXT NOT NULL DEFAULT '',
+                        cleaned_name TEXT NOT NULL DEFAULT '', cleaned_name_key TEXT NOT NULL DEFAULT '',
+                        standard_name TEXT NOT NULL DEFAULT '', standard_name_key TEXT NOT NULL DEFAULT '',
+                        cas TEXT NOT NULL DEFAULT '', cas_key TEXT NOT NULL DEFAULT '',
+                        source TEXT NOT NULL DEFAULT '', url TEXT NOT NULL DEFAULT '', reason TEXT NOT NULL DEFAULT ''
+                    )
+                    """
+                )
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_reagent_identity_memory_cas ON reagent_identity_memory(cas_key)")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_reagent_identity_memory_names ON reagent_identity_memory(raw_name_key, cleaned_name_key, standard_name_key)")
                 for column in ("cas_key", "standard_name_key", "cleaned_name_key", "raw_name_key"):
                     conn.execute(f"CREATE INDEX IF NOT EXISTS idx_reagent_memory_{column} ON reagent_memory({column})")
 

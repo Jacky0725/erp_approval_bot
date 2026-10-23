@@ -60,6 +60,20 @@ REVIEW_EVIDENCE_COLUMNS = [
     "confirmed_cas",
     "erp_write_status",
     "erp_write_note",
+    "erp_cas_fill_status",
+    "erp_cas_fill_note",
+    "candidate_cas_confirmation_source",
+    "candidate_cas_confirmation_url",
+    "candidate_cas_validation_status",
+    "candidate_cas_validation_reason",
+    "candidate_cas_page_name",
+    "candidate_cas_secondary_confirmation_source",
+    "candidate_cas_secondary_confirmation_url",
+    "candidate_cas_memory_eligible",
+    "primary_component",
+    "primary_component_modifiers",
+    "primary_component_rule_ids",
+    "primary_component_hazard_overridden",
     "corrected_cas",
     "cas_name_conflict",
     "cas_correction_candidate",
@@ -640,6 +654,20 @@ class ReviewQueueMixin:
             "original_erp_cas": search_result.get("original_erp_cas") or name_result.get("original_erp_cas") or "",
             "candidate_cas": search_result.get("candidate_cas") or name_result.get("candidate_cas") or "",
             "corrected_cas": search_result.get("corrected_cas") or name_result.get("corrected_cas") or "",
+            "erp_cas_fill_status": search_result.get("erp_cas_fill_status") or name_result.get("erp_cas_fill_status") or "",
+            "erp_cas_fill_note": search_result.get("erp_cas_fill_note") or name_result.get("erp_cas_fill_note") or "",
+            "candidate_cas_confirmation_source": search_result.get("candidate_cas_confirmation_source") or "",
+            "candidate_cas_confirmation_url": search_result.get("candidate_cas_confirmation_url") or "",
+            "candidate_cas_validation_status": search_result.get("candidate_cas_validation_status") or "",
+            "candidate_cas_validation_reason": search_result.get("candidate_cas_validation_reason") or "",
+            "candidate_cas_page_name": search_result.get("candidate_cas_page_name") or search_result.get("matched_site_name") or "",
+            "candidate_cas_secondary_confirmation_source": search_result.get("candidate_cas_secondary_confirmation_source") or "",
+            "candidate_cas_secondary_confirmation_url": search_result.get("candidate_cas_secondary_confirmation_url") or "",
+            "candidate_cas_memory_eligible": bool(search_result.get("candidate_cas_memory_eligible")),
+            "primary_component": search_result.get("primary_component") or "",
+            "primary_component_modifiers": search_result.get("primary_component_modifiers") or "",
+            "primary_component_rule_ids": ", ".join(search_result.get("primary_component_rule_ids") or []),
+            "primary_component_hazard_overridden": bool(search_result.get("primary_component_hazard_overridden")),
             "cas_name_conflict": search_result.get("cas_name_conflict") or name_result.get("cas_name_conflict") or False,
             "cas_correction_candidate": search_result.get("cas_correction_candidate") or name_result.get("cas_correction_candidate") or False,
             "cas_correction_applied": search_result.get("cas_correction_applied")
@@ -775,6 +803,26 @@ def review_display_summary(
         detail_parts.append(
             f"原 CAS：{original_erp_cas or '-'}；修正 CAS：{corrected_cas or '-'}；"
             f"来源：{evidence_fields.get('cas_correction_source') or source or '-'}"
+        )
+    primary_component = str(evidence_fields.get("primary_component") or "").strip()
+    if primary_component:
+        modifiers = str(evidence_fields.get("primary_component_modifiers") or "").strip()
+        rule_ids = str(evidence_fields.get("primary_component_rule_ids") or "").strip()
+        overridden = _truthy(evidence_fields.get("primary_component_hazard_overridden"))
+        detail_parts.append(
+            f"主成分判定：{primary_component}"
+            f"；修饰：{modifiers or '-'}；规则：{rule_ids or '-'}"
+            f"；{'已由已确认危险证据覆盖' if overridden else '按主成分采用'}"
+        )
+    candidate_status = str(evidence_fields.get("candidate_cas_validation_status") or "").strip()
+    if candidate_status:
+        candidate_reason = str(evidence_fields.get("candidate_cas_validation_reason") or "").strip()
+        page_name = str(evidence_fields.get("candidate_cas_page_name") or "").strip()
+        secondary = str(evidence_fields.get("candidate_cas_secondary_confirmation_source") or "").strip()
+        detail_parts.append(
+            f"候选 CAS 校验：{candidate_status}"
+            f"；页面物质：{page_name or '-'}；独立确认：{secondary or '-'}"
+            f"{('；原因：' + candidate_reason) if candidate_reason else ''}"
         )
     if detail_reason.strip():
         detail_parts.append(localize_review_detail_text(_compact_error(detail_reason, limit=320)))

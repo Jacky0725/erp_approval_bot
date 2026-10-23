@@ -27,7 +27,88 @@ class Bot(ApprovalFlowMixin, ReagentPageMixin):
     pass
 
 
+class V1NoEvidenceBusinessPolicyTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.engine = RuleEngine.from_structured_excel(ROOT_DIR / "config" / "rules_structured.xlsx")
+
+    def test_explicit_chemical_names_use_local_rules_then_ordinary(self) -> None:
+        bot = Bot()
+        bot.settings = {"approval": {"pipeline_version": "v1", "v1": {"formal_rule_direct_write": True}}}
+        bot.root_dir = ROOT_DIR
+        search = {"source": "", "identity_status": "unresolved", "need_manual_review": True,
+                  "relevance_passed": False, "evidence_quality": "none"}
+        for name in ("赤藓糖醇", "钼酸钠二水合物", "三氧化钼(Molybdenum(VI)oxide)"):
+            with self.subTest(name=name):
+                reagent = {"试剂名称": name, "CAS号": "", "序号": "1"}
+                name_result = {"standard_name": name, "cleaned_name": name, "suspected_invalid_name": False}
+                initial = self.engine.classify({"reagent_name": name, "ordinary_evidence_complete": False})
+                decision, result = bot.v1_classify_without_web_evidence(
+                    reagent, name_result, search, initial, self.engine,
+                )
+                self.assertEqual(decision["final_category"], "普通类")
+                self.assertFalse(decision["need_manual_review"])
+                self.assertEqual(result["v1_no_web_evidence_policy"], "clear_name_without_evidence")
+                suggestion = bot._approval_suggestion_row(reagent, name_result, result, {}, decision)
+                self.assertFalse(suggestion["需人工复核"])
+                self.assertEqual(len(bot.high_confidence_write_candidates([suggestion])), 1)
+
+    def test_local_hazard_name_rule_precedes_ordinary(self) -> None:
+        bot = Bot()
+        bot.settings = {"approval": {"pipeline_version": "v1"}}
+        result, _ = bot.v1_classify_without_web_evidence(
+            {"试剂名称": "硝酸锂"}, {"standard_name": "硝酸锂"},
+            {"source": "", "identity_status": "unresolved", "need_manual_review": True},
+            {"final_category": "", "need_manual_review": True}, self.engine,
+        )
+        self.assertEqual(result["final_category"], "氧化剂")
+
+    def test_batch_worker_skip_branch_still_applies_no_evidence_policy(self) -> None:
+        bot = Bot()
+        bot.settings = {"approval": {"pipeline_version": "v1", "enable_llm_manual_review_advice": False}}
+        item = {
+            "index": 0, "progress": "test 1/1", "reagent": {"试剂名称": "赤藓糖醇", "CAS号": ""},
+            "name_result": {"standard_name": "赤藓糖醇", "cleaned_name": "赤藓糖醇"},
+            "search_result": {"source": "", "identity_status": "unresolved", "need_manual_review": True,
+                              "relevance_passed": False, "evidence_quality": "none"},
+        }
+        with patch.object(Bot, "search_result_should_skip_llm", return_value=True):
+            extracted, decision = bot.extract_and_classify_worker(item, self.engine)
+        self.assertEqual(decision["final_category"], "普通类")
+        self.assertFalse(decision["need_manual_review"])
+        self.assertEqual(item["search_result"]["identity_status"], "v1_local_clear_name")
+
+    def test_retired_pipeline_settings_cannot_disable_v1_fallback(self) -> None:
+        empty = {"final_category": "", "need_manual_review": True}
+        for pipeline in ("v1", "v2", "v3"):
+            with self.subTest(pipeline=pipeline):
+                bot = Bot()
+                bot.settings = {"approval": {"pipeline_version": pipeline}}
+                selected, _ = bot.v1_classify_without_web_evidence(
+                    {"试剂名称": "赤藓糖醇"}, {"standard_name": "赤藓糖醇"},
+                    {"source": "", "identity_status": "unresolved"}, empty, self.engine,
+                )
+                self.assertEqual(selected["final_category"], "普通类")
+
+    def test_unclear_product_name_still_does_not_use_name_fallback(self) -> None:
+        empty = {"final_category": "", "need_manual_review": True}
+        bot = Bot()
+        bot.settings = {"approval": {"pipeline_version": "v3"}}
+        selected, _ = bot.v1_classify_without_web_evidence(
+            {"试剂名称": "偶联剂TM-P"}, {"standard_name": "偶联剂TM-P"},
+            {"source": "", "identity_status": "unresolved"}, empty, self.engine,
+        )
+        self.assertEqual(selected, empty)
+
+
 class ApprovalFlowPropertyMatchTest(unittest.TestCase):
+    def test_api_webpage_verification_samples_but_always_checks_canary(self) -> None:
+        settings = {"web_verify_after_api_write": True, "web_verify_sample_every": 5}
+        self.assertTrue(Bot.should_verify_api_page(1, True, settings))
+        self.assertFalse(Bot.should_verify_api_page(1, False, settings))
+        self.assertTrue(Bot.should_verify_api_page(5, False, settings))
+        self.assertTrue(Bot.should_verify_api_page(1, True, {"web_verify_after_api_write": False}))
+
     def test_property_value_matches_duplicate_fixed_column_text(self) -> None:
         writer = ApprovalWriter()
 
@@ -192,7 +273,7 @@ class ApprovalFlowPropertyMatchTest(unittest.TestCase):
             assert row is not None
             self.assertEqual(row["final_category"], "强反应")
 
-    def test_verified_manual_review_suggestion_is_not_stored_in_memory(self) -> None:
+    def test_verified_erp_write_is_stored_despite_prewrite_manual_review_flag(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             bot = Bot()
             bot.root_dir = Path(tmp)
@@ -208,10 +289,14 @@ class ApprovalFlowPropertyMatchTest(unittest.TestCase):
                 "需人工复核": True,
             }
 
-            self.assertFalse(bot.remember_verified_approval_suggestion(suggestion, "普通类"))
+            self.assertTrue(bot.remember_verified_approval_suggestion(suggestion, "普通类"))
 
             memory = ReagentMemory.from_settings(bot.settings, bot.root_dir)
-            self.assertIsNone(memory.lookup(raw_name="低置信试剂"))
+            row = memory.lookup(raw_name="低置信试剂")
+            self.assertIsNotNone(row)
+            assert row is not None
+            self.assertEqual(row["final_category"], "普通类")
+            self.assertEqual(row["source"], "verified_erp_write")
 
     def test_verified_v3_write_promotes_reliable_cas_only_to_memory(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -696,7 +781,7 @@ class ApprovalFlowTodoLoopTest(unittest.TestCase):
 
         self.assertTrue(result)
 
-    def test_approval_suggestion_uses_corrected_cas_and_preserves_original(self) -> None:
+    def test_approval_suggestion_keeps_existing_valid_cas_and_records_candidate(self) -> None:
         bot = Bot()
         row = bot._approval_suggestion_row(
             reagent={
@@ -730,11 +815,14 @@ class ApprovalFlowTodoLoopTest(unittest.TestCase):
             classification={"need_manual_review": False, "final_category": "\u666e\u901a\u7c7b", "confidence": 0.8},
         )
 
-        self.assertEqual(row["CAS\u53f7"], "1310-73-2")
+        self.assertEqual(row["CAS\u53f7"], "64-17-5")
         self.assertEqual(row["\u539fERP CAS\u53f7"], "64-17-5")
-        self.assertEqual(row["\u4fee\u6b63CAS\u53f7"], "1310-73-2")
+        # An unverified name-search CAS stays audit-only and is not shown or remembered.
+        self.assertEqual(row["\u7f51\u9875\u5019\u9009CAS"], "")
+        self.assertEqual(row["\u4fee\u6b63CAS\u53f7"], "")
         self.assertTrue(row["CAS\u540d\u79f0\u51b2\u7a81"])
-        self.assertTrue(row["CAS\u4fee\u6b63\u5df2\u5e94\u7528"])
+        self.assertFalse(row["CAS\u4fee\u6b63\u5df2\u5e94\u7528"])
+        self.assertFalse(row["\u5019\u9009CAS\u53ef\u5199\u5165\u8bb0\u5fc6\u5e93"])
 
     def test_trusted_exact_example_raises_confidence_to_write_threshold(self) -> None:
         bot = Bot()
@@ -814,6 +902,82 @@ class ApprovalFlowTodoLoopTest(unittest.TestCase):
         self.assertFalse(suggestion["需人工复核"])
         self.assertEqual(suggestion["置信度"], 1.0)
 
+    def test_adopted_llm_second_opinion_is_an_erp_write_candidate(self) -> None:
+        bot = Bot()
+        bot.settings = {
+            "approval": {
+                "write_min_confidence": 0.8,
+                "adopt_llm_second_opinion_when_rule_unresolved": True,
+            },
+            "reagent": {"physicochemical_property_options": ["易燃类"]},
+        }
+        classification, search_result = bot._adopt_llm_rule_gap_opinion(
+            classification={"final_category": "", "need_manual_review": True},
+            search_result={"need_manual_review": True, "llm_advisory_only": True},
+            advice={
+                "used_llm": True,
+                "candidate_category": "易燃液体",
+                "advisory_confidence": 0.3,
+                "reason_cn": "模型识别为低闪点液体。",
+                "matched_rule_summary_cn": "闪点规则候选。",
+            },
+        )
+
+        self.assertEqual(classification["final_category"], "易燃液体")
+        self.assertFalse(classification["need_manual_review"])
+        self.assertTrue(search_result["llm_second_opinion_adopted"])
+        candidates = bot.high_confidence_write_candidates([{
+            "最终建议类别": classification["final_category"],
+            "需人工复核": classification["need_manual_review"],
+            "置信度": classification["confidence"],
+            "llm_second_opinion_adopted": True,
+        }])
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0]["最终建议类别"], "易燃类")
+
+    def test_llm_second_opinion_does_not_override_a_rule_category(self) -> None:
+        bot = Bot()
+        bot.settings = {"reagent": {"physicochemical_property_options": ["易燃类", "普通类"]}}
+        classification, search_result = bot._adopt_llm_rule_gap_opinion(
+            classification={"final_category": "普通类", "need_manual_review": False},
+            search_result={},
+            advice={"used_llm": True, "candidate_category": "易燃液体"},
+        )
+        self.assertEqual(classification["final_category"], "普通类")
+        self.assertNotIn("llm_second_opinion_adopted", search_result)
+
+    def test_formal_rule_category_wins_over_llm_second_opinion_for_erp_candidate(self) -> None:
+        bot = Bot()
+        bot.settings = {
+            "approval": {"write_min_confidence": 0.7},
+            "reagent": {"physicochemical_property_options": ["易燃类", "普通类"]},
+        }
+        candidates = bot.high_confidence_write_candidates([{
+            "最终建议类别": "易燃液体",
+            "命中规则ID": "STRUCT-FLA-FP-001",
+            "需人工复核": False,
+            "置信度": 0.9,
+            "身份状态": "name_verified",
+            "LLM辅助意见仅供复核": True,
+            "LLM辅助建议类别": "普通类",
+        }])
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0]["最终建议类别"], "易燃类")
+
+    def test_unresolved_v1_formal_rule_is_writable_unless_product_model_protected(self) -> None:
+        bot = Bot()
+        bot.settings = {
+            "approval": {"write_min_confidence": 0.7, "v1": {"formal_rule_direct_write": True}},
+            "reagent": {"physicochemical_property_options": ["刺激性"]},
+        }
+        base = {
+            "最终建议类别": "刺激性", "命中规则ID": "BUS-IRR-TOX-HCODES-001",
+            "需人工复核": True, "置信度": 0.88, "身份状态": "unresolved",
+        }
+        self.assertEqual(len(bot.high_confidence_write_candidates([dict(base)])), 1)
+        blocked = dict(base, **{"商品型号身份保护": True})
+        self.assertEqual(bot.high_confidence_write_candidates([blocked]), [])
+
     def test_unknown_suggestion_is_not_added_to_manual_review_queue(self) -> None:
         class ReviewGuardBot(Bot):
             def add_manual_review_item_from_suggestion(self, *_args: object, **_kwargs: object) -> None:
@@ -846,6 +1010,90 @@ class ApprovalFlowTodoLoopTest(unittest.TestCase):
         self.assertFalse(suggestion["需人工复核"])
         self.assertEqual(suggestion["置信度"], 1.0)
         self.assertEqual(suggestion["未知类判定状态"], "统一自动写入")
+
+    def test_unresolved_product_without_valid_cas_becomes_unknown_auto_write(self) -> None:
+        suggestion = {
+            "试剂名称": "FTGX-B-0019",
+            "CAS号": "",
+            "最终建议类别": "",
+            "需人工复核": True,
+        }
+        result = Bot.apply_unresolved_product_unknown_policy(
+            suggestion,
+            {
+                "identity_status": "unresolved",
+                "is_mixture": False,
+                "composition_complete": False,
+                "component_categories": [],
+                "mixture_risk_categories": [],
+                "sds_categories": [],
+            },
+            {"raw_name": "FTGX-B-0019"},
+            {"need_manual_review": True, "matched_rule_ids": []},
+        )
+
+        self.assertEqual(result["最终建议类别"], "未知类")
+        self.assertFalse(result["需人工复核"])
+        self.assertEqual(result["未知类判定状态"], "统一自动写入")
+
+    def test_named_chemical_with_failed_lookup_is_not_unknown_product(self) -> None:
+        for name in ("赤藓糖醇", "钼酸钠二水合物", "三氧化钼(Molybdenum(VI)oxide)"):
+            with self.subTest(name=name):
+                suggestion = {"试剂名称": name, "CAS号": "-", "最终建议类别": "", "需人工复核": True}
+                result = Bot.apply_unresolved_product_unknown_policy(
+                    suggestion,
+                    {"identity_status": "unresolved", "lookup_status": "unavailable",
+                     "identity_enrichment": {"name_type": "unresolved"}, "is_mixture": False},
+                    {"raw_name": name},
+                    {"need_manual_review": True, "matched_rule_ids": []},
+                )
+                self.assertEqual(result["最终建议类别"], "")
+                self.assertTrue(result["需人工复核"])
+
+    def test_unknown_memory_requires_fresh_classification(self) -> None:
+        self.assertFalse(Bot().memory_match_is_safe(
+            {"试剂名称": "赤藓糖醇"},
+            {"final_category": "未知类", "source": "verified_erp_write", "reason": "BUS-UNKNOWN-UNRESOLVED-PRODUCT"},
+        ))
+
+    def test_unresolved_mixture_with_confirmed_risk_component_stays_manual(self) -> None:
+        suggestion = {
+            "试剂名称": "未知混合溶液",
+            "CAS号": "",
+            "最终建议类别": "",
+            "需人工复核": True,
+        }
+        result = Bot.apply_unresolved_product_unknown_policy(
+            suggestion,
+            {
+                "identity_status": "unresolved",
+                "is_mixture": True,
+                "composition_complete": False,
+                "component_categories": ["易燃液体"],
+            },
+            {"raw_name": "未知混合溶液"},
+            {"need_manual_review": True, "matched_rule_ids": []},
+        )
+
+        self.assertEqual(result["最终建议类别"], "")
+        self.assertTrue(result["需人工复核"])
+
+    def test_valid_cas_unresolved_product_does_not_become_unknown(self) -> None:
+        suggestion = {
+            "试剂名称": "FTGX-B-0019",
+            "CAS号": "64-17-5",
+            "最终建议类别": "",
+            "需人工复核": True,
+        }
+        result = Bot.apply_unresolved_product_unknown_policy(
+            suggestion,
+            {"identity_status": "unresolved"},
+            {"raw_name": "FTGX-B-0019"},
+            {"need_manual_review": True, "matched_rule_ids": []},
+        )
+
+        self.assertEqual(result["最终建议类别"], "")
+        self.assertTrue(result["需人工复核"])
 
     def test_high_confidence_candidate_maps_rule_category_to_erp_property(self) -> None:
         bot = Bot()
@@ -902,6 +1150,34 @@ class ApprovalFlowTodoLoopTest(unittest.TestCase):
         )
 
         self.assertFalse(result)
+
+    def test_rule_based_reject_writes_despite_unresolved_identity(self) -> None:
+        bot = Bot()
+        bot.settings = {
+            "approval": {"write_min_confidence": 0.7},
+            "reagent": {"physicochemical_property_options": ["拒收类"]},
+        }
+        suggestion = {
+            "最终建议类别": "不建议接收类",
+            "需人工复核": True,
+            "置信度": 0.1,
+            "身份状态": "unresolved",
+            "命中规则ID": "BUS-REJECT-DETERMINISTIC-001",
+        }
+        result = bot.high_confidence_write_candidates([suggestion])
+        self.assertEqual(result[0]["最终建议类别"], "拒收类")
+
+    def test_advisory_only_reject_is_not_auto_written(self) -> None:
+        suggestion = {
+            "最终建议类别": "不建议接收类",
+            "需人工复核": False,
+            "置信度": 1.0,
+            "命中规则ID": "BUS-REJECT-DETERMINISTIC-001",
+            "LLM辅助意见仅供复核": True,
+        }
+        bot = Bot()
+        bot.settings = {"reagent": {"physicochemical_property_options": ["拒收类"]}}
+        self.assertEqual(bot.high_confidence_write_candidates([suggestion]), [])
 
     def test_not_recommended_category_is_not_added_to_manual_review_queue(self) -> None:
         class ReviewGuardBot(Bot):

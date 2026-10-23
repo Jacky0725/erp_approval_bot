@@ -30,6 +30,49 @@ class RuleMaintainer:
     root_dir: Path
     settings: dict[str, Any]
 
+    def publish_reviewed_workbook(self, incoming: Path, *, expected_sha256: str, reviewer: str, reason: str) -> dict[str, Any]:
+        """Publish an explicitly reviewed workbook; never infer business rules."""
+        from datetime import datetime
+        import hashlib
+        import json
+        from uuid import uuid4
+        from audit_logger import AuditLogger
+        from rule_workbook_validator import validate_rule_workbook
+        from workbuddy_bridge import WorkBuddyBridge
+
+        if not reviewer.strip() or not reason.strip() or not expected_sha256.strip():
+            raise ValueError("发布需提供确认人、变更说明及确认时的正式规则摘要。")
+        target = self.structured_rules_path
+        if Path(incoming).resolve() == target.resolve():
+            raise ValueError("请使用独立的待发布文件，不要直接修改正式规则。")
+        bridge = WorkBuddyBridge(self.root_dir, self.settings)
+        with bridge.exclusive():
+            previous = target.read_bytes()
+            before = hashlib.sha256(previous).hexdigest()
+            if before != expected_sha256:
+                raise ValueError("正式规则已变化，请重新审阅差异后发布。")
+            payload = Path(incoming).read_bytes()
+            after = hashlib.sha256(payload).hexdigest()
+            if before == after:
+                return {"changed": False, "sha256": after}
+            with atomic_excel_path(target) as staged:
+                staged.write_bytes(payload)
+                validation = validate_rule_workbook(staged)
+                if not validation.valid:
+                    raise ValueError("规则校验失败：" + "; ".join(validation.errors))
+                backup_dir = target.parent / "rule_backups"
+                backup_dir.mkdir(parents=True, exist_ok=True)
+                backup = backup_dir / f"{target.stem}_{datetime.now():%Y%m%d_%H%M%S}_{uuid4().hex[:8]}.xlsx"
+                backup.write_bytes(previous)
+                event = {"event": "rules_publish", "reviewer": reviewer.strip(), "reason": reason.strip(), "before_sha256": before, "sha256": after, "backup": str(backup), "warnings": list(validation.warnings)}
+                # Approval and recovery information survives even if audit output
+                # or the final replace fails; the old rule file stays intact.
+                backup.with_suffix(".json").write_text(json.dumps(event, ensure_ascii=False, indent=2), encoding="utf-8")
+                if hashlib.sha256(target.read_bytes()).hexdigest() != before:
+                    raise ValueError("发布期间正式规则被其他操作修改，未覆盖。")
+            AuditLogger.from_settings(self.settings, self.root_dir).info(json.dumps(event, ensure_ascii=False))
+            return {"changed": True, **event}
+
     @classmethod
     def from_settings(cls, settings: dict[str, Any], root_dir: Path) -> "RuleMaintainer":
         return cls(root_dir=root_dir, settings=settings)

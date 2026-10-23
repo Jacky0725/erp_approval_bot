@@ -58,6 +58,10 @@ def run_action(action: str) -> None:
         bot.run_todo_tasks_export()
     elif action == "suggestions":
         bot.run_semi_auto_approval_suggestions()
+    elif action in {"workbuddy_prepare", "workbuddy_import"}:
+        bot.run_workbuddy_handoff(import_results=action == "workbuddy_import")
+    elif action == "workbuddy_loop":
+        bot.run_workbuddy_loop()
     else:
         raise ValueError(f"Unknown automation action: {action}")
 
@@ -70,6 +74,8 @@ def main() -> None:
         choices=[
             "suggestions", "todo_export", "debug_capture", "judgement_capture",
             "erp_smoke", "api_discovery", "api_canary",
+            "workbuddy_prepare", "workbuddy_import",
+            "workbuddy_loop",
         ],
     )
     args = parser.parse_args()

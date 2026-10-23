@@ -35,7 +35,7 @@
             <div class="run-step-index">2</div>
             <div>
               <h3>设置执行参数</h3>
-              <p>控制写入范围、置信度门槛和安全开关。</p>
+            <p>此处控制写入范围、置信度门槛和安全开关；审批模式在下一步选择。</p>
             </div>
           </div>
           <div class="run-options">
@@ -43,14 +43,6 @@
               测试模式已开启：本次运行只会生成建议，不会写入网页、保存、生成试剂库或点击通过。请到“基础设置”关闭测试模式后再执行实际审批。
             </div>
             <div class="form-row">
-              <label>
-                审批链路
-                <select name="pipeline_version">
-                  <option value="v1">V1 当前查询链路</option>
-                  <option value="v2">V2 物化信息链路</option>
-                  <option value="v3">V3 百炼批量联网建议</option>
-                </select>
-              </label>
               <label>
                 写入模式
                 <select name="approval_write_mode">
@@ -85,26 +77,65 @@
           <div class="run-step">
             <div class="run-step-index">3</div>
             <div>
-              <h3>启动任务</h3>
-              <p>主操作用于生成建议；运行控制和调试采集分组放置。</p>
+              <h3>选择审批模式</h3>
+              <p>V1 与 WorkBuddy 是两种独立链路；运行控制和调试采集为共用工具。</p>
             </div>
           </div>
-          <div class="run-actions">
+          <div class="approval-mode-switch" role="group" aria-label="选择审批模式">
+            <button type="button" id="approvalModeV1" data-approval-mode-switch="v1" aria-pressed="true" aria-controls="approvalModePanelV1">V1 审批</button>
+            <button type="button" id="approvalModeWorkbuddy" data-approval-mode-switch="workbuddy" aria-pressed="false" aria-controls="approvalModePanelWorkbuddy">
+              WorkBuddy 审批 <span class="mode-beta-badge">试运行</span>
+            </button>
+          </div>
+          <section class="run-mode-panel" id="approvalModePanelV1" data-approval-mode-panel="v1" aria-labelledby="approvalModeV1">
             <div class="run-action-group run-action-primary">
-              <span>主操作</span>
+              <div class="run-mode-panel-heading">
+                <h4>V1 审批</h4>
+                <span>现行审批链路</span>
+              </div>
               <div class="button-row">
                 <button type="button" data-action="suggestions" class="primary">生成审批建议</button>
               </div>
             </div>
+          </section>
+          <section class="run-mode-panel" id="approvalModePanelWorkbuddy" data-approval-mode-panel="workbuddy" aria-labelledby="approvalModeWorkbuddy" hidden>
+            <div class="run-action-group run-action-workbuddy">
+              <div class="run-mode-panel-heading">
+                <h4>WorkBuddy 审批</h4>
+                <span>独立协同链路 · 试运行</span>
+              </div>
+              <p class="workbuddy-mode-summary">准备与导入支持手动文件交接。自动批次循环和正式回写仍受客户端适配及安全配置约束。</p>
+              <div class="workbuddy-flow">
+                <div class="workbuddy-flow-step">
+                  <span>01 · 准备</span>
+                  <button type="button" data-action="workbuddy_prepare">准备下一批（最多20条）</button>
+                </div>
+                <div class="workbuddy-flow-step">
+                  <span>02 · 导入</span>
+                  <button type="button" data-action="workbuddy_import">导入 WorkBuddy 结果</button>
+                </div>
+                <div class="workbuddy-flow-step">
+                  <span>03 · 自动循环</span>
+                  <button type="button" data-action="workbuddy_loop" {% if not runtime.workbuddy_desktop_enabled %}disabled title="请先完成 WorkBuddy 客户端适配并在配置中启用" aria-describedby="workbuddyAvailabilityNote"{% endif %}>批次循环</button>
+                </div>
+              </div>
+              <p class="workbuddy-availability" id="workbuddyAvailabilityNote" {% if runtime.workbuddy_desktop_enabled %}hidden{% endif %}>批次循环当前不可用：需完成客户端适配并在配置中启用；准备与导入仍可手动使用。</p>
+              <details class="workbuddy-safety-note">
+                <summary>试运行与写入安全说明</summary>
+                <p>禁用写入模式下只测试一批，不写入记忆库或删除文件；正式回写还需通过 ERP API 安全校验。WorkBuddy 流程不会执行 AUTO_PASS。</p>
+              </details>
+            </div>
+          </section>
+          <div class="run-actions run-actions-common">
             <div class="run-action-group">
-              <span>运行控制</span>
+              <span>共用运行控制</span>
               <div class="button-row">
                 <button type="button" id="stopRunButton" class="danger-button">停止运行</button>
                 <button type="button" id="restartRunButton">重启程序</button>
               </div>
             </div>
             <div class="run-action-group">
-              <span>调试采集</span>
+              <span>共用调试采集</span>
               <div class="button-row">
                 <button type="button" data-action="judgement_capture">采集试剂判定页</button>
                 <button type="button" data-action="api_discovery">接口只读探测</button>
