@@ -401,7 +401,9 @@ class RuleEngine:
             # must not be treated as free-text evidence.  Conversely, a
             # structured GHS rule such as H301+H311+H331 is evidence in its
             # own right and must survive when no LD50/LC50 number is present.
-            if toxic_hits is not None and (toxic_hits or self._rule_uses_toxicity_threshold(rule)):
+            if toxic_hits is not None and (
+                toxic_hits or self._rule_uses_toxicity_threshold(rule) or not rule.rule_id
+            ):
                 protected_toxic_name_hits = (
                     RuleEngine._high_toxic_name_hits(reagent_info) if rule.category == "\u9ad8\u6bd2\u7c7b" else []
                 )
@@ -2164,6 +2166,8 @@ class RuleEngine:
         if re.search(rf"(?:{cation_pattern}).{{0,12}}(?:{acid_pattern})(?:盐)?", name_text):
             return True
         if re.search(r"酸(?:盐|酯)", name_text):
+            return True
+        if re.search(r"(?:酸|磺酸)(?:铵|銨|氨)(?:盐)?$", name_text):
             return True
 
         acid_solution_forms = (
