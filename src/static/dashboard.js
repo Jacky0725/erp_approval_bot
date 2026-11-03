@@ -119,6 +119,10 @@
       if (element) element.addEventListener(eventName, handler);
     }
 
+    function onAll(selector, eventName, handler) {
+      document.querySelectorAll(selector).forEach((element) => element.addEventListener(eventName, handler));
+    }
+
     function setText(selector, value) {
       const element = $(selector);
       if (element) element.textContent = value;
@@ -251,6 +255,7 @@
     setText("#schedulerLastRun", safe(initialScheduler.last_run_at));
     setText("#schedulerLastResult", safe(initialScheduler.last_result));
     initLlmSettings();
+    initIdentityEnrichmentSettings();
     initSectionNav();
     initSidebarToggle();
     initApprovalModeSwitch();
@@ -373,18 +378,18 @@
 
     let lastUpdateInfo = null;
 
-    on("#checkUpdateButton", "click", async () => {
-      await checkForUpdate();
+    onAll('[data-update-action="check"]', "click", async (event) => {
+      await checkForUpdate(event.currentTarget);
     });
 
-    on("#installUpdateButton", "click", async () => {
+    onAll('[data-update-action="install"]', "click", async () => {
       if (!lastUpdateInfo?.update_available) {
         alert("当前没有可安装的更新。");
         return;
       }
       if (!confirm(`确认下载并安装 ${lastUpdateInfo.latest_version}？程序会自动退出并启动安装器。`)) return;
       setUpdateMessage("正在下载更新包并启动安装器，请稍候...");
-      setDisabled("#installUpdateButton", true);
+      setAllDisabled('[data-update-action="install"]', true);
       const ticket = await operationTicket("update", {});
       const response = await fetch("/api/update/install", {
         method: "POST",
@@ -394,14 +399,14 @@
       const payload = await response.json();
       if (!response.ok || !payload.started) {
         setUpdateMessage(payload.detail || payload.message || "更新未启动。");
-        setDisabled("#installUpdateButton", !lastUpdateInfo?.update_available);
+        setAllDisabled('[data-update-action="install"]', !lastUpdateInfo?.update_available);
         return;
       }
-      setText("#updateStateText", "安装器已启动");
+      setUpdateState("", "安装器已启动");
       setUpdateMessage(payload.message || "安装器已启动，当前程序即将退出。");
     });
 
-    if (document.querySelector("#checkUpdateButton")) {
+    if (document.querySelector('[data-update-action="check"]')) {
       window.setTimeout(() => checkForUpdate(), 800);
     }
 
@@ -444,8 +449,8 @@
       return llmProviders.find((provider) => provider.id === providerId) || llmProviders[0] || {};
     }
 
-    function setModelOptions(models, selectedModel) {
-      const modelSelect = document.querySelector("#llmModelSelect");
+    function setModelOptions(models, selectedModel, selector = "#llmModelSelect") {
+      const modelSelect = document.querySelector(selector);
       if (!modelSelect) return;
       const values = Array.from(new Set([selectedModel, ...(models || [])].filter(Boolean)));
       modelSelect.innerHTML = "";
@@ -486,6 +491,44 @@
         }
         setModelOptions(provider.default_models || [], "");
         document.querySelector("#llmModelStatus").textContent = provider.notes || "填入 API Key 后可自动读取该平台模型列表。";
+      });
+    }
+
+    function initIdentityEnrichmentSettings() {
+      const modelSelect = document.querySelector("#identityEnrichmentModelSelect");
+      const baseUrlInput = document.querySelector("#identityEnrichmentBaseUrlInput");
+      if (!modelSelect || !baseUrlInput) return;
+      const bailian = providerById("aliyun_bailian");
+      const selectedModel = initialRuntime.identity_enrichment_model || "qwen3.7-flash";
+      setModelOptions(bailian.default_models || [], selectedModel, "#identityEnrichmentModelSelect");
+
+      on("#refreshIdentityEnrichmentModels", "click", async (event) => {
+        const button = event.currentTarget;
+        const status = document.querySelector("#identityEnrichmentModelStatus");
+        const apiKeyInput = settingsForm?.querySelector('[name="identity_enrichment_api_key"]');
+        button.disabled = true;
+        status.textContent = "正在读取百炼模型列表...";
+        try {
+          const response = await fetch("/api/llm/models", {
+            method: "POST",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({
+              provider: "aliyun_bailian",
+              base_url: baseUrlInput.value,
+              api_key: apiKeyInput?.value || "",
+            }),
+          });
+          const payload = await response.json();
+          const currentModel = modelSelect.value || selectedModel;
+          setModelOptions(payload.models || [], currentModel, "#identityEnrichmentModelSelect");
+          status.textContent = payload.ok
+            ? `已读取 ${payload.models.length} 个百炼模型。`
+            : (payload.error || "未能读取模型列表；可从默认模型中选择。");
+        } catch (error) {
+          status.textContent = `读取模型列表失败：${String(error)}；当前仍可选择默认模型。`;
+        } finally {
+          button.disabled = false;
+        }
       });
     }
 
@@ -581,55 +624,6 @@
       };
       field.addEventListener("change", apply);
       apply();
-    }
-
-    function setUpdateMessage(message) {
-      const target = document.querySelector("#updateMessage");
-      if (target) target.textContent = message || "";
-    }
-
-    async function checkForUpdate() {
-      const button = document.querySelector("#checkUpdateButton");
-      const installButton = document.querySelector("#installUpdateButton");
-      if (!button) return;
-      button.disabled = true;
-      if (installButton) installButton.disabled = true;
-      setText("#updateStateText", "检查中");
-      setUpdateMessage("正在连接 GitHub Releases...");
-      try {
-        const response = await fetch("/api/update/check");
-        const payload = await response.json();
-        lastUpdateInfo = payload;
-        setText("#currentVersionText", payload.current_version || initialRuntime.app_version || "-");
-        setText("#latestVersionText", payload.latest_version || "-");
-        const releaseLink = document.querySelector("#releaseLink");
-        if (releaseLink && payload.release_url) {
-          releaseLink.href = payload.release_url;
-          releaseLink.hidden = false;
-        }
-        if (!response.ok || !payload.ok) {
-          setText("#updateStateText", "检查失败");
-          setUpdateMessage(payload.detail || payload.error || "检查更新失败。");
-          return;
-        }
-        if (payload.update_available) {
-          setText("#updateStateText", "有新版本");
-          const assetSize = payload.asset?.size ? `${Math.ceil(payload.asset.size / 1024 / 1024)} MB` : "";
-          setUpdateMessage(`发现 ${payload.latest_version}，安装包 ${assetSize}。`);
-          if (installButton) installButton.disabled = !initialRuntime.app_frozen;
-          if (!initialRuntime.app_frozen) {
-            setUpdateMessage(`发现 ${payload.latest_version}，但当前是源码模式，请在正式安装版中自动更新。`);
-          }
-        } else {
-          setText("#updateStateText", "已是最新版本");
-          setUpdateMessage(payload.error || "当前已经是最新版本。");
-        }
-      } catch (error) {
-        setText("#updateStateText", "检查失败");
-        setUpdateMessage(String(error));
-      } finally {
-        button.disabled = false;
-      }
     }
 
     settingsForm?.addEventListener("submit", async (event) => {
@@ -2177,33 +2171,41 @@
     }
 
     function setUpdateState(state, label) {
-      const pill = document.querySelector("#updatePill");
-      if (pill) {
+      document.querySelectorAll(".update-pill").forEach((pill) => {
         pill.classList.remove("update-available", "update-current", "update-failed");
         if (state) pill.classList.add(state);
-      }
-      setText("#updateStateText", label);
+      });
+      document.querySelectorAll("[data-update-state]").forEach((target) => { target.textContent = label; });
     }
 
-    async function checkForUpdate() {
-      const button = document.querySelector("#checkUpdateButton");
-      const installButton = document.querySelector("#installUpdateButton");
+    function setAllDisabled(selector, disabled) {
+      document.querySelectorAll(selector).forEach((element) => { element.disabled = disabled; });
+    }
+
+    function setUpdateMessage(message) {
+      document.querySelectorAll("[data-update-message]").forEach((target) => {
+        target.textContent = message || "";
+      });
+    }
+
+    async function checkForUpdate(clickedButton = null) {
+      const buttons = Array.from(document.querySelectorAll('[data-update-action="check"]'));
+      const button = clickedButton || buttons[0];
       if (!button) return;
-      button.disabled = true;
-      if (installButton) {
-        installButton.disabled = true;
-        installButton.hidden = true;
-      }
+      buttons.forEach((item) => { item.disabled = true; });
+      setAllDisabled('[data-update-action="install"]', true);
+      document.querySelectorAll('[data-update-action="install"]').forEach((item) => { item.hidden = true; });
       setUpdateState("", "检查中");
       try {
         const response = await fetch("/api/update/check");
         const payload = await response.json();
         lastUpdateInfo = payload;
-        const releaseLink = document.querySelector("#releaseLink");
-        if (releaseLink && payload.release_url) {
-          releaseLink.href = payload.release_url;
-          releaseLink.hidden = false;
-        }
+        document.querySelectorAll("[data-update-release]").forEach((releaseLink) => {
+          if (payload.release_url) {
+            releaseLink.href = payload.release_url;
+            releaseLink.hidden = false;
+          }
+        });
         if (!response.ok || !payload.ok) {
           setUpdateState("update-failed", "检查失败");
           setUpdateMessage(payload.detail || payload.error || "检查更新失败。");
@@ -2211,10 +2213,10 @@
         }
         if (payload.update_available) {
           setUpdateState("update-available", `有新版本 ${payload.latest_version || ""}`);
-          if (installButton) {
-            installButton.hidden = false;
-            installButton.disabled = !initialRuntime.app_frozen;
-          }
+          document.querySelectorAll('[data-update-action="install"]').forEach((item) => {
+            item.hidden = false;
+            item.disabled = !initialRuntime.app_frozen;
+          });
           const assetSize = payload.asset?.size ? `${Math.ceil(payload.asset.size / 1024 / 1024)} MB` : "";
           setUpdateMessage(`发现 ${payload.latest_version}，安装包 ${assetSize}。`);
           return;
@@ -2225,7 +2227,7 @@
         setUpdateState("update-failed", "检查失败");
         setUpdateMessage(String(error));
       } finally {
-        button.disabled = false;
+        buttons.forEach((item) => { item.disabled = false; });
       }
     }
 

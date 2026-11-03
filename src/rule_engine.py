@@ -319,6 +319,17 @@ class RuleEngine:
                 "need_manual_review": False,
             }
 
+        # Explicit business override, restricted to the identified substance.
+        cas = str(reagent_info.get("cas") or reagent_info.get("cas_no") or "").strip()
+        names = self._normalized_name_values(reagent_info)
+        phosphazene_names = {"六氯三环磷腈", "六氯环三磷腈", "hexachlorocyclotriphosphazene"}
+        if (any(rule.rule_id == "BUS-FUM-PHOSPHAZENE-001" for rule in self.rules)
+                and (cas == "940-71-6" or (cas in {"", "-", "—"} and any(n in phosphazene_names for n in names)))):
+            return {"final_category": "发烟类", "matched_categories": ["发烟类"],
+                    "matched_rule_ids": ["BUS-FUM-PHOSPHAZENE-001"], "rule_version": self.rule_version,
+                    "reason": "六氯三环磷腈按用户确认的指定业务规则归发烟类。",
+                    "confidence": 0.99, "need_manual_review": False}
+
         matches: dict[str, RuleMatch] = {}
         mixture_categories = self._mixture_categories(reagent_info)
         for category in mixture_categories:
@@ -806,12 +817,30 @@ class RuleEngine:
         # Treating their descriptive pattern as a keyword would create false
         # category hits (for example, the CAS routing policy is not a "normal"
         # category rule).
+        if rule.rule_id == "BUS-HAL-IDENTITY-001":
+            return [f"{rule.rule_id}:{hit}" for hit in self._bromine_iodine_hits(rule.category, reagent_info)]
+        if rule.rule_id in {"SPECIAL-EXP-001", "SPECIAL-EXP-002", "SPECIAL-EXP-003"}:
+            names = self._normalized_name_values(reagent_info)
+            # Page text may contain unrelated recommendations or substances.
+            # When identity is available, an azide name must belong to it.
+            if names and not any(self._contains_azide(name) for name in names):
+                return []
+        if rule.rule_id == "BUS-OXI-HYPOCHLORITE-001":
+            names = self._normalized_name_values(reagent_info)
+            pattern = r"(?:\d+(?:\.\d+)?[%％])?(?:次氯酸钠|sodiumhypochlorite)(?:(?:\d+(?:\.\d+)?[%％])?(?:水溶液|溶液|aqueoussolution|solution))?"
+            return [f"{rule.rule_id}:次氯酸钠主成分"] if any(re.fullmatch(pattern, name) for name in names) else []
         if str(rule.match_type or "").strip().lower() == "business_policy":
             return []
+        if rule.rule_id in {"BUS-IRR-PHENOL-001", "BUS-TOX-DIMETHYLSULFATE-001"}:
+            target = {"BUS-IRR-PHENOL-001": {"苯酚", "phenol"},
+                      "BUS-TOX-DIMETHYLSULFATE-001": {"硫酸二甲酯", "dimethylsulfate"}}[rule.rule_id]
+            return [f"{rule.rule_id}:名称"] if any(name in target for name in self._normalized_name_values(reagent_info)) else []
         if str(rule.match_type or "").strip().lower() == "dictionary":
             names = self._normalized_name_values(reagent_info)
             hits = [name for name in names if name in self.aliases]
             return [f"{rule.rule_id}:alias:{name}" for name in hits]
+        if rule.rule_id == "BUS-HMT-TIN-NAME-001" and not self._identified_tin_name(reagent_info):
+            return []
         if (
             rule.category == "\u91cd\u91d1\u5c5e\u7c7b"
             and any(scope.strip().lower() == "heavy_metal" for scope in rule.field_scope)
@@ -877,6 +906,9 @@ class RuleEngine:
                 elif ">" in condition:
                     if not concentration > RuleEngine._condition_number(condition, 72.0):
                         continue
+            elif condition in {"tinnameidentity", "tin_name_identity"}:
+                if not self._identified_tin_name(reagent_info):
+                    continue
             elif condition in {"requiresliquidcontext", "requires_liquid_context"}:
                 if (
                     not (
@@ -1237,7 +1269,9 @@ class RuleEngine:
         if category == "\u5e38\u89c4\u9178" and RuleEngine._is_ordinary_mineral_acid(reagent_info):
             hits.append("\u76d0\u9178/\u785d\u9178/\u786b\u9178/HCl/HNO3/H2SO4 \u6309\u5e38\u89c4\u9178")
 
-        if category == "\u6613\u7206\u7c7b" and RuleEngine._contains_azide(text):
+        names = RuleEngine._normalized_name_values(reagent_info)
+        azide_identity = any(RuleEngine._contains_azide(name) for name in names) if names else RuleEngine._contains_azide(text)
+        if category == "\u6613\u7206\u7c7b" and azide_identity:
             hits.append("\u53e0\u6c2e/\u53e0\u5316/azide")
 
         # The acid-radical text also occurs in salts such as lithium
@@ -1293,6 +1327,42 @@ class RuleEngine:
         return RuleEngine._configured_heavy_metal_element_hits(reagent_info)
 
     @staticmethod
+    def _tin_product_name_blocked(reagent_info: dict[str, Any]) -> bool:
+        """A product mentioning tin does not establish its actual components."""
+        raw = str(
+            reagent_info.get("reagent_name") or reagent_info.get("name")
+            or reagent_info.get("chemical_name") or ""
+        )
+        text = RuleEngine._normalize_text(raw)
+        if not text:
+            return False
+        return bool(re.search(
+            r"(?:镀锡|焊锡|助焊|锡膏|锡浆|锡纸|配方|试剂盒|商品|电镀|"
+            r"镀液|清洗剂|涂料|分散液|悬浊液|乳液|溶液|水剂|合金|"
+            r"标准液|制剂|试剂|样品|助剂|添加剂|处理液|电解液|"
+            r"预混液|复合|混合|催化剂|锡盐$|锡化合物$|含锡|锡材料$)",
+            text,
+        ))
+
+    @staticmethod
+    def _identified_tin_name(reagent_info: dict[str, Any]) -> bool:
+        if RuleEngine._tin_product_name_blocked(reagent_info):
+            return False
+        raw = str(
+            reagent_info.get("reagent_name") or reagent_info.get("name")
+            or reagent_info.get("chemical_name") or ""
+        )
+        names = ([raw] if raw else [
+            str(reagent_info.get(key) or "")
+            for key in ("standard_name", "normalized_name", "english_name")
+        ])
+        return any(
+            ("锡" in name and not RuleEngine._keyword_is_negated("锡", RuleEngine._normalize_text(name)))
+            or bool(re.search(r"(?<![a-z])(?:tin|stannous|stannic)(?![a-z])", name, flags=re.I))
+            for name in names
+        )
+
+    @staticmethod
     def _configured_heavy_metal_element_hits(reagent_info: dict[str, Any]) -> list[str]:
         parts = []
         for key in ("name", "reagent_name", "chemical_name", "standard_name", "cleaned_name", "english_name"):
@@ -1305,6 +1375,8 @@ class RuleEngine:
         hits = []
         allowed_chinese_tokens = ("汞", "镉", "铬", "砷", "铅", "镍", "铍", "银", "钒", "硒", "钴", "锡")
         for token in allowed_chinese_tokens:
+            if token == "锡" and not RuleEngine._identified_tin_name(reagent_info):
+                continue
             if token in name_text and not RuleEngine._keyword_is_negated(token, name_text):
                 hits.append(f"含{token}")
 
@@ -1327,6 +1399,8 @@ class RuleEngine:
             ("stannous", "stannous"),
             ("stannic", "stannic"),
         ):
+            if token in {"tin", "stannous", "stannic"} and not RuleEngine._identified_tin_name(reagent_info):
+                continue
             if re.search(rf"(?<![a-z]){re.escape(token)}(?![a-z])", english_text):
                 hits.append(label)
         return list(dict.fromkeys(hits))

@@ -44,10 +44,10 @@
         <span class="pill">写入后端 <strong id="erpWriteBackendText">{{ runtime.erp_write_backend }}</strong></span>
         <span class="pill">接口发现 <strong id="erpApiDiscoveryText">{{ runtime.erp_api_discovery_status }}</strong></span>
         <span class="pill">处理范围 <strong id="processScopeText">{{ "全部待办" if runtime.process_all_todos == "true" else "勾选清单/首条" }}</strong></span>
-        <span id="updatePill" class="pill update-pill" title="当前版本 {{ runtime.app_version }}">程序更新 <strong id="updateStateText">检查中</strong></span>
-        <button type="button" id="checkUpdateButton" class="ghost-link update-top-button">检查</button>
-        <button type="button" id="installUpdateButton" class="ghost-link update-top-button update-install-button" disabled hidden>更新</button>
-        <a id="releaseLink" class="ghost-link update-top-button" href="#" target="_blank" rel="noreferrer" hidden>Release</a>
+        <span id="updatePill" class="pill update-pill" title="当前版本 {{ runtime.app_version }}">程序更新 <strong id="updateStateText" data-update-state>检查中</strong></span>
+        <button type="button" id="checkUpdateButton" data-update-action="check" class="ghost-link update-top-button">检查</button>
+        <button type="button" id="installUpdateButton" data-update-action="install" class="ghost-link update-top-button update-install-button" disabled hidden>更新</button>
+        <a id="releaseLink" data-update-release class="ghost-link update-top-button" href="#" target="_blank" rel="noreferrer" hidden>Release</a>
         <a class="ghost-link" href="/settings">修改设置</a>
       </div>
     </header>

@@ -36,6 +36,11 @@ class StructuredRulesTest(unittest.TestCase):
         self.assertEqual(result["final_category"], "\u6613\u7206\u7c7b")
         self.assertFalse(result["need_manual_review"])
 
+    def test_unrelated_azide_in_web_text_does_not_classify_other_substance(self) -> None:
+        result = self.engine.classify({"reagent_name": "氯化钠", "evidence": "相关推荐：叠氮化钠", "allow_default_normal": True})
+        self.assertNotEqual(result["final_category"], "易爆类")
+        self.assertNotIn("SPECIAL-EXP-001", result.get("matched_rule_ids", []))
+
     def test_promoted_drug_biology_polymer_families_keep_hazard_priority(self) -> None:
         for name, rule_id in (
             ("阿司匹林", "BUS-NOR-DRUG-DICT-001"),
@@ -233,6 +238,49 @@ class StructuredRulesTest(unittest.TestCase):
 
         self.assertEqual(result["final_category"], "\u91cd\u91d1\u5c5e\u7c7b")
         self.assertFalse(result["need_manual_review"])
+        self.assertIn("BUS-HMT-TIN-NAME-001", result["matched_rule_ids"])
+
+    def test_identified_tin_compounds_have_traceable_structured_rule(self) -> None:
+        for name in ("氯化亚锡", "二水合氯化亚锡(||)", "锡酸钾三水合物", "锡粉", "Stannous chloride"):
+            with self.subTest(name=name):
+                result = self.engine.classify({"reagent_name": name, "allow_default_normal": False})
+                self.assertEqual(result["final_category"], "重金属类")
+                self.assertIn("BUS-HMT-TIN-NAME-001", result["matched_rule_ids"])
+
+    def test_confirmed_november_business_categories(self) -> None:
+        for name, expected in (("FTIR级溴化钾粉末", "溴碘类"), ("1-溴乙基苯", "溴碘类"),
+                               ("3-甲碘苯", "溴碘类"), ("4%次氯酸钠水溶液", "氧化剂"),
+                               ("苯酚", "刺激性"), ("硫酸二甲酯", "高毒类"),
+                               ("六氯三环磷腈", "发烟类")):
+            with self.subTest(name=name):
+                result = self.engine.classify({"reagent_name": name, "allow_default_normal": True})
+                self.assertEqual(result["final_category"], expected)
+                self.assertTrue(result.get("matched_rule_ids"))
+
+    def test_phosphazene_business_override_survives_bad_azide_text(self) -> None:
+        result = self.engine.classify({"reagent_name": "六氯三环磷腈", "cas": "940-71-6",
+                                       "evidence": "叠氮; reacts violently with water"})
+        self.assertEqual(result["final_category"], "发烟类")
+
+    def test_tin_product_name_does_not_prove_tin_composition(self) -> None:
+        for name in ("化学镀锡液", "焊锡片助焊剂", "锡盐", "锡标准溶液", "无锡助剂"):
+            with self.subTest(name=name):
+                result = self.engine.classify({
+                    "reagent_name": name,
+                    "standard_name": "氯化亚锡" if name == "化学镀锡液" else name,
+                    "allow_default_normal": False,
+                    "ordinary_evidence_complete": False,
+                })
+                self.assertNotIn("重金属类", result.get("matched_categories", []))
+                self.assertNotIn("BUS-HMT-TIN-NAME-001", result.get("matched_rule_ids", []))
+
+    def test_higher_priority_oxidizer_evidence_overrides_tin_rule(self) -> None:
+        result = self.engine.classify({
+            "reagent_name": "氯化亚锡",
+            "evidence": "H272 May intensify fire; oxidizer",
+            "allow_default_normal": False,
+        })
+        self.assertEqual(result["final_category"], "氧化剂")
 
     def test_chromium_salt_matches_heavy_metal_class(self) -> None:
         result = self.engine.classify(
@@ -818,7 +866,7 @@ class StructuredRulesTest(unittest.TestCase):
         result = self.engine.classify({"reagent_name": "测试物", "suggested_categories": ["刺激性"]})
         self.assertNotEqual(result["final_category"], "刺激性")
 
-        for name in ("苯酚类", "硫酸二甲酯", "瓦斯"):
+        for name in ("苯酚类", "瓦斯"):
             with self.subTest(name=name):
                 result = self.engine.classify({"reagent_name": name, "allow_default_normal": True})
                 self.assertEqual(result["final_category"], "普通类")

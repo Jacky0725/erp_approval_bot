@@ -135,6 +135,33 @@ def test_settings_endpoint_rejects_retired_pipeline_value():
     assert "V2/V3 已停用" in response.json()["detail"]
 
 
+@pytest.mark.parametrize("enabled,expected", [("true", "true"), ("", "false")])
+def test_settings_endpoint_forwards_identity_enrichment_fields(enabled, expected):
+    from web_app import app, security
+
+    data = {
+        "identity_enrichment_model": "test-model",
+        "identity_enrichment_timeout_seconds": "12",
+        "identity_enrichment_max_calls_per_batch": "7",
+        "identity_enrichment_max_calls_per_day": "42",
+    }
+    if enabled:
+        data["identity_enrichment_enabled"] = enabled
+    with patch("web_app.manager.status", return_value={"running": False}), \
+         patch("web_app.save_runtime_config", return_value={}) as save, \
+         patch("web_app.scheduler.reload"), patch("web_app.scheduler.status", return_value={}), \
+         patch("web_app.dingtalk_stream_bot.reload"), patch("web_app.dingtalk_stream_bot.status", return_value={}), \
+         TestClient(app, base_url="http://localhost:8000") as client:
+        response = client.post("/api/settings", data=data, headers={
+            "Origin": "http://localhost:8000", "x-reagent-csrf": security.csrf_token,
+        })
+    assert response.status_code == 200
+    forwarded = save.call_args.args[0]
+    assert forwarded["identity_enrichment_enabled"] == expected
+    for key, value in data.items():
+        assert forwarded[key] == value
+
+
 def test_retired_pipeline_diagnostic_routes_are_removed():
     from web_app import app
 

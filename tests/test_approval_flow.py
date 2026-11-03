@@ -32,6 +32,25 @@ class V1NoEvidenceBusinessPolicyTest(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.engine = RuleEngine.from_structured_excel(ROOT_DIR / "config" / "rules_structured.xlsx")
 
+    def test_primary_component_concentration_and_formulation(self) -> None:
+        for name, component in (("4%次氯酸钠水溶液", "次氯酸钠"),
+                                ("氢氧化钾1mol/L水溶液", "氢氧化钾"),
+                                ("稀释10倍石墨烯量子点", "石墨烯量子点")):
+            with self.subTest(name=name):
+                profile = Bot.v1_primary_component_profile(name)
+                self.assertEqual(profile["primary_component"], component)
+        for name in ("乙醇/丙酮混合溶液", "某品牌复合溶液", "石墨烯乙醇分散液", "50%硫酸"):
+            with self.subTest(name=name):
+                self.assertIsNone(Bot.v1_primary_component_profile(name))
+
+    def test_higher_priority_primary_component_wins(self) -> None:
+        bot = Bot()
+        result, _ = bot.v1_primary_component_classification(
+            {"试剂名称": "4%次氯酸钠水溶液"}, {}, {},
+            {"final_category": "刺激性", "need_manual_review": False}, self.engine,
+        )
+        self.assertEqual(result["final_category"], "氧化剂")
+
     def test_explicit_chemical_names_use_local_rules_then_ordinary(self) -> None:
         bot = Bot()
         bot.settings = {"approval": {"pipeline_version": "v1", "v1": {"formal_rule_direct_write": True}}}
@@ -51,6 +70,8 @@ class V1NoEvidenceBusinessPolicyTest(unittest.TestCase):
                 self.assertEqual(result["v1_no_web_evidence_policy"], "clear_name_without_evidence")
                 suggestion = bot._approval_suggestion_row(reagent, name_result, result, {}, decision)
                 self.assertFalse(suggestion["需人工复核"])
+                self.assertEqual(suggestion["V1无网页证据业务口径"], "clear_name_without_evidence")
+                self.assertIn("不表示已证明无危险性", str(suggestion))
                 self.assertEqual(len(bot.high_confidence_write_candidates([suggestion])), 1)
 
     def test_local_hazard_name_rule_precedes_ordinary(self) -> None:
@@ -62,6 +83,23 @@ class V1NoEvidenceBusinessPolicyTest(unittest.TestCase):
             {"final_category": "", "need_manual_review": True}, self.engine,
         )
         self.assertEqual(result["final_category"], "氧化剂")
+        self.assertEqual(result["v1_no_web_evidence_policy"], "local_name_rule")
+        self.assertIn("本地名称规则", result["reason"])
+
+    def test_invalid_and_incomplete_formulation_do_not_use_clear_name_fallback(self) -> None:
+        bot = Bot()
+        bot.settings = {}
+        initial = {"final_category": "", "need_manual_review": True}
+        for reagent, name_result, search in (
+            ({"试剂名称": "未知配方溶液"}, {}, {}),
+            ({"试剂名称": "偶联剂TM-P"}, {}, {}),
+            ({"试剂名称": "某化学酸"}, {"suspected_invalid_name": True}, {}),
+            ({"试剂名称": "乙醇混合液"}, {}, {"is_mixture": True, "composition_complete": False}),
+        ):
+            with self.subTest(name=reagent["试剂名称"]):
+                result, details = bot.v1_classify_without_web_evidence(reagent, name_result, search, initial, self.engine)
+                self.assertEqual(result, initial)
+                self.assertNotIn("v1_no_web_evidence_policy", details)
 
     def test_batch_worker_skip_branch_still_applies_no_evidence_policy(self) -> None:
         bot = Bot()
@@ -297,6 +335,23 @@ class ApprovalFlowPropertyMatchTest(unittest.TestCase):
             assert row is not None
             self.assertEqual(row["final_category"], "普通类")
             self.assertEqual(row["source"], "verified_erp_write")
+
+    def test_verified_clear_name_fallback_preserves_provenance_in_memory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            bot = Bot()
+            bot.root_dir = Path(tmp)
+            bot.settings = {"paths": {"reagent_memory_sqlite": "data/memory.sqlite"}, "memory": {"min_confidence": 0.8}}
+            suggestion = {
+                "试剂名称": "赤藓糖醇", "最终建议类别": "普通类",
+                "规则原因": "未取得可用的本地危险性或网页证据；按无证据业务兜底归普通类。此结论不表示已证明无危险性。",
+                "命中规则ID": "BUS-NOR-CLEAR-NAME-NO-EVIDENCE-001",
+                "V1无网页证据业务口径": "clear_name_without_evidence", "_erp_record_id": "123",
+            }
+            self.assertTrue(bot.remember_verified_approval_suggestion(suggestion, "普通类"))
+            row = ReagentMemory.from_settings(bot.settings, bot.root_dir).lookup(raw_name="赤藓糖醇")
+            self.assertIsNotNone(row)
+            self.assertIn("无证据业务兜底", row["reason"])
+            self.assertIn("BUS-NOR-CLEAR-NAME-NO-EVIDENCE-001", row["reason"])
 
     def test_verified_v3_write_promotes_reliable_cas_only_to_memory(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2186,7 +2241,7 @@ class ApprovalFlowTodoLoopTest(unittest.TestCase):
         self.assertTrue(classification["need_manual_review"])
         self.assertIn("No trusted web evidence", classification["reason"])
 
-    def test_low_quality_search_uses_llm_rule_fallback_as_manual_review_advice(self) -> None:
+    def test_no_web_evidence_clear_name_fallback_does_not_use_llm_as_evidence(self) -> None:
         class FakeExtractor:
             def __init__(self, *args: object, **kwargs: object) -> None:
                 pass
@@ -2231,6 +2286,7 @@ class ApprovalFlowTodoLoopTest(unittest.TestCase):
         class FakeRuleEngine:
             rules = []
             priority = []
+            rule_version = "test-version"
 
             def __init__(self) -> None:
                 self.last_input: dict[str, object] = {}
@@ -2238,11 +2294,11 @@ class ApprovalFlowTodoLoopTest(unittest.TestCase):
             def classify(self, reagent_info: dict[str, object]) -> dict[str, object]:
                 self.last_input = reagent_info
                 return {
-                    "final_category": "强反应性",
-                    "matched_categories": ["强反应性"],
-                    "reason": "candidate category matched",
-                    "confidence": 0.8,
-                    "need_manual_review": False,
+                    "final_category": "",
+                    "matched_categories": [],
+                    "reason": "未命中本地规则",
+                    "confidence": 0.0,
+                    "need_manual_review": True,
                 }
 
         item = {
@@ -2277,7 +2333,12 @@ class ApprovalFlowTodoLoopTest(unittest.TestCase):
 
         self.assertNotIn("used_llm_rule_fallback", item["search_result"])
         self.assertEqual(extracted.get("suggested_categories"), [])
-        self.assertTrue(classification["need_manual_review"])
+        self.assertEqual(classification["final_category"], "普通类")
+        self.assertFalse(classification["need_manual_review"])
+        self.assertEqual(classification["v1_no_web_evidence_policy"], "clear_name_without_evidence")
+        self.assertIn("BUS-NOR-CLEAR-NAME-NO-EVIDENCE-001", classification["matched_rule_ids"])
+        self.assertIn("不表示已证明无危险性", classification["reason"])
+        self.assertEqual(item["search_result"]["v1_no_web_evidence_policy"], "clear_name_without_evidence")
         self.assertNotIn("llm_rule_confidence", classification)
 
     def test_reagent_memory_match_skips_chemical_search(self) -> None:

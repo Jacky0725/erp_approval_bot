@@ -149,18 +149,28 @@ class ApprovalFlowMixin:
                     if state.get("dispatch_state") == "sending":
                         raise RuntimeError(f"批次 {state['batch_id']} 上次投递结果不明；请核对 WorkBuddy，禁止自动重发。")
                     if not state.get("dispatch_state"):
-                        state["dispatch_state"] = "sending"
-                        bridge.save(state)
-                        desktop.send((path / "prompt.txt").read_text(encoding="utf-8"))
+                        problems = bridge.check_before_dispatch(state, client)
+                        if problems:
+                            raise RuntimeError("发送前 ERP 核对失败，未投递：" + "；".join(problems))
+                        print(f"[workbuddy] 批次 {state['batch_id']}：发送前 ERP 核对通过，共 {len(state['items'])} 条仍待判定。", flush=True)
+                        print(f"[workbuddy] 批次 {state['batch_id']}：检查客户端并准备投递，共 {len(state['items'])} 条。", flush=True)
+                        def before_submit() -> None:
+                            state["dispatch_state"] = "sending"
+                            bridge.save(state)
+                        desktop.send((path / "prompt.txt").read_text(encoding="utf-8"), batch_id=state["batch_id"], before_submit=before_submit)
                         state["dispatch_state"] = "submitted"
                         bridge.save(state)
+                        print(f"[workbuddy] 批次 {state['batch_id']}：投递状态已记录。", flush=True)
                     deadline = time.monotonic() + int(bridge.config.get("result_timeout_seconds", 900))
                     while not (path / "result.xlsx").exists():
                         if time.monotonic() >= deadline:
                             raise RuntimeError(f"WorkBuddy 结果等待超时：{path}；保留批次，不重发。")
                         time.sleep(2)
-                desktop.wait_until_idle(int(bridge.config.get("result_timeout_seconds", 900)))
+                print(f"[workbuddy] 批次 {state['batch_id']}：结果文件已出现，核对界面完成确认。", flush=True)
+                desktop.wait_for_batch_completion(state["batch_id"], int(bridge.config.get("result_timeout_seconds", 900)))
+                print(f"[workbuddy] 批次 {state['batch_id']}：完成确认通过，开始校验结果并同步 ERP。", flush=True)
                 bridge.process(state, client, memory, dry_run=dry_run)
+                print(f"[workbuddy] 批次 {state['batch_id']}：结果导入阶段结束。", flush=True)
                 if dry_run:
                     print("[workbuddy] 单批测试完成：未写入 ERP、未入记忆、未删除 Excel。")
                     return
@@ -2936,11 +2946,19 @@ class ApprovalFlowMixin:
             return None
         working = re.sub(r"[\u200b\u200c\u200d\ufeff]", "", raw).strip()
         modifiers: list[str] = []
+        # A concentration is a modifier, never part of the component name.
+        concentration = re.compile(r"\d+(?:\.\d+)?\s*(?:[%％]|mol\s*/\s*l|mmol\s*/\s*l|g\s*/\s*l)", re.I)
+        amounts = concentration.findall(working)
+        if len(amounts) > 1:
+            return None
+        if amounts:
+            modifiers.append(amounts[0])
+            working = concentration.sub("", working).strip(" -_，,；;（）()")
         prefix = re.match(r"^(?:稀释|稀释了?)\s*(\d+(?:\.\d+)?)\s*倍\s*", working, flags=re.I)
         if prefix:
             modifiers.append(f"稀释{prefix.group(1)}倍")
             working = working[prefix.end():].strip()
-        suffix = re.search(r"(?:水性)?(分散液|悬浊液|乳液|溶液)$", working, flags=re.I)
+        suffix = re.search(r"(?:水性|水)?(分散液|悬浊液|乳液|溶液)$", working, flags=re.I)
         if suffix:
             modifiers.append(suffix.group(0))
             working = working[:suffix.start()].strip(" -_，,；;")
@@ -2948,7 +2966,8 @@ class ApprovalFlowMixin:
         # formulation suffix.  Let the normal lookup/rule path inspect it.
         if re.search(r"(?:乙醇|甲醇|异丙醇|丙酮|乙腈|dmf|二甲基甲酰胺|四氢呋喃|thf)$", working, flags=re.I):
             return None
-        if not modifiers or len(working) < 2:
+        if (not (prefix or suffix) or len(working) < 2
+                or re.search(r"[+/、，,;；]|(?:与|和|混合|复合|配方|试剂盒|商品|助剂|添加剂)", working)):
             return None
         return {"raw_name": raw, "primary_component": working, "modifiers": "、".join(modifiers)}
 
@@ -2974,21 +2993,26 @@ class ApprovalFlowMixin:
             extracted.get(field) is True
             for field in ("corrosive", "oxidizing", "flammable", "water_reactive", "explosive_risk", "heavy_metal")
         )
-        if confirmed_hazard:
-            updated = dict(search_result)
-            updated["primary_component"] = profile["primary_component"]
-            updated["primary_component_modifiers"] = profile["modifiers"]
-            updated["primary_component_hazard_overridden"] = True
-            return classification, updated
         component_result = rule_engine.classify({
             "reagent_name": profile["primary_component"],
             "name": profile["primary_component"],
             "standard_name": profile["primary_component"],
             "cleaned_name": profile["primary_component"],
-            "text": profile["primary_component"],
+            "text": f"{profile['primary_component']} {profile['modifiers']}",
             "allow_default_normal": False,
         })
         if component_result.get("final_category") not in rule_engine.priority or component_result.get("need_manual_review", True):
+            return classification, search_result
+        if confirmed_hazard and rule_engine.highest_priority_category(
+            [current_category, str(component_result.get("final_category") or "")]
+        ) == current_category:
+            updated = dict(search_result)
+            updated["primary_component"] = profile["primary_component"]
+            updated["primary_component_modifiers"] = profile["modifiers"]
+            updated["primary_component_hazard_overridden"] = True
+            return classification, updated
+        # A bare hazard flag without a category needs the regular evidence path.
+        if confirmed_hazard and current_category in {"", UNKNOWN_CATEGORY, NORMAL_CATEGORY}:
             return classification, search_result
         updated = dict(search_result)
         updated.update({

@@ -115,6 +115,31 @@ class WorkBuddyBridge:
         temporary.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
         temporary.replace(path)
 
+    def check_before_dispatch(self, state: dict[str, Any], client: Any) -> list[str]:
+        """Recheck unsent batch against ERP without changing it or its state."""
+        cache: dict[str, list[dict[str, Any]]] = {}
+        problems = []
+        for item in state["items"]:
+            identity = item["input"]
+            number = identity["试剂清单号"]
+            if number not in cache:
+                cache[number] = client.fetch_reagent_detail(number)
+            matches = [r for r in cache[number] if text(r.get("_erp_record_id") or r.get("id")) == identity["_erp_record_id"]]
+            reason = ""
+            if len(matches) != 1:
+                reason = "ERP 明细不存在或不唯一"
+            elif record_identity({**matches[0], "试剂清单号": number}) != identity:
+                reason = "ERP 明细身份或判定信息已变化"
+            elif matches[0].get("_erp_parent_state") != "wait":
+                reason = "ERP 清单不是待审批状态或状态不可读取"
+            elif "物化特性" not in matches[0]:
+                reason = "ERP 未返回物化特性"
+            elif text(matches[0]["物化特性"]) not in EMPTY_PROPERTIES:
+                reason = f"ERP 物化特性已为 {text(matches[0]['物化特性'])}"
+            if reason:
+                problems.append(f"{number}/{identity['_erp_record_id']}：{reason}")
+        return problems
+
     def prepare(self, records: Iterable[dict[str, Any]]) -> dict[str, Any] | None:
         mode = self.config.get("prompt_mode", "full")
         if mode not in {"full", "project"}:

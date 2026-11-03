@@ -791,6 +791,15 @@ def action_label(action: str) -> str:
     return ACTION_LABELS.get(str(action or ""), str(action or ""))
 
 
+def workbuddy_outcome_counts(lines: list[str]) -> dict[str, int]:
+    counts = dict.fromkeys(("saved", "failed", "blocked", "review"), 0)
+    for line in lines:
+        match = re.match(r"^\[workbuddy\] .+ (saved|failed|blocked|review): ", line)
+        if match:
+            counts[match.group(1)] += 1
+    return counts
+
+
 def confirmed_api_write_count(lines: list[str]) -> int:
     confirmed_api_records: set[str] = set()
     for line in lines:
@@ -801,7 +810,8 @@ def confirmed_api_write_count(lines: list[str]) -> int:
                 confirmed_api_records.add(match.group(1))
             else:
                 confirmed_api_records.add(line)
-    return len(confirmed_api_records)
+    # The WorkBuddy bridge logs saved only after ERP read-back confirmation.
+    return len(confirmed_api_records) + workbuddy_outcome_counts(lines)["saved"]
 
 
 def confirmed_write_count(lines: list[str]) -> int:
@@ -830,16 +840,17 @@ def run_summary(
     options = options or {}
     todo = todo_tasks_summary(root_dir)
     suggestion_metrics = aggregate_suggestion_summaries(lines)
+    workbuddy = workbuddy_outcome_counts(lines)
 
     write_success = confirmed_write_count(lines)
-    write_failed = sum(
+    write_failed = workbuddy["failed"] + sum(
         1
         for line in lines
         if "could not select" in line.lower()
         or "failed save operation" in line.lower()
         or "save verification failed" in line.lower()
     )
-    deferred_write_count = sum(1 for line in lines if "deferred pending write candidate" in line.lower())
+    deferred_write_count = workbuddy["blocked"] + sum(1 for line in lines if "deferred pending write candidate" in line.lower())
     not_found_after_reread_count = sum(
         1
         for line in lines
@@ -901,8 +912,8 @@ def run_summary(
         "outcome": outcome,
         "target_list_numbers": target_lists,
         "todo_count": int(todo.get("rows") or 0),
-        "suggestion_count": int(suggestion_metrics.get("suggestion_total") or 0),
-        "manual_review_count": int(suggestion_metrics.get("manual_review_candidate_count") or 0),
+        "suggestion_count": int(suggestion_metrics.get("suggestion_total") or 0) + sum(workbuddy.values()),
+        "manual_review_count": int(suggestion_metrics.get("manual_review_candidate_count") or 0) + workbuddy["review"] + workbuddy["blocked"],
         "processed_pages": page_count,
         "write_success_count": write_success,
         "write_failure_count": write_failed,
@@ -939,9 +950,10 @@ def light_run_summary(
     options = options or {}
     target_lists = parse_target_list_numbers(str(options.get("TARGET_LIST_NUMBERS") or options.get("target_list_numbers") or ""))
     suggestion_metrics = aggregate_suggestion_summaries(lines)
+    workbuddy = workbuddy_outcome_counts(lines)
     source_summary = chemical_source_summary(lines)
     write_success = confirmed_write_count(lines)
-    write_failed = sum(
+    write_failed = workbuddy["failed"] + sum(
         1
         for line in lines
         if "could not select" in line.lower()
@@ -967,12 +979,12 @@ def light_run_summary(
         "outcome": outcome,
         "target_list_numbers": target_lists,
         "todo_count": 0,
-        "suggestion_count": int(suggestion_metrics.get("suggestion_total") or 0),
-        "manual_review_count": int(suggestion_metrics.get("manual_review_candidate_count") or 0),
+        "suggestion_count": int(suggestion_metrics.get("suggestion_total") or 0) + sum(workbuddy.values()),
+        "manual_review_count": int(suggestion_metrics.get("manual_review_candidate_count") or 0) + workbuddy["review"] + workbuddy["blocked"],
         "processed_pages": 0,
         "write_success_count": write_success,
         "write_failure_count": write_failed,
-        "deferred_write_count": sum(1 for line in lines if "deferred pending write candidate" in line.lower()),
+        "deferred_write_count": workbuddy["blocked"] + sum(1 for line in lines if "deferred pending write candidate" in line.lower()),
         "not_found_after_reread_count": sum(1 for line in lines if "not found after re-read" in line.lower()),
         "dropdown_failure_count": len(dropdown_failures),
         "dropdown_failures": dropdown_failures[:12],
@@ -1102,6 +1114,8 @@ def chemical_source_summary(lines: list[str]) -> dict[str, Any]:
         if "[api_record_resolve]" in lower and " failed=" in lower:
             summary["api_record_resolve_failure_count"] += 1
         if "[api_property_save]" in lower and "skipped=" not in lower:
+            summary["api_write_attempt_count"] += 1
+        if re.match(r"^\[workbuddy\] .+ saved: ERP (?:JSON-RPC|API) write saved and verified\.$", line):
             summary["api_write_attempt_count"] += 1
         if "[api_property_verify]" in lower and "failed=" in lower:
             summary["api_verify_failure_count"] += 1
@@ -2642,6 +2656,9 @@ def runtime_config_snapshot() -> dict[str, Any]:
         ),
         "approval_pipeline_version": "v1",
         "identity_enrichment_enabled": "true" if identity_enrichment.get("enabled") else "false",
+        "identity_enrichment_base_url": str(
+            identity_enrichment.get("base_url") or "https://dashscope.aliyuncs.com/compatible-mode/v1"
+        ),
         "identity_enrichment_model": str(identity_enrichment.get("model") or "qwen3.7-flash"),
         "identity_enrichment_timeout_seconds": str(identity_enrichment.get("timeout_seconds", 10)),
         "identity_enrichment_max_calls_per_batch": str(identity_enrichment.get("max_calls_per_batch", 20)),
@@ -2786,7 +2803,10 @@ def save_runtime_config(form: dict[str, str]) -> dict[str, Any]:
     identity_enrichment = approval.setdefault("identity_enrichment", {})
     identity_enrichment["enabled"] = form.get("identity_enrichment_enabled", "false").strip().lower() == "true"
     identity_enrichment["provider"] = "aliyun_bailian"
-    identity_enrichment["base_url"] = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    identity_enrichment["base_url"] = (
+        form.get("identity_enrichment_base_url", "").strip().rstrip("/")
+        or str(identity_enrichment.get("base_url") or "https://dashscope.aliyuncs.com/compatible-mode/v1").rstrip("/")
+    )
     identity_enrichment["api_key_env"] = "DASHSCOPE_API_KEY"
     identity_enrichment["model"] = form.get("identity_enrichment_model", "").strip() or "qwen3.7-flash"
     identity_enrichment["timeout_seconds"] = max(
