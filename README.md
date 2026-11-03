@@ -4,7 +4,7 @@
 
 ## 技术栈
 
-- Python 3.10+
+- Python 3.12（Windows CI 和发布构建使用的版本）
 - Playwright
 - pandas / openpyxl
 - python-dotenv
@@ -28,15 +28,33 @@
 
 ## 快速开始
 
+### Windows 安装包
+
+发布下载：[GitHub Releases](https://github.com/Jacky0725/erp_approval_bot/releases)。以 Release 页面实际上传的资产为准，Git 标签或仓库 `VERSION` 不代表安装包已发布。当前仓库版本为 `0.1.21`，采用核心程序与浏览器拆包方案。
+
+- `ReagentApprovalBot-setup-<版本>-windows-amd64.exe`：当前用户安装器，无需管理员权限。
+- `ReagentApprovalBot-core-<版本>-windows-amd64.zip`：供安装器/更新器使用的核心包，不含浏览器，不是完整便携包。
+- `ReagentApprovalBot-browser-chromium-headless-<revision>-windows-amd64.zip`：独立浏览器运行时，可由多个应用版本复用。
+- `release-manifest.json`：核心包和浏览器包的大小、SHA-256、架构及浏览器 revision 清单。
+- `*.size.json`：对应产物的体积检查报告。
+
+在线安装运行 Setup；缺失浏览器时安装器从同一 Release 获取。离线安装请把同一 Release 的 Setup、核心 ZIP、浏览器 ZIP 放在同一目录，勿混用不同发布的资产。缺少浏览器且无法联网时，补齐资产后重试，不要把不完整安装视为成功。
+
+`0.1.19` 及更旧版本须手工运行新版 Setup 迁移，勿使用旧更新器无人值守跨越安装架构。升级前备份 `%LOCALAPPDATA%\ReagentApprovalBot\`，升级后先确认测试模式、写入开关、规则和凭据，再连接隔离 ERP 验证。
+
+### 源码运行
+
+源码开发建议使用独立 Python 3.12 虚拟环境：
+
 ```powershell
 python -m venv .venv
 .venv\Scripts\Activate.ps1
 pip install -r requirements.txt
-python -m playwright install
+python -m playwright install chromium
 Copy-Item .env.example .env
 ```
 
-填写 `.env` 后，命令行直接运行审批建议流程：
+填写 `.env`，保持 `APP_DRY_RUN=true`、`APPROVAL_WRITE_MODE=disabled`、`AUTO_PASS=false`。仓库配置可能包含业务运行参数；开发前同时检查 `config/settings.yaml` 中的调度与 WorkBuddy 写入开关，调试时使用有界面浏览器。然后运行审批建议流程：
 
 ```powershell
 python src/main.py
@@ -66,6 +84,34 @@ http://127.0.0.1:8000
 - `APPROVAL_WRITE_MODE=multi_page`：默认按清单分页保存；Web UI 仅保留 `multi_page` 和 `generate_library` 两个正式写入模式。
 - `APPROVAL_WRITE_MIN_CONFIDENCE=0.8`：网页填写最低置信度。
 - `AUTO_PASS=false`：默认不点击顶部“通过”。
+- `APP_DRY_RUN=true`：先以测试模式验证；关闭顶部“通过”不等于禁止保存字段。
+- `APPROVAL_WRITE_MODE=disabled`：禁止常规网页写入；WorkBuddy 另有专用写入门禁，需单独核对。
+
+## 部署与更新
+
+Windows 安装采用当前用户目录：
+
+```text
+%LOCALAPPDATA%\Programs\ReagentApprovalBot\
+  ReagentApprovalBot.exe
+  ReagentApprovalBotUpdater.exe
+  current.json
+  previous.json
+  versions\<应用版本>\
+  shared\browsers\<浏览器revision>\
+```
+
+配置、凭据、SQLite、日志及 Excel 等运行数据位于 `%LOCALAPPDATA%\ReagentApprovalBot\`，不要与版本目录混放。升级或修复前仍应自行备份；备份包含敏感信息，应限制访问。
+
+通过管理页检查更新并确认安装。新版链路使用发布清单验证包的版本、大小和 SHA-256，再暂存、切换版本并执行健康检查；失败时尝试恢复旧版本。浏览器 revision 未变化时可复用已有运行时，不需要每次重新下载浏览器。`GET /api/update/status` 可查看更新阶段。不要在 ERP 保存过程中更新，也不要手工删除当前或回滚所需版本和浏览器。
+
+服务器部署应使用 Windows x64 专用账户，管理页仅监听回环地址，不要直接暴露到公网。WorkBuddy 依赖同一普通用户、相同桌面会话及解锁的交互桌面，不适合作为无桌面 Windows 服务运行；无头浏览器不代表 WorkBuddy 可以无人登录运行。Linux 服务部署不在当前 Windows 安装包支持范围。
+
+未签名程序仍可能触发 SmartScreen。SHA-256 只能证明文件与清单一致，不能证明发布者身份，不能抵御发布账户整体失陷；建议仅用于受控内部部署。CI 通过不等于完成所有 Windows 10/11、安装中断、回滚和真实桌面验收。
+
+### 发布维护
+
+先更新 `VERSION` 和 README，将改动推送 `main` 并等待 CI 通过，再推送对应 `v<版本>` 标签。`.github/workflows/release.yml` 在 Windows Runner 执行编译、pytest、拆包构建、内容/哈希校验及 Defender 扫描，成功后上传 Release 资产。体积硬上限为核心 ZIP 115 MiB、Setup 130 MiB、浏览器 ZIP 120 MiB；超限不能跳过检查发布。已正式发布的版本不要移动标签或替换同名资产，后续修复使用新版本。
 
 ## Web 控制台
 
@@ -100,10 +146,10 @@ python scripts/cleanup_reagent_memory_conflicts.py --yes
 
 - 运行页新增“WorkBuddy 准备20条”“WorkBuddy 导入结果”“WorkBuddy 批次循环”。WorkBuddy 独立判定，项目只校验文件、身份和类别映射，只保存物化特性，不执行顶部“通过”。
 - 每批文件位于 `data/workbuddy/<批次ID>/`。`prompt.txt` 是本批任务，输入、规则快照和模板位于同一目录。结果固定为 `result.xlsx`，五列：批次ID、记录ID、试剂名称、物化特性类别、判断依据。
-- `workbuddy.desktop_enabled` 和 `workbuddy.write_enabled` 初始均为 `false`。先使用准备/导入验证；自动循环还需验证 `workbuddy.executable` 对应客户端及控件。选择“禁用网页写入”或全局测试模式时，只预览一批，不入记忆、不写 ERP、不删结果。
+- 首次启用前应将 `workbuddy.desktop_enabled` 和 `workbuddy.write_enabled` 设为 `false`，先使用准备/导入验证；不要假定现有业务配置仍为关闭状态。自动循环还需验证 `workbuddy.executable` 对应客户端及控件。测试模式只预览一批，不入记忆、不写 ERP、不删结果。
 - 正式写入需要专用写入开关与已验证的 ERP API 同时启用。失败原因保存在本批 `state.json` 和审计日志；修正配置后可再次导入原文件，成功记录不会重复写入。
 - 判定入记忆时保留 WorkBuddy 来源，不冒充人工核实，不覆盖人工记忆；全部成功才清理结果 Excel，数据库和状态保留。
-- Windows 客户端适配依赖 `pywinauto`，已列入依赖。执行时保持桌面解锁，先打开“试剂审批”项目或其聊天。不修改客户端权限。
+- Windows 客户端适配依赖 `pywinauto`，已列入依赖。执行时保持桌面解锁，客户端与项目使用同一普通用户和权限级别。适配器核对窗口就绪、项目身份、空草稿和发送回执；结果文件出现后还需确认 `【批次完成】<批次ID>`。发送状态不明时暂停，不自动重发，也不自动提权。
 
 验证范围见 [WorkBuddy 对接说明](docs/WORKBUDDY_INTEGRATION_DESIGN.md)。
 
@@ -117,7 +163,7 @@ python scripts/cleanup_reagent_memory_conflicts.py --yes
 - 正式安装包启动 Web UI 时优先使用 `127.0.0.1:8000`；如果端口被其他程序占用，会自动尝试后续端口并打开正确地址。
 - 正式安装包的用户数据和日志与程序文件分开，默认位于 `%LOCALAPPDATA%\ReagentApprovalBot\data\`；启动日志位于其中的 `logs\launcher.log`，审批任务日志位于 `logs\runs\`。安装目录仅放程序版本和启动器，升级不应覆盖用户数据。
 - Windows 安装包默认安装到当前用户的 `%LOCALAPPDATA%\Programs\ReagentApprovalBot`；默认不弹目录选择以避免安装进度窗遮挡。需要自定义目录时，可先设置 `REAGENT_APPROVAL_INSTALL_DIR`，或设置 `REAGENT_APPROVAL_PROMPT_INSTALL_DIR=1` 后再运行安装包。在线更新会沿用当前安装目录。
-- 默认 `APPROVAL_WRITE_MODE=multi_page`，会在满足置信度与安全门条件时写入网页；`AUTO_PASS=false` 时不会点击顶部“通过”。
+- `.env.example` 使用 `APP_DRY_RUN=true`、`APPROVAL_WRITE_MODE=disabled`。安全迁移会重置常规写入和调度；已有运行环境或自定义配置仍需逐项检查。启用 `multi_page` 后可能保存 ERP 字段；`AUTO_PASS=false` 仅表示不点击顶部“通过”。
 - 默认 `AUTO_PASS=false`，不会点击顶部“通过”。
 - 所有审批建议和阻断原因应保存在 `data/logs/` 中。
 - 真实账号密码、API Key 只放 `.env`，不要提交到 Git。

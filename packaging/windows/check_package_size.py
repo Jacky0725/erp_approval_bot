@@ -32,3 +32,7 @@ def main() -> int:
     if size > LIMITS[args.kind]:
         raise SystemExit(f"{args.kind} package is {size:.1f} MB; hard limit is {LIMITS[args.kind]} MB")
     return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
