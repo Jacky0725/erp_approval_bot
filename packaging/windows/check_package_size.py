@@ -17,7 +17,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--kind", choices=LIMITS, required=True)
     parser.add_argument("--artifact", type=Path, required=True)
-    parser.add_argument("--report", type=Path, required=True)
+    parser.add_argument("--report", type=Path)
     args = parser.parse_args()
     size = size_mb(args.artifact)
     report: dict[str, object] = {"artifact": args.artifact.name, "kind": args.kind, "size_mb": round(size, 2), "limit_mb": LIMITS[args.kind]}
@@ -27,7 +27,8 @@ def main() -> int:
                 {"name": item.filename, "size": item.file_size, "compressed": item.compress_size}
                 for item in sorted(bundle.infolist(), key=lambda item: item.file_size, reverse=True)[:30]
             ]
-    args.report.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    report_path = args.report or args.artifact.with_name(f"{args.artifact.name}.size.json")
+    report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     if size > LIMITS[args.kind]:
         raise SystemExit(f"{args.kind} package is {size:.1f} MB; hard limit is {LIMITS[args.kind]} MB")
     return 0

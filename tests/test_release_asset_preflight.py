@@ -4,6 +4,8 @@ import hashlib
 import importlib.util
 import json
 from pathlib import Path
+import subprocess
+import sys
 import zipfile
 
 
@@ -12,6 +14,21 @@ SPEC = importlib.util.spec_from_file_location("verify_release_assets", MODULE_PA
 assert SPEC and SPEC.loader
 MODULE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MODULE)
+SIZE_CHECKER = Path(__file__).resolve().parents[1] / "packaging" / "windows" / "check_package_size.py"
+
+
+def test_size_checker_writes_default_report_next_to_artifact(tmp_path: Path) -> None:
+    artifact = tmp_path / "ReagentApprovalBot-core-0.1.21-windows-amd64.zip"
+    with zipfile.ZipFile(artifact, "w") as archive:
+        archive.writestr("ReagentApprovalBot.exe", b"MZ")
+
+    subprocess.run(
+        [sys.executable, str(SIZE_CHECKER), "--kind", "core", "--artifact", str(artifact)],
+        check=True,
+    )
+
+    report = json.loads((tmp_path / f"{artifact.name}.size.json").read_text(encoding="utf-8"))
+    assert report["artifact"] == artifact.name
 
 
 def test_release_asset_preflight_detects_missing_and_tampered_assets(tmp_path: Path) -> None:
