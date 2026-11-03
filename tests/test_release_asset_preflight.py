@@ -18,7 +18,11 @@ def test_release_asset_preflight_detects_missing_and_tampered_assets(tmp_path: P
     version = "0.1.20"
     assets = []
     for kind in ("core", "browser"):
-        name = f"ReagentApprovalBot-{kind}-{version}-windows-amd64.zip"
+        name = (
+            f"ReagentApprovalBot-core-{version}-windows-amd64.zip"
+            if kind == "core"
+            else "ReagentApprovalBot-browser-chromium-headless-1248-windows-amd64.zip"
+        )
         with zipfile.ZipFile(tmp_path / name, "w") as archive:
             if kind == "core":
                 archive.writestr("ReagentApprovalBot.exe", b"MZ")
@@ -27,7 +31,10 @@ def test_release_asset_preflight_detects_missing_and_tampered_assets(tmp_path: P
                 archive.writestr("chromium_headless_shell-123/chrome-headless-shell.exe", b"MZ")
         (tmp_path / f"{name}.size.json").write_text("{}", encoding="utf-8")
         payload = (tmp_path / name).read_bytes()
-        assets.append({"kind": kind, "name": name, "size": len(payload), "sha256": hashlib.sha256(payload).hexdigest()})
+        asset = {"kind": kind, "name": name, "size": len(payload), "sha256": hashlib.sha256(payload).hexdigest()}
+        if kind == "browser":
+            asset["browser_revision"] = "1248"
+        assets.append(asset)
     setup = f"ReagentApprovalBot-setup-{version}-windows-amd64.exe"
     (tmp_path / setup).write_bytes(b"MZsetup")
     (tmp_path / f"{setup}.size.json").write_text("{}", encoding="utf-8")

@@ -65,8 +65,13 @@ def verify_release_assets(release_dir: Path, version: str) -> list[str]:
         if not isinstance(name, str) or Path(name).name != name or not name.endswith(".zip"):
             errors.append(f"invalid {kind} asset name")
             continue
-        if version not in name:
-            errors.append(f"{kind} asset version mismatch")
+        if kind == "core" and version not in name:
+            errors.append("core asset version mismatch")
+        if kind == "browser":
+            revision = str(asset.get("browser_revision") or "")
+            expected_name = f"ReagentApprovalBot-browser-chromium-headless-{revision}-windows-amd64.zip"
+            if not revision or name != expected_name:
+                errors.append("browser asset revision mismatch")
         path = release_dir / name
         if not path.is_file():
             errors.append(f"missing {kind} asset: {name}")

@@ -26,5 +26,6 @@ Copy-Item (Join-Path $ReleaseDir "ReagentApprovalBotUpdater.exe") -Destination (
 $Output = Join-Path $ReleaseDir "ReagentApprovalBot-setup-$Version-windows-amd64.exe"
 & $Python -m PyInstaller --noconfirm --clean --onefile --windowed --name ReagentApprovalBotSetup --distpath (Join-Path $RepoRoot "dist") --workpath (Join-Path $RepoRoot "dist\secure-installer-work") --specpath (Join-Path $RepoRoot "dist\secure-installer-spec") --paths (Join-Path $RepoRoot "src") --hidden-import secure_update --add-data "$Stage\payload;payload" --hidden-import tkinter --hidden-import tkinter.ttk --icon (Join-Path $RepoRoot "assets\reagent-approval-bot.ico") (Join-Path $PSScriptRoot "reagent_approval_bot_installer.py")
 Move-Item (Join-Path $RepoRoot "dist\ReagentApprovalBotSetup.exe") $Output -Force
-& $Python (Join-Path $PSScriptRoot "check_package_size.py") --kind setup --artifact $Output --report "$Output.size.json"
+$Report = "$($Output).size.json"
+& $Python (Join-Path $PSScriptRoot "check_package_size.py") --kind setup --artifact $Output --report $Report
 Write-Host $Output

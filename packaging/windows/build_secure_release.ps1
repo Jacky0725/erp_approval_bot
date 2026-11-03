@@ -40,7 +40,8 @@ if (!$Repository) { $Repository = "Jacky0725/erp_approval_bot" }
 & $Python (Join-Path $PSScriptRoot "create_release_manifest.py") --version $Version --repository $Repository --core $Core --browser $BrowserPackage --browser-revision $Revision --output $Manifest
 
 foreach ($item in @(@("core", $Core), @("browser", $BrowserPackage))) {
-    & $Python (Join-Path $PSScriptRoot "check_package_size.py") --kind $item[0] --artifact $item[1] --report ("$item[1].size.json")
+    $Report = "$($item[1]).size.json"
+    & $Python (Join-Path $PSScriptRoot "check_package_size.py") --kind $item[0] --artifact $item[1] --report $Report
 }
 Write-Host "Core: $Core"
 Write-Host "Browser: $BrowserPackage"
