@@ -58,6 +58,117 @@ def test_unknown_dispatch_is_never_resent(tmp_path, monkeypatch):
         bot.run_workbuddy_loop()
 
 
+def approval_records(number, size):
+    return [{"试剂清单号": number, "_erp_record_id": str(i), "序号": str(i),
+             "试剂名称": f"虚拟试剂 {i}", "物化特性": "-", "_erp_parent_state": "wait"}
+            for i in range(1, size + 1)]
+
+
+def test_legacy_review_only_batch_unblocks_remaining_rows_without_resending(tmp_path, monkeypatch):
+    from openpyxl import load_workbook
+    from reagent_memory import ReagentMemory
+
+    bot = bot_at(tmp_path)
+    bot.dry_run_enabled = lambda: False
+    bot.approval_write_mode = lambda: "generate_library"
+    bot.erp_write_backend = lambda: "api_write_with_web_verify"
+    bot.settings["workbuddy"]["write_enabled"] = True
+    bridge = WorkBuddyBridge(tmp_path, bot.settings)
+    rows = approval_records("SJ001", 22)
+    writes, libraries, dispatched = [], [], []
+
+    def write(key, category, *_):
+        writes.append(key)
+        rows[int(key) - 1]["物化特性"] = category
+        return SimpleNamespace(saved=True, verified=True, detail="ERP saved")
+
+    def generate(key, *_):
+        libraries.append(key)
+        return {"status": "created_verified", "detail": "ERP verified"}
+
+    client = SimpleNamespace(write_enabled=lambda: True, fetch_reagent_detail=lambda _: rows,
+                             match_reagent_list=Mock(side_effect=AssertionError("held row must stay blank")),
+                             save_physicochemical_property_by_id=write, generate_reagent_library_by_id=generate)
+    monkeypatch.setattr(approval_flow, "ErpApiClient", lambda *_: client)
+
+    def deliver(batch_id, *, review_last=False):
+        path = bridge.directory / batch_id
+        book = load_workbook(path / "result_template.xlsx")
+        for row in book.active.iter_rows(min_row=2):
+            row[3].value = "需人工复核" if review_last and row[0].row == book.active.max_row else "普通类"
+            row[4].value = "模拟证据或资料不足"
+        book.save(path / "result.xlsx")
+        book.close()
+
+    previous = bridge.prepare(rows)
+    deliver(previous["batch_id"], review_last=True)
+    bridge.process(previous, client, ReagentMemory(tmp_path), dry_run=False, generate_library=True)
+    previous.update(status="needs_attention", dispatch_state="submitted")
+    bridge.save(previous)
+    writes.clear()
+    libraries.clear()
+
+    def send(_, prompt, *, batch_id, before_submit):
+        before_submit()
+        dispatched.append(batch_id)
+        deliver(batch_id)
+
+    monkeypatch.setattr(WorkBuddyDesktop, "send", send)
+    monkeypatch.setattr(WorkBuddyDesktop, "wait_for_batch_completion", lambda *_: None)
+    bot.run_workbuddy_loop()
+    assert len(dispatched) == 1 and previous["batch_id"] not in dispatched
+    assert writes == libraries == ["21", "22"]
+    state = next(item for item in bridge.batches() if item["batch_id"] == previous["batch_id"])
+    assert state["status"] == "review_pending"
+    assert rows[19]["物化特性"] == "-"
+    bot.run_workbuddy_loop()
+    assert len(dispatched) == 1 and writes == libraries == ["21", "22"]
+
+
+@pytest.mark.parametrize("old_status", ["waiting_result", "needs_attention", "operator_stopped"])
+def test_other_list_is_not_blocked_by_old_batch(tmp_path, monkeypatch, old_status):
+    bot = bot_at(tmp_path)
+    bridge = WorkBuddyBridge(tmp_path, bot.settings)
+    old = bridge.prepare(approval_records("SJ002", 1))
+    old.update(status=old_status, generate_library=True)
+    if old_status == "operator_stopped":
+        old["operator_stop_task"] = "old-task"
+    bridge.save(old)
+    monkeypatch.setattr(approval_flow, "ErpApiClient", lambda *_: SimpleNamespace(
+        fetch_reagent_detail=lambda number: approval_records(number, 1)
+    ))
+    bot.run_workbuddy_handoff()
+    created = next(state for state in bridge.batches() if state["batch_id"] != old["batch_id"])
+    assert created["items"][0]["input"]["试剂清单号"] == "SJ001"
+    assert next(state for state in bridge.batches() if state["batch_id"] == old["batch_id"])["status"] == old_status
+
+
+@pytest.mark.parametrize("stop", [False, True])
+def test_selected_scope_does_not_bypass_partially_overlapping_batch(tmp_path, monkeypatch, stop):
+    bot = bot_at(tmp_path)
+    bridge = WorkBuddyBridge(tmp_path, bot.settings)
+    old = bridge.prepare(approval_records("SJ001", 1) + approval_records("SJ002", 1))
+    if stop:
+        old.update(status="operator_stopped", operator_stop_task="old-task")
+        bridge.save(old)
+    read = Mock()
+    monkeypatch.setattr(approval_flow, "ErpApiClient", lambda *_: SimpleNamespace(fetch_reagent_detail=read))
+    with pytest.raises(RuntimeError, match="部分重合"):
+        bot.run_workbuddy_loop()
+    read.assert_not_called()
+
+
+def test_reported_pending_reviews_have_distinct_outcome(tmp_path):
+    from web_runner import light_run_summary, run_health, run_summary
+    lines = ["[workbuddy review_pending] 1"]
+    kwargs = dict(action="workbuddy_loop", options={}, running=False, success=True, error="")
+    for summary in (light_run_summary(lines, **kwargs), run_summary(lines, root_dir=tmp_path, **kwargs)):
+        assert summary["outcome"] == "自动处理完成，待人工复核 1 条"
+        assert summary["manual_review_count"] == 1
+        assert summary["write_failure_count"] == 0
+    assert run_health(lines, True, "") == "warning"
+
+
 def test_unsent_batch_preflight_checks_changed_erp_record(tmp_path):
     from workbuddy_bridge import record_identity
     bridge = WorkBuddyBridge(tmp_path, {})
@@ -126,6 +237,160 @@ def test_loop_test_mode_stops_after_one_batch_without_writes(tmp_path, monkeypat
     assert process.call_args.kwargs["dry_run"] is True
 
 
+def test_dingtalk_loop_freezes_scope_across_batches(tmp_path, monkeypatch):
+    bot = bot_at(tmp_path)
+    bot.target_list_numbers = []
+    bot.settings["workbuddy"]["write_enabled"] = True
+    bot.dry_run_enabled = lambda: False
+    bot.approval_write_mode = lambda: "multi_page"
+    bot.erp_write_backend = lambda: "api_write_with_web_verify"
+    monkeypatch.setenv("PROCESS_ALL_TODOS", "true")
+    monkeypatch.setenv("FREEZE_TODO_SCOPE", "true")
+    fetch = Mock(side_effect=[[{"name": "SJ001"}], [{"name": "SJ002"}]])
+    monkeypatch.setattr(ErpApiClient, "fetch_todo_tasks", lambda self, **kw: fetch(**kw))
+    monkeypatch.setattr(ErpApiClient, "write_enabled", lambda self: True)
+    monkeypatch.setattr(WorkBuddyBridge, "batches", lambda self: [])
+    monkeypatch.setattr(WorkBuddyBridge, "matched_records", lambda self, client, number, **kw: [{"试剂名称": number}])
+    path = tmp_path / "data/workbuddy/abc"
+    path.mkdir(parents=True)
+    (path / "result.xlsx").write_bytes(b"fake")
+    state = {"batch_id": "abc", "rules_sha256": hashlib.sha256(b"rules").hexdigest(), "status": "waiting_result",
+        "items": [{"input": {"试剂清单号": "SJ001"}}]}
+    scopes = []
+    def prepare(self, records, *, compact=False, scope=None):
+        assert scope == {"SJ001"} and not compact
+        scopes.append([r["试剂清单号"] for r in records])
+        return state if len(scopes) == 1 else None
+    monkeypatch.setattr(WorkBuddyBridge, "prepare", prepare)
+    monkeypatch.setattr(WorkBuddyBridge, "reconcile_unsent_batch", lambda *a: False)
+    monkeypatch.setattr(WorkBuddyBridge, "process", lambda *a, **kw: None)
+    monkeypatch.setattr(WorkBuddyDesktop, "wait_for_batch_completion", lambda *a: None)
+    bot.run_workbuddy_loop()
+    assert fetch.call_count == 1
+    assert scopes == [["SJ001"], ["SJ001"]]
+
+
+@pytest.mark.parametrize("reuse_enabled,expected_followups", [(True, [False, True, True, False]), (False, [False] * 4)])
+def test_workbuddy_four_batches_with_real_bridge_and_fake_erp(tmp_path, monkeypatch, reuse_enabled, expected_followups):
+    import shutil
+    from openpyxl import load_workbook
+
+    bot = bot_at(tmp_path)
+    bot.target_list_numbers = []
+    bot.settings["workbuddy"].update(write_enabled=True, batch_size=20, reuse_chat=reuse_enabled, compact_rules=True)
+    bot.dry_run_enabled = lambda: False
+    bot.approval_write_mode = lambda: "generate_library"
+    bot.erp_write_backend = lambda: "api_write_with_web_verify"
+    shutil.copyfile(Path(__file__).resolve().parents[1] / "config/rules_structured.xlsx", tmp_path / "config/rules_structured.xlsx")
+    bridge = WorkBuddyBridge(tmp_path, bot.settings)
+    bridge.publish_compact_rules()
+    records = [
+        {"试剂清单号": "SJ001", "_erp_record_id": str(i), "试剂名称": f"虚拟试剂 {i}",
+         "物化特性": "-", "_erp_parent_state": "wait"}
+        for i in range(61)
+    ]
+    fetch = Mock(side_effect=[[{"name": "SJ001"}], [{"name": "SJ002"}]])
+    match = Mock(return_value={"changes": [], "records": records})
+    saves, generated, sent = [], [], []
+
+    def save(record_id, category, identity, before):
+        records[int(record_id)]["物化特性"] = category
+        saves.append(record_id)
+        return SimpleNamespace(saved=True, verified=True, detail="模拟回读成功")
+
+    def generate(record_id, identity, category):
+        generated.append(record_id)
+        return {"status": "created_verified", "detail": "模拟入库成功"}
+
+    def send(self, prompt, *, batch_id, before_submit, reuse):
+        assert "rules_compact/manifest.json" in prompt
+        if reuse:
+            assert reuse[0] == sent[-1][0] and "不全量重读" in reuse[1]
+        before_submit()
+        sent.append((batch_id, bool(reuse)))
+        path = bridge.directory / batch_id
+        book = load_workbook(path / "result_template.xlsx")
+        for row in book.active.iter_rows(min_row=2):
+            row[3].value = "普通类"
+            row[4].value = "模拟判定"
+        book.save(path / "result.xlsx")
+        book.close()
+        return bool(reuse)
+
+    monkeypatch.setenv("PROCESS_ALL_TODOS", "true")
+    monkeypatch.setenv("FREEZE_TODO_SCOPE", "true")
+    monkeypatch.setattr(approval_flow, "ErpApiClient", lambda *_: SimpleNamespace(
+        write_enabled=lambda: True, fetch_todo_tasks=fetch, match_reagent_list=match,
+        fetch_reagent_detail=lambda number: records if number == "SJ001" else [],
+        save_physicochemical_property_by_id=save, generate_reagent_library_by_id=generate,
+    ))
+    monkeypatch.setattr(WorkBuddyDesktop, "send", send)
+    monkeypatch.setattr(WorkBuddyDesktop, "wait_for_batch_completion", lambda *a: None)
+    bot.run_workbuddy_loop()
+    assert [reuse for _, reuse in sent] == expected_followups
+    fetch.assert_called_once_with(all_pages=True)
+    match.assert_called_once_with("SJ001")
+    assert saves == generated == [str(i) for i in range(61)]
+    assert sorted(len(state["items"]) for state in bridge.batches()) == [1, 20, 20, 20]
+    assert all(state["status"] == "completed" and state["cleaned"] for state in bridge.batches())
+
+
+def test_dingtalk_v1_all_scope_is_fixed_and_restored(tmp_path, monkeypatch):
+    bot = bot_at(tmp_path)
+    bot.target_list_numbers = []
+    monkeypatch.setenv("FREEZE_TODO_SCOPE", "true")
+    bot.enter_reagent_judgement_page = Mock()
+    bot.read_all_todo_tasks = Mock(return_value=[{"试剂清单号": "SJ001"}, {"试剂清单号": "SJ002"}])
+    bot.filter_scheduled_todo_list_numbers = lambda numbers: numbers
+    scopes = []
+    bot.generate_selected_todo_approval_suggestions = lambda page: scopes.append(list(bot.target_list_numbers))
+    bot.generate_all_todo_approval_suggestions(object())
+    assert scopes == [["SJ001", "SJ002"]]
+    assert bot.read_all_todo_tasks.call_count == 1
+    assert bot.target_list_numbers == []
+
+
+def test_dingtalk_v1_fixed_scope_does_not_truncate_at_default_limit(tmp_path, monkeypatch):
+    bot = bot_at(tmp_path)
+    bot.target_list_numbers = [f"SJ{i:03d}" for i in range(51)]
+    monkeypatch.setenv("FREEZE_TODO_SCOPE", "true")
+    monkeypatch.setenv("PROCESS_ALL_TODOS_MAX", "50")
+    bot.enter_reagent_judgement_page = Mock()
+    bot.read_all_todo_tasks = lambda page: [{"试剂清单号": number} for number in bot.target_list_numbers]
+    processed = []
+    bot.generate_approval_suggestions = lambda page: processed.append(bot.target_list_number)
+    bot.generate_selected_todo_approval_suggestions(object())
+    assert processed == bot.target_list_numbers
+
+
+def test_dingtalk_options_preserve_write_mode_and_validate_workbuddy(tmp_path, monkeypatch):
+    import web_app
+    executable = tmp_path / "WorkBuddy.exe"
+    executable.write_bytes(b"fake")
+    settings = {"app": {"dry_run": False}, "workbuddy": {"desktop_enabled": True, "write_enabled": True, "executable": str(executable)},
+        "erp_api": {"enabled_for_write": True, "discovery": {"status": "verified"}}}
+    monkeypatch.delenv("APP_DRY_RUN", raising=False)
+    monkeypatch.delenv("DRY_RUN", raising=False)
+    monkeypatch.setattr(web_app, "load_settings", lambda: settings)
+    monkeypatch.setattr(web_app, "runtime_config_snapshot", lambda: {"approval_write_mode": "generate_library", "erp_write_backend": "api_write_with_web_verify"})
+    options = web_app.dingtalk_run_options()
+    assert options["FREEZE_TODO_SCOPE"] == "true"
+    assert options["APPROVAL_WRITE_MODE"] == "generate_library"
+    assert options["DINGTALK_TRIAL_MODE"] == "false"
+    assert web_app.manager._env_overrides(options)["FREEZE_TODO_SCOPE"] == "true"
+    assert web_app.manager._env_overrides(options)["ERP_WRITE_BACKEND"] == "api_write_with_web_verify"
+    settings["workbuddy"]["desktop_enabled"] = False
+    with pytest.raises(ValueError, match="未启用"):
+        web_app.dingtalk_run_options()
+    assert web_app.dingtalk_run_options(pipeline="v1")["PROCESS_ALL_TODOS"] == "true"
+    settings["workbuddy"]["desktop_enabled"] = True
+    settings["erp_api"]["enabled_for_write"] = False
+    with pytest.raises(ValueError, match="ERP API"):
+        web_app.dingtalk_run_options()
+    monkeypatch.setenv("APP_DRY_RUN", "true")
+    assert web_app.dingtalk_run_options()["DINGTALK_TRIAL_MODE"] == "true"
+
+
 def test_web_actions_are_available_and_pass_through_manager(monkeypatch):
     from fastapi.testclient import TestClient
     import web_app
@@ -137,6 +402,27 @@ def test_web_actions_are_available_and_pass_through_manager(monkeypatch):
         assert response.status_code == 200
         assert response.json()["started"]
         assert start.call_args.args[0] == action
+
+
+@pytest.mark.parametrize("enabled,action,selected,expected", [
+    (True, "workbuddy_loop", "", True),
+    (True, "workbuddy_loop", "SJ001 加急", False),
+    (True, "suggestions", "", False),
+    (False, "workbuddy_loop", "", False),
+])
+def test_web_workbuddy_scope_flag_is_opt_in(monkeypatch, enabled, action, selected, expected):
+    from fastapi.testclient import TestClient
+    import web_app
+    start = Mock(return_value={"started": True})
+    monkeypatch.setattr(web_app.manager, "start", start)
+    monkeypatch.setattr(web_app, "load_settings", lambda: {"workbuddy": {"freeze_web_todo_scope": enabled}})
+    response = TestClient(web_app.app).post("/api/run", data={
+        "action": action, "target_list_numbers": selected, "process_all_todos": "true",
+    })
+    assert response.status_code == 200
+    options = start.call_args.args[1]
+    assert (options.get("FREEZE_TODO_SCOPE") == "true") is expected
+    assert options["TARGET_LIST_NUMBERS"] == selected.removesuffix(" 加急")
 
 
 def test_partial_workbuddy_result_is_a_dashboard_warning():

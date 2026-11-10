@@ -53,18 +53,28 @@ class RuleMaintainer:
                 raise ValueError("正式规则已变化，请重新审阅差异后发布。")
             payload = Path(incoming).read_bytes()
             after = hashlib.sha256(payload).hexdigest()
+
+            def compact_warning() -> dict[str, str]:
+                if bridge.config.get("compact_rules") is True:
+                    try:
+                        bridge.publish_compact_rules(payload)
+                    except (OSError, ValueError) as error:
+                        return {"compact_warning": f"紧凑规则生成失败，继续使用 XLSX：{error}"}
+                return {}
+
             if before == after:
-                return {"changed": False, "sha256": after}
+                return {"changed": False, "sha256": after, **compact_warning()}
             with atomic_excel_path(target) as staged:
                 staged.write_bytes(payload)
                 validation = validate_rule_workbook(staged)
                 if not validation.valid:
                     raise ValueError("规则校验失败：" + "; ".join(validation.errors))
+                compact_result = compact_warning()
                 backup_dir = target.parent / "rule_backups"
                 backup_dir.mkdir(parents=True, exist_ok=True)
                 backup = backup_dir / f"{target.stem}_{datetime.now():%Y%m%d_%H%M%S}_{uuid4().hex[:8]}.xlsx"
                 backup.write_bytes(previous)
-                event = {"event": "rules_publish", "reviewer": reviewer.strip(), "reason": reason.strip(), "before_sha256": before, "sha256": after, "backup": str(backup), "warnings": list(validation.warnings)}
+                event = {"event": "rules_publish", "reviewer": reviewer.strip(), "reason": reason.strip(), "before_sha256": before, "sha256": after, "backup": str(backup), "warnings": list(validation.warnings), **compact_result}
                 # Approval and recovery information survives even if audit output
                 # or the final replace fails; the old rule file stays intact.
                 backup.with_suffix(".json").write_text(json.dumps(event, ensure_ascii=False, indent=2), encoding="utf-8")

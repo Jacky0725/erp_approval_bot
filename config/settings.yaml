@@ -5,7 +5,9 @@ workbuddy:
   executable: D:\Program Files\WorkBuddy\WorkBuddy.exe
   project_name: 试剂审批-程龙
   prompt_mode: project
-  reuse_chat: false
+  reuse_chat: true
+  compact_rules: true
+  freeze_web_todo_scope: true
   batch_size: 20
   batch_dir: data/workbuddy
   max_write_attempts: 2
@@ -299,7 +301,7 @@ paths:
 approval:
   pipeline_version: v1
   identity_enrichment:
-    enabled: false
+    enabled: true
     provider: aliyun_bailian
     base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
     api_key_env: DASHSCOPE_API_KEY
@@ -323,7 +325,7 @@ approval:
     require_manual_confirmation: false
     promote_confirmed_correction_to_memory: false
     auto_update_erp_cas: false
-  write_mode: multi_page
+  write_mode: generate_library
   erp_write_backend: api_write_with_web_verify
   write_min_confidence: 0.7
   write_batch_size: 5
@@ -335,19 +337,6 @@ approval:
   - approve
   - reject
   - manual_review
-  v3:
-    base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
-    address_mode: shared_beijing
-    workspace_id: ''
-    custom_base_url: ''
-    api_key_env: DASHSCOPE_API_KEY
-    model: qwen3.7-plus
-    retrieval_mode: model_first
-    batch_size: 5
-    parallel_batches: 2
-    timeout_seconds: 45
-    max_retries: 1
-    cost_warning_cny: 10.0
 scheduler:
   enabled: false
   mode: daily
@@ -355,7 +344,7 @@ scheduler:
   daily_time: '16:00'
   use_default_run_policy: true
   process_all_todos_max: 50
-  approval_write_mode: multi_page
+  approval_write_mode: generate_library
   approval_write_min_confidence: '0.7'
   auto_pass: false
   skip_manual_review_lists: true
@@ -366,6 +355,19 @@ notification:
 enrichment_metrics:
   enabled: true
   jsonl_path: data/logs/enrichment_metrics.jsonl
+dingtalk_control:
+  admin_user_ids: []
+  management_group_ids: []
+dingtalk_chat:
+  enabled: true
+  use_main_llm: true
+  provider: openai_compatible
+  base_url: ''
+  model: ''
+  timeout_seconds: 20
+  context_turns: 4
+  requests_per_minute: 6
+  global_requests_per_minute: 30
 dingtalk_stream:
   enabled: true
   corp_id: ''
@@ -412,6 +414,3 @@ selectors:
   review_items: ''
   approve_button: ''
   reject_button: ''
-enrichment_v2:
-  enabled: false
-  shadow_mode: true

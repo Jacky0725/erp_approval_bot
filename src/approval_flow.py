@@ -33,17 +33,20 @@ from rule_maintainer import RuleMaintainer
 from stage_logger import StageLogger
 from ui_waits import wait_until_row_value, wait_until_spinner_hidden
 from write_failure_diagnostics import build_write_failure_debug_payload
+from task_control import checkpoint, SafeStop, TaskControl
 
 
 class ApprovalFlowMixin:
 
     def run_workbuddy_handoff(self, *, import_results: bool = False) -> None:
         """File bridge pilot; never routes through model-fallback or AUTO_PASS."""
-        from workbuddy_bridge import WorkBuddyBridge
+        from workbuddy_bridge import WorkBuddyBridge, batch_in_scope
 
         bridge = WorkBuddyBridge(self.root_dir, self.settings)
+        active_state = None
 
         def after_login(page: Page) -> None:
+            nonlocal active_state
             client = ErpApiClient(page, self.settings)
             numbers = list(getattr(self, "target_list_numbers", []) or [])
             single = str(getattr(self, "target_list_number", "") or "").strip()
@@ -53,6 +56,8 @@ class ApprovalFlowMixin:
                 dry_run = self.dry_run_enabled() or self.approval_write_mode() == "disabled"
                 if not numbers and not self._truthy(os.getenv("PROCESS_ALL_TODOS", "false")):
                     raise RuntimeError("请先选择待办清单，或明确勾选处理全部待办，再导入结果。")
+                scope = set(numbers) if numbers else None
+                bridge.restore_authorized_pause(scope)
                 if not dry_run and not bridge.config.get("write_enabled", False):
                     raise RuntimeError("WorkBuddy 正式写入尚未启用；请先完成单批验证。")
                 if not dry_run and self.erp_write_backend() != "api_write_with_web_verify":
@@ -62,52 +67,69 @@ class ApprovalFlowMixin:
                 memory = ReagentMemory.from_settings(self.settings, self.root_dir)
                 processed = 0
                 for state in bridge.batches():
-                    batch_numbers = {i["input"]["试剂清单号"] for i in state["items"]}
-                    if numbers and not batch_numbers.issubset(set(numbers)):
-                        print(f"[workbuddy] 跳过 {state['batch_id']}：该批次包含本次未选择的清单。")
+                    if not batch_in_scope(state, scope):
                         continue
                     if state["status"] == "completed":
                         if not dry_run and not state.get("cleaned"):
                             bridge.cleanup(state)
                         continue
-                    if state["rules_sha256"] != hashlib.sha256(bridge.rules_path().read_bytes()).hexdigest():
+                    if (state["rules_sha256"] != hashlib.sha256(bridge.rules_path().read_bytes()).hexdigest()
+                            and not (numbers and bridge.can_confirm_stale_reviews(state))):
                         print(f"[workbuddy attention] 跳过旧规则批次 {state['batch_id']}，请准备新批次重新判定；旧文件保留。")
                         continue
                     if not (bridge.batch_path(state) / "result.xlsx").exists():
                         continue
-                    bridge.process(state, client, memory, dry_run=dry_run)
+                    active_state = state
+                    checkpoint("WorkBuddy 导入前安全点")
+                    bridge.process(state, client, memory, dry_run=dry_run,
+                                   generate_library=self.approval_write_mode() == "generate_library",
+                                   confirm_reviews=bool(numbers))
+                    if not dry_run:
+                        bridge.require_safe_continuation(state, scope)
                     processed += 1
+                bridge.report_pending_reviews(scope)
                 print(f"[workbuddy] 已处理结果批次：{processed}；dry_run={dry_run}")
                 return
             if not numbers:
                 if not self._truthy(os.getenv("PROCESS_ALL_TODOS", "false")):
                     raise RuntimeError("请先选择待办清单，或明确勾选处理全部待办。")
                 numbers = [str(r.get("清单号") or r.get("试剂清单号") or r.get("name") or "").strip() for r in client.fetch_todo_tasks(all_pages=True)]
+            checkpoint("WorkBuddy 准备范围已固定", scope=numbers, scope_frozen=True)
+            scope = set(numbers)
+            bridge.restore_authorized_pause(scope)
             def records():
                 for number in numbers:
-                    for record in client.fetch_reagent_detail(number):
+                    for record in bridge.matched_records(client, number, dry_run=self.dry_run_enabled() or self.approval_write_mode() == "disabled"):
                         yield {**record, "试剂清单号": number}
-            state = bridge.prepare(records())
+            state = bridge.prepare(records(), scope=scope)
+            active_state = state
             if state is None:
                 print("[workbuddy] 没有新的未判定试剂；已有失败项请从原批次恢复。")
                 return
             path = bridge.batch_path(state)
-            if not {i["input"]["试剂清单号"] for i in state["items"]}.issubset(set(numbers)):
+            if not batch_in_scope(state, scope, reject_partial=True):
                 raise RuntimeError("存在其他清单的未完成批次；请先处理原批次，未投递新清单。")
             print(f"[workbuddy] 批次：{state['batch_id']}，{len(state['items'])} 条。")
             print(f"[workbuddy] 任务文本：{path / 'prompt.txt'}")
             print(f"[workbuddy] 请在 WorkBuddy 试剂审批项目执行该任务；结果保存：{path / 'result.xlsx'}")
+            checkpoint("WorkBuddy 准备完成安全点", batch_id=state["batch_id"])
+            bridge.release_prepared_pause(state)
 
         with bridge.exclusive():
-            self.run_after_login_capture("workbuddy.png", "workbuddy.html", after_login)
+            try:
+                self.run_after_login_capture("workbuddy.png", "workbuddy.html", after_login)
+            except SafeStop:
+                bridge.pause_operator_batch(active_state)
+                raise
 
     def run_workbuddy_loop(self) -> None:
         """Serial batches; the existing process manager provides Stop/kill control."""
         import time
-        from workbuddy_bridge import WorkBuddyBridge
+        from workbuddy_bridge import WorkBuddyBridge, batch_in_scope
         from workbuddy_desktop import WorkBuddyDesktop
 
         bridge = WorkBuddyBridge(self.root_dir, self.settings)
+        active_state = None
         if not bridge.config.get("desktop_enabled", False):
             raise RuntimeError("WorkBuddy 自动投递尚未启用；请先完成客户端适配验证，或使用准备/导入入口。")
         dry_run = self.dry_run_enabled() or self.approval_write_mode() == "disabled"
@@ -117,12 +139,18 @@ class ApprovalFlowMixin:
             raise RuntimeError("WorkBuddy 回写目前只支持已验证 ERP API，请选择接口写入后端。")
 
         def after_login(page: Page) -> None:
+            nonlocal active_state
             client = ErpApiClient(page, self.settings)
             if not dry_run and not client.write_enabled():
                 raise RuntimeError("ERP API 未验证或未启用，禁止 WorkBuddy 回写。")
             memory = ReagentMemory.from_settings(self.settings, self.root_dir)
             desktop = WorkBuddyDesktop(bridge.config)
+            frozen_numbers: list[str] | None = None
+            previous_session: tuple[str, str, str, int] | None = None
+            compact_rules = bridge.config.get("compact_rules") is True
+            reuse_chat = bridge.config.get("reuse_chat") is True
             while True:
+                checkpoint("WorkBuddy 批次循环安全点")
                 numbers = list(getattr(self, "target_list_numbers", []) or [])
                 single = str(getattr(self, "target_list_number", "") or "").strip()
                 if single and single not in numbers:
@@ -130,24 +158,58 @@ class ApprovalFlowMixin:
                 if not numbers:
                     if not self._truthy(os.getenv("PROCESS_ALL_TODOS", "false")):
                         raise RuntimeError("请先选择清单或勾选处理全部待办。")
-                    numbers = [str(r.get("清单号") or r.get("name") or "").strip() for r in client.fetch_todo_tasks(all_pages=True)]
+                    if frozen_numbers is None:
+                        numbers = list(dict.fromkeys(
+                            number for r in client.fetch_todo_tasks(all_pages=True)
+                            if (number := str(r.get("清单号") or r.get("试剂清单号") or r.get("name") or "").strip())
+                        ))
+                        if self._truthy(os.getenv("FREEZE_TODO_SCOPE", "false")):
+                            frozen_numbers = numbers
+                            print(f"[workbuddy] 已固定本次待办范围：{', '.join(numbers) or '无待办'}", flush=True)
+                    else:
+                        numbers = frozen_numbers
+                if not numbers:
+                    print("[workbuddy] 本次范围无待办，循环结束。", flush=True)
+                    return
+                checkpoint("WorkBuddy 范围已固定", scope=numbers, scope_frozen=True)
+                scope = set(numbers)
+                bridge.restore_authorized_pause(scope)
                 def records():
                     for number in numbers:
-                        for record in client.fetch_reagent_detail(number):
+                        for record in bridge.matched_records(client, number, dry_run=dry_run):
                             yield {**record, "试剂清单号": number}
                 # Resume a prepared/imported batch before fetching a new one.
                 digest = hashlib.sha256(bridge.rules_path().read_bytes()).hexdigest()
-                outstanding = [s for s in bridge.batches() if s["status"] in {"waiting_result", "imported"} and s["rules_sha256"] == digest]
-                state = outstanding[0] if outstanding else bridge.prepare(records())
+                outstanding = [s for s in bridge.batches() if (s["status"] in {"waiting_result", "imported"}
+                    or (s["status"] == "needs_attention" and s.get("generate_library"))) and s["rules_sha256"] == digest
+                    and batch_in_scope(s, scope, reject_partial=True)]
+                if outstanding:
+                    state = outstanding[0]
+                else:
+                    state = bridge.prepare(records(), compact=compact_rules, scope=scope)
+                active_state = state
                 if state is None:
+                    bridge.report_pending_reviews(scope)
                     print("[workbuddy] 当前范围无新记录，循环结束；失败项保留原批次。")
                     return
-                if not {i["input"]["试剂清单号"] for i in state["items"]}.issubset(set(numbers)):
+                if not batch_in_scope(state, scope, reject_partial=True):
                     raise RuntimeError("未完成批次不属于本次清单范围，已停止，未投递或写入。")
+                if not dry_run and bridge.reconcile_unsent_batch(state, client):
+                    continue
                 path = bridge.batch_path(state)
+                sent_here = False
+                rules_format = "xlsx"
+                session_batches = 1
+                print("[workbuddy scope] " + ", ".join(dict.fromkeys(i["input"]["试剂清单号"] for i in state["items"])), flush=True)
+                print(f"[workbuddy progress] 批次 {state['batch_id']}：准备处理", flush=True)
                 if not (path / "result.xlsx").exists():
                     if state.get("dispatch_state") == "sending":
-                        raise RuntimeError(f"批次 {state['batch_id']} 上次投递结果不明；请核对 WorkBuddy，禁止自动重发。")
+                        if dry_run:
+                            raise RuntimeError(f"批次 {state['batch_id']} 上次投递结果不明；请核对 WorkBuddy，禁止自动重发。")
+                        desktop.confirm_existing_submission(state["batch_id"])
+                        state["dispatch_state"] = "submitted"
+                        bridge.save(state)
+                        print(f"[workbuddy] 批次 {state['batch_id']}：已重新确认原消息在指定项目对话中，仅恢复等待，未重发。", flush=True)
                     if not state.get("dispatch_state"):
                         problems = bridge.check_before_dispatch(state, client)
                         if problems:
@@ -155,30 +217,56 @@ class ApprovalFlowMixin:
                         print(f"[workbuddy] 批次 {state['batch_id']}：发送前 ERP 核对通过，共 {len(state['items'])} 条仍待判定。", flush=True)
                         print(f"[workbuddy] 批次 {state['batch_id']}：检查客户端并准备投递，共 {len(state['items'])} 条。", flush=True)
                         def before_submit() -> None:
+                            checkpoint("WorkBuddy 投递前安全点", batch_id=state["batch_id"])
                             state["dispatch_state"] = "sending"
                             bridge.save(state)
-                        desktop.send((path / "prompt.txt").read_text(encoding="utf-8"), batch_id=state["batch_id"], before_submit=before_submit)
+                        if compact_rules or reuse_chat or state.get("compact_rules_sha256"):
+                            prompt, followup, rules_format = bridge.dispatch_prompts(state)
+                            reuse = None
+                            if reuse_chat and previous_session is not None:
+                                prior_batch, prior_digest, prior_format, prior_count = previous_session
+                                if prior_count < 3 and (prior_digest, prior_format) == (state["rules_sha256"], rules_format):
+                                    reuse = (prior_batch, followup)
+                            reused = desktop.send(prompt, batch_id=state["batch_id"], before_submit=before_submit, reuse=reuse)
+                            if reuse is not None and reused:
+                                session_batches = previous_session[3] + 1
+                            print(f"[workbuddy] 批次 {state['batch_id']}：会话第 {session_batches} 批，规则格式 {rules_format}。", flush=True)
+                        else:
+                            desktop.send((path / "prompt.txt").read_text(encoding="utf-8"), batch_id=state["batch_id"], before_submit=before_submit)
+                        sent_here = True
                         state["dispatch_state"] = "submitted"
                         bridge.save(state)
                         print(f"[workbuddy] 批次 {state['batch_id']}：投递状态已记录。", flush=True)
                     deadline = time.monotonic() + int(bridge.config.get("result_timeout_seconds", 900))
+                    print(f"[workbuddy progress] 批次 {state['batch_id']}：等待 WorkBuddy 结果", flush=True)
                     while not (path / "result.xlsx").exists():
+                        checkpoint("等待 WorkBuddy 结果", batch_id=state["batch_id"])
                         if time.monotonic() >= deadline:
                             raise RuntimeError(f"WorkBuddy 结果等待超时：{path}；保留批次，不重发。")
                         time.sleep(2)
-                print(f"[workbuddy] 批次 {state['batch_id']}：结果文件已出现，核对界面完成确认。", flush=True)
-                desktop.wait_for_batch_completion(state["batch_id"], int(bridge.config.get("result_timeout_seconds", 900)))
+                if not state.get("result_sha256"):
+                    print(f"[workbuddy] 批次 {state['batch_id']}：结果文件已出现，核对界面完成确认。", flush=True)
+                    desktop.wait_for_batch_completion(state["batch_id"], int(bridge.config.get("result_timeout_seconds", 900)))
                 print(f"[workbuddy] 批次 {state['batch_id']}：完成确认通过，开始校验结果并同步 ERP。", flush=True)
-                bridge.process(state, client, memory, dry_run=dry_run)
+                print(f"[workbuddy progress] 批次 {state['batch_id']}：校验结果并同步 ERP", flush=True)
+                bridge.process(state, client, memory, dry_run=dry_run, generate_library=self.approval_write_mode() == "generate_library")
+                previous_session = (
+                    (state["batch_id"], state["rules_sha256"], rules_format, session_batches)
+                    if reuse_chat and sent_here and state.get("result_sha256")
+                    else None
+                )
                 print(f"[workbuddy] 批次 {state['batch_id']}：结果导入阶段结束。", flush=True)
                 if dry_run:
                     print("[workbuddy] 单批测试完成：未写入 ERP、未入记忆、未删除 Excel。")
                     return
-                if any(i.get("error_code") in {"ERP_ERROR", "ERP_WRITE"} for i in state["items"]):
-                    raise RuntimeError("ERP 保存或回读异常，已保留文件并暂停循环。")
+                bridge.require_safe_continuation(state, scope)
 
         with bridge.exclusive():
-            self.run_after_login_capture("workbuddy_loop.png", "workbuddy_loop.html", after_login)
+            try:
+                self.run_after_login_capture("workbuddy_loop.png", "workbuddy_loop.html", after_login)
+            except SafeStop:
+                bridge.pause_operator_batch(active_state)
+                raise
 
     REJECT_DECISION_CATEGORIES = {"不建议接收类", "拒收类"}
 
@@ -487,6 +575,7 @@ class ApprovalFlowMixin:
         def after_login_with_discovery(page: Page) -> None:
             self.ensure_erp_api_discovery_recorder(page)
             try:
+                self.resume_pending_v1_library(page)
                 after_login(page)
             finally:
                 self.finalize_erp_api_discovery()
@@ -654,6 +743,7 @@ class ApprovalFlowMixin:
         return value.strip().lower() in {"1", "true", "yes", "y", "on"}
 
     def generate_approval_suggestions(self, page: Page) -> None:
+        checkpoint("V1 清单审批前", current_list=str(getattr(self, "target_list_number", "")))
         stage_logger = getattr(self, "stage_logger", None) or StageLogger()
         self.stage_logger = stage_logger
         self.save_results = []
@@ -668,6 +758,9 @@ class ApprovalFlowMixin:
             self.wait_for_reagent_table_ready(page)
         with stage_logger.stage("read_detail_info"):
             self._current_detail_info = self.read_detail_info(page)
+        current_list = str(self._current_detail_info.get("当前清单号") or "").strip()
+        if current_list:
+            checkpoint("V1 清单身份已读取", current_list=current_list)
         self.clear_manual_review_items_for_list(self._current_detail_info.get("\u5f53\u524d\u6e05\u5355\u53f7", ""))
 
         with stage_logger.stage("sort_property_column"):
@@ -712,12 +805,27 @@ class ApprovalFlowMixin:
             self.try_auto_pass_current_task(page)
 
     def generate_all_todo_approval_suggestions(self, page: Page) -> None:
+        if self._truthy(os.getenv("FREEZE_TODO_SCOPE", "false")):
+            self.enter_reagent_judgement_page(page)
+            numbers = self.filter_scheduled_todo_list_numbers(self.todo_list_numbers(self.read_all_todo_tasks(page)))
+            checkpoint("V1 全量范围已固定", scope=numbers, scope_frozen=True)
+            print(f"Frozen todo scope: {', '.join(numbers) or 'empty'}", flush=True)
+            if not numbers:
+                return
+            original_numbers = getattr(self, "target_list_numbers", [])
+            self.target_list_numbers = numbers
+            try:
+                self.generate_selected_todo_approval_suggestions(page)
+            finally:
+                self.target_list_numbers = original_numbers
+            return
         original_target = getattr(self, "target_list_number", "")
         processed_list_numbers: set[str] = set()
         max_todos = self.max_process_all_todos_count()
 
         try:
             while True:
+                checkpoint("V1 待办循环安全点")
                 if len(processed_list_numbers) >= max_todos:
                     break
 
@@ -725,6 +833,8 @@ class ApprovalFlowMixin:
                 tasks = self.read_all_todo_tasks(page)
                 all_list_numbers = self.todo_list_numbers(tasks)
                 list_numbers = self.filter_scheduled_todo_list_numbers(all_list_numbers)
+                resume_scope = list(dict.fromkeys(number for number in list_numbers if number not in processed_list_numbers))
+                checkpoint("V1 本轮待办范围已读取", scope=resume_scope[:max_todos - len(processed_list_numbers)])
                 print(f"Todo list refresh: {len(all_list_numbers)} total task(s) across all visible todo pages.")
                 if len(list_numbers) != len(all_list_numbers):
                     print(f"Scheduled review filter kept {len(list_numbers)} task(s) for automatic approval.")
@@ -753,13 +863,15 @@ class ApprovalFlowMixin:
     def generate_selected_todo_approval_suggestions(self, page: Page) -> None:
         original_target = getattr(self, "target_list_number", "")
         selected = self.selected_todo_list_numbers()
-        max_todos = self.max_process_all_todos_count()
+        checkpoint("V1 指定范围已固定", scope=selected, scope_frozen=True)
+        max_todos = len(selected) if self._truthy(os.getenv("FREEZE_TODO_SCOPE", "false")) else self.max_process_all_todos_count()
         processed_count = 0
 
         try:
             print(f"Selected todo list number(s): {', '.join(selected)}")
 
             for list_number in selected:
+                checkpoint("V1 下一清单前", current_list=list_number)
                 if processed_count >= max_todos:
                     print(f"Stopped selected-todo processing after PROCESS_ALL_TODOS_MAX={max_todos}.")
                     break
@@ -863,6 +975,7 @@ class ApprovalFlowMixin:
 
         while True:
             visited_steps += 1
+            checkpoint("V1 页面处理安全点")
 
             current_page = self.current_reagent_page_number(page) or str(visited_steps)
             current_unmatched = self.current_page_unmatched_reagents(page)
@@ -2189,6 +2302,7 @@ class ApprovalFlowMixin:
         return expand_results(results)
 
     def search_reagent_worker(self, item: dict[str, Any]) -> dict[str, Any]:
+        checkpoint("V1 外部检索前")
         reagent = item["reagent"]
         reagent_name = reagent.get("\u8bd5\u5242\u540d\u79f0", "").strip()
         print(f"[parallel search] START {item['progress']} {reagent_name}")
@@ -2253,6 +2367,7 @@ class ApprovalFlowMixin:
         item: dict[str, Any],
         rule_engine: RuleEngine,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
+        checkpoint("V1 提取与判定前")
         reagent = item["reagent"]
         reagent_name = reagent.get("\u8bd5\u5242\u540d\u79f0", "").strip()
         search_result = item["search_result"]
@@ -3440,6 +3555,7 @@ class ApprovalFlowMixin:
             api_status_logged = True
         consecutive_failures = 0
         for row_index, suggestion in enumerate(candidates, start=1):
+            checkpoint("V1 明细写入前安全点")
             sequence = str(suggestion.get("\u5e8f\u53f7") or "").strip()
             rule_category = str(
                 suggestion.get("\u89c4\u5219\u5224\u5b9a\u7c7b\u522b")
@@ -3496,6 +3612,7 @@ class ApprovalFlowMixin:
 
             if write_backend == "api_write_with_web_verify":
                 is_canary = canary_pending and not canary_attempted
+                checkpoint("V1 ERP 接口保存前")
                 api_result = (api_client or ErpApiClient(page, self.settings)).save_physicochemical_property(
                     suggestion,
                     category,
@@ -3614,6 +3731,9 @@ class ApprovalFlowMixin:
                     print(f"Could not find current-page row for sequence: {sequence}")
                     break
 
+                if os.getenv("AUTOMATION_TASK_ID", ""):
+                    suggestion["_control_row_key"] = str(row.get_attribute("data-row-key") or "")
+
                 self.prepare_reagent_row_for_write(page, row)
                 already_editing = writer.row_is_editing(page, row)
                 if already_editing:
@@ -3686,6 +3806,7 @@ class ApprovalFlowMixin:
                     return result
 
                 recorder = getattr(self, "_erp_api_discovery_recorder", None)
+                checkpoint("V1 ERP 页面保存前")
                 if recorder is not None:
                     recorder.begin_save_window(suggestion, category)
                 try:
@@ -3794,8 +3915,15 @@ class ApprovalFlowMixin:
                     break
 
             if mode == "generate_library" and verified and row is not None:
+                operation = {"list_number": self.current_detail_list_number(), "sequence": sequence, "name": reagent_name, "cas": cas, "category": category, "state": "pending", "row_key": str(suggestion.get("_control_row_key") or "")}
+                self.record_pending_library(operation)
+                checkpoint("V1 试剂库生成前安全点")
+                operation["state"] = "sending"
+                self.record_pending_library(operation)
                 generated = writer.generate_reagent_library(page, row)
                 self.record_save_result(f"reagent_library_{sequence}", generated, category)
+                operation["state"] = "done" if generated else "needs_review"
+                self.record_pending_library(operation)
                 print(f"Generate reagent library result for sequence {sequence}: {generated}")
 
         if mode == "save_one":
@@ -4935,6 +5063,7 @@ class ApprovalFlowMixin:
         return max(0.0, min(1.0, confidence))
 
     def try_auto_pass_current_task(self, page: Page) -> None:
+        checkpoint("V1 整单通过前安全点")
         if self.dry_run_enabled():
             print("Auto-pass skipped; dry-run mode is enabled.")
             return
@@ -4991,6 +5120,12 @@ class ApprovalFlowMixin:
         if self.save_results is None:
             self.save_results = []
         self.save_results.append({"name": name, "success": success, "detail": detail})
+        task_id = os.getenv("AUTOMATION_TASK_ID", "")
+        if task_id and success and name.startswith("reagent_save_"):
+            control = TaskControl(self.root_dir)
+            keys = set(control.get(task_id)["details"].get("verified_saved_keys", []))
+            keys.add(f"{self.current_detail_list_number()}:{name}")
+            control.record_details(task_id, verified_saved_keys=sorted(keys), saved=len(keys))
         if hasattr(self, "settings") and hasattr(self, "root_dir"):
             AuditLogger.from_settings(self.settings, self.root_dir).record_execution(
                 name,
@@ -4998,6 +5133,61 @@ class ApprovalFlowMixin:
                 detail,
                 self.dry_run_enabled(),
             )
+
+    def record_pending_library(self, operation: dict[str, str]) -> None:
+        task_id = os.getenv("AUTOMATION_TASK_ID", "")
+        if not task_id:
+            return
+        control = TaskControl(self.root_dir)
+        operations = control.get(task_id)["details"].get("v1_pending_library", [])
+        operations = [item for item in operations if (item["list_number"], item["sequence"]) != (operation["list_number"], operation["sequence"])]
+        operations.append(dict(operation))
+        control.record_details(task_id, v1_pending_library=operations,
+            pending_library=sum(item["state"] != "done" for item in operations),
+            uncertain=sum(item["state"] in {"sending", "needs_review"} for item in operations))
+
+    def resume_pending_v1_library(self, page: Page) -> None:
+        task_id = os.getenv("AUTOMATION_TASK_ID", "")
+        if not task_id or not os.getenv("RESUME_STOPPED_TASK_ID", ""):
+            return
+        operations = TaskControl(self.root_dir).get(task_id)["details"].get("v1_pending_library", [])
+        writer = ApprovalWriter(settings=self.settings)
+        for operation in operations:
+            if operation["state"] == "done":
+                continue
+            checkpoint("人工恢复 V1 待入库记录")
+            if operation["state"] != "pending":
+                raise RuntimeError("存在发送结果待核对的试剂库操作，禁止自动重发。")
+            self.enter_reagent_judgement_page(page)
+            if operation["list_number"] not in self.todo_list_numbers(self.read_all_todo_tasks(page)):
+                raise RuntimeError("待恢复清单不在当前 ERP 待办中，禁止生成试剂库。")
+            if not self.open_task_detail_by_list_number(page, operation["list_number"]):
+                raise RuntimeError("无法核对恢复清单。")
+            if not operation.get("row_key"):
+                raise RuntimeError("原记录缺少稳定页面行 ID，禁止自动生成试剂库，请人工核对。")
+            matches = []
+            for _ in range(200):
+                checkpoint("人工恢复分页身份核对")
+                matches = [record for record in self.read_current_page_reagents(page) if str(record.get("序号") or "").strip() == operation["sequence"]]
+                if matches:
+                    break
+                moved, _ = self.click_next_reagent_page(page)
+                if not moved:
+                    break
+            if len(matches) != 1 or str(matches[0].get("试剂名称") or "").strip() != operation["name"] or str(matches[0].get("CAS号") or "").strip() != operation["cas"]:
+                raise RuntimeError("恢复记录的名称、CAS 或序号已变化，禁止继续。")
+            value = self.read_reagent_property_by_sequence(page, operation["sequence"])
+            row = self.find_reagent_row_by_sequence(page, operation["sequence"], operation["name"], operation["cas"])
+            if row is None or row.get_attribute("data-row-key") != operation["row_key"] or not self.property_value_matches(value, operation["category"], writer):
+                raise RuntimeError("恢复记录的身份或已保存类别无法核对。")
+            checkpoint("人工恢复试剂库生成前")
+            operation["state"] = "sending"
+            self.record_pending_library(operation)
+            success = writer.generate_reagent_library(page, row)
+            operation["state"] = "done" if success else "needs_review"
+            self.record_pending_library(operation)
+            if not success:
+                raise RuntimeError("试剂库恢复未确认，保留记录，禁止重发。")
 
     def all_save_operations_successful(self) -> bool:
         if not self.save_results:
@@ -5038,6 +5228,7 @@ class ApprovalFlowMixin:
             raise RuntimeError("AUTO_PASS is true and checks passed, but the top approve button was not found.")
 
         print("AUTO_PASS checks passed; clicking the top approve button.")
+        checkpoint("V1 ERP 整单通过请求前")
         approve_button.click()
         page.wait_for_timeout(1000)
 

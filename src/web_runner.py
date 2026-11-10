@@ -12,6 +12,7 @@ import sys
 import threading
 import traceback
 import hashlib
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -34,9 +35,15 @@ from dingtalk_notifier import (
     build_task_result_message,
     dingtalk_notification_config,
     send_task_result_notification,
+    task_notification_binding,
 )
+from dingtalk_state import DingTalkState
+from audit_logger import AuditLogger
+from task_control import TaskControl, SAFE_STOP_EXIT_CODE, STOPPABLE_ACTIONS, can_stop, selected_lists
 from dingtalk_stream_bot import dingtalk_stream_config
+from dingtalk_conversation import chat_config
 from erp_api_client import normalize_erp_write_backend
+from reagent_page import normalize_todo_list_number
 from category_mapper import (
     category_mapping_summary,
     erp_property_options,
@@ -59,6 +66,13 @@ from rule_engine import RuleEngine
 from excel_exports import write_excel_atomic
 
 
+PRE_LOGIN_PHASES = {"准备启动", "准备登录", "ERP 登录前安全点", "ERP 登录完成安全点"}
+BEFORE_SCOPE_PHASES = PRE_LOGIN_PHASES | {
+    "V1 待办循环安全点", "V1 清单审批前", "V1 一键匹配前安全点",
+    "V1 一键匹配提交前", "WorkBuddy 批次循环安全点",
+}
+
+
 ensure_runtime_layout()
 ROOT_DIR = runtime_root()
 SOURCE_ROOT = source_root()
@@ -75,7 +89,7 @@ ALLOWED_WEB_WRITE_MODES = {"disabled", "multi_page", "generate_library"}
 
 ACTION_LABELS = {
     "workbuddy_loop": "WorkBuddy 批次循环",
-    "workbuddy_prepare": "WorkBuddy 准备下一批（最多20条）",
+    "workbuddy_prepare": "WorkBuddy 准备下一批（按配置条数）",
     "workbuddy_import": "WorkBuddy 导入结果并按写入模式保存",
     "suggestions": "审批流程",
     "todo_export": "待办清单刷新",
@@ -264,16 +278,36 @@ class AutomationJobManager:
     _last_action: str = ""
     _last_options: dict[str, str] = field(default_factory=dict)
     _run_log_path: str = ""
+    _task_id: str = ""
     _lock: threading.RLock = field(default_factory=threading.RLock)
     _completion_callbacks: list[Callable[..., None]] = field(default_factory=list)
 
-    def start(self, action: str, options: dict[str, str] | None = None) -> dict[str, Any]:
+    def start(self, action: str, options: dict[str, str] | None = None, *,
+              notification_target: dict[str, Any] | None = None, actor: dict[str, str] | None = None,
+              resume_task_id: str = "") -> dict[str, Any]:
         options = options or {}
         with self._lock:
             if self.running:
                 return {"started": False, "message": "已有任务正在运行。"}
 
+            task_id = uuid.uuid4().hex
+            try:
+                TaskControl(self.root_dir).ensure_allowed_start(action, options, resume_task_id)
+                binding = task_notification_binding(load_settings(), notification_target, self.root_dir)
+                DingTalkState(self.root_dir).save_target(task_id, binding)
+                source = "scheduler" if str(options.get("SCHEDULED_RUN", "")).lower() == "true" else "web"
+                TaskControl(self.root_dir).register(task_id, action, options, actor or {"source": source}, load_settings(), resume=resume_task_id)
+            except ValueError as error:
+                return {"started": False, "message": str(error)}
+            except Exception:
+                return {"started": False, "message": "任务通知目标无法持久化，任务未启动；请检查本地数据目录。"}
+
+            options = {**options, "AUTOMATION_TASK_ID": task_id}
+            if resume_task_id:
+                options["RESUME_STOPPED_TASK_ID"] = resume_task_id
+
             self.running = True
+            self._task_id = task_id
             self.action = action
             self.started_at = datetime.now().isoformat(timespec="seconds")
             self.finished_at = ""
@@ -283,16 +317,83 @@ class AutomationJobManager:
             self._stop_requested = False
             self._last_action = action
             self._last_options = dict(options)
-            self._run_log_path = str(new_run_log_path(action, self.root_dir))
-            self._persist_state()
-            self._thread = threading.Thread(
-                target=self._run,
-                args=(action, options),
-                name="approval-web-runner",
-                daemon=True,
-            )
-            self._thread.start()
-            return {"started": True, "message": f"已启动任务：{action}"}
+            try:
+                self._run_log_path = str(new_run_log_path(action, self.root_dir))
+                self._persist_state()
+                self._thread = threading.Thread(
+                    target=self._run,
+                    args=(action, options, {"task_id": task_id, "started_at": self.started_at}),
+                    name="approval-web-runner",
+                    daemon=True,
+                )
+                self._thread.start()
+            except Exception:
+                self.running = False
+                self.success = False
+                self.error = "启动工作线程失败，未执行审批。"
+                self._thread = None
+                try:
+                    registry = TaskControl(self.root_dir)
+                    registry.finish(task_id, "failed")
+                    if resume_task_id:
+                        registry.release_unstarted_resume(resume_task_id)
+                    self._persist_state()
+                except Exception:
+                    self.error += " 本地状态写入失败，请人工核对。"
+                return {"started": False, "message": self.error}
+            return {"started": True, "task_id": task_id, "message": f"已启动任务：{action}"}
+
+    def request_safe_stop(self, task_id: str, actor: dict[str, str]) -> dict[str, Any]:
+        with self._lock:
+            if not self.running or self._task_id != task_id:
+                return {"requested": False, "message": "原任务已结束或已经切换，本次未停止任何任务。"}
+            control = TaskControl(self.root_dir)
+            task = control.get(task_id)
+            if self.action not in STOPPABLE_ACTIONS:
+                return {"requested": False, "message": "当前任务不支持安全停止。"}
+            allowed = can_stop(task, actor, load_settings())
+            AuditLogger.from_settings(load_settings(), self.root_dir).info(json.dumps({"event": "safe_stop_request", "task_id": task_id, "allowed": allowed, "actor": actor}, ensure_ascii=False))
+            if not allowed:
+                return {"requested": False, "message": "仅任务发起人或已配置管理员可在授权群停止此任务。"}
+            accepted = control.request(task_id, actor)
+            return {"requested": accepted, "message": "停止请求已受理，等待当前操作完成并核对；已保存结果不会撤销。" if accepted else "任务状态已变化，停止请求未生效。"}
+
+    def control_status(self, task_id: str = "") -> dict[str, Any]:
+        if not task_id:
+            task_id = self._task_id
+            if not task_id:
+                state_path = self.root_dir / "data/logs/web_run_state.yaml"
+                if state_path.exists():
+                    task_id = str((yaml.safe_load(state_path.read_text(encoding="utf-8")) or {}).get("task_id") or "")
+        if not task_id:
+            return {}
+        task = TaskControl(self.root_dir).get(task_id)
+        if not task:
+            return {}
+        state = task["state"]
+        if not self.running and state in {"running", "stop_requested"}:
+            state = "needs_review"
+        labels = {"running": "运行中", "stop_requested": "等待安全停止", "stopped": "已人工停止", "needs_review": "结果待核对", "completed": "已正常结束", "failed": "失败", "resuming": "已进入人工恢复"}
+        return {"task_id": task_id, "state": state, "label": labels.get(state, state), "phase": task["phase"], "details": task["details"]}
+
+    def resume_stopped_task(self, task_id: str) -> dict[str, Any]:
+        task = TaskControl(self.root_dir).get(task_id)
+        if not task or task["state"] != "stopped":
+            return {"started": False, "message": "仅可人工恢复明确已停止的任务。"}
+        options = {key: value for key, value in task["options"].items() if key not in {"AUTOMATION_TASK_ID", "RESUME_STOPPED_TASK_ID"}}
+        details = task["details"]
+        if "scope" in details:
+            if not details.get("scope"):
+                return {"started": False, "message": "原任务范围为空，无待恢复清单。"}
+            options.update(TARGET_LIST_NUMBERS=",".join(details["scope"]), TARGET_LIST_NUMBER="", PROCESS_ALL_TODOS="false")
+        elif not selected_lists(options) and task["phase"] not in BEFORE_SCOPE_PHASES:
+            if (task["action"] == "suggestions" and details.get("current_list")
+                    and str(options.get("PROCESS_ALL_TODOS", "")).lower() not in {"true", "1", "yes", "on"}):
+                options.update(TARGET_LIST_NUMBERS=details["current_list"], TARGET_LIST_NUMBER="", PROCESS_ALL_TODOS="false")
+            else:
+                return {"started": False, "message": "原任务尚未记录可核对的清单范围，不能直接恢复。请人工核对后处理。"}
+        target = DingTalkState(self.root_dir).load_target(task_id)
+        return self.start(task["action"], options, actor={"source": "web"}, notification_target=target, resume_task_id=task_id)
 
     def stop(self) -> dict[str, Any]:
         with self._lock:
@@ -313,6 +414,26 @@ class AutomationJobManager:
         }
 
     def status(self, *, light: bool = False) -> dict[str, Any]:
+        result = self._status_snapshot(light=light)
+        control = self.control_status()
+        result["control"] = control
+        if control:
+            result["task_id"] = control["task_id"]
+            if result["action"] in {"workbuddy_loop", "workbuddy_import"}:
+                summary = result["summary"]
+                verified = len(control["details"].get("verified_saved_keys", []))
+                missing = verified - summary["write_success_count"]
+                if missing > 0:
+                    # The dashboard's log tail can omit saves from earlier batches.
+                    for key in ("write_success_count", "suggestion_count", "api_write_success_count"):
+                        summary[key] += missing
+                    summary["api_write_attempt_count"] = max(verified, summary["api_write_attempt_count"] + missing)
+            if control["state"] in {"stop_requested", "stopped", "needs_review"}:
+                result["result_label"] = control["label"]
+                result.setdefault("summary", {})["outcome"] = control["label"]
+        return result
+
+    def _status_snapshot(self, *, light: bool = False) -> dict[str, Any]:
         with self._lock:
             if not self.running and not self.action:
                 return self._status_from_persisted_state(light=light)
@@ -374,7 +495,7 @@ class AutomationJobManager:
                 "workflow": workflow_summary(log_tail, running=running, success=success, error=error),
             }
 
-    def _run(self, action: str, options: dict[str, str]) -> None:
+    def _run(self, action: str, options: dict[str, str], task_context: dict[str, Any] | None = None) -> None:
         log_dir = self.root_dir / "data" / "logs"
         log_dir.mkdir(parents=True, exist_ok=True)
         aggregate_log_path = log_dir / "web_run_stdout.txt"
@@ -388,7 +509,12 @@ class AutomationJobManager:
                 clear_todo_task_cache(self.root_dir)
             writer.write(f"{datetime.now().isoformat(timespec='seconds')} START {action}\n")
             return_code = self._run_worker_process(action, options, writer)
-            if self._stop_requested:
+            control = TaskControl(self.root_dir).get((task_context or {}).get("task_id", "")) if (task_context or {}).get("task_id") else {}
+            if return_code == SAFE_STOP_EXIT_CODE and control.get("state") == "stopped":
+                success = None
+                error = ""
+                writer.write("[safe_stop] 已人工停止；已保存结果未撤销。\n")
+            elif self._stop_requested:
                 success = False
                 error = "用户停止运行"
                 writer.write(f"{datetime.now().isoformat(timespec='seconds')} STOPPED {action}\n")
@@ -408,6 +534,9 @@ class AutomationJobManager:
             else:
                 success = False
                 error = f"Automation worker exited with code {return_code}"
+                if action in {"workbuddy_loop", "workbuddy_prepare", "workbuddy_import"}:
+                    error = next((line.removeprefix("Browser session failed: ") for line in reversed(self.lines)
+                                  if line.startswith("Browser session failed: ")), error)
         except Exception as exc:  # noqa: BLE001 - surfaced in web UI for local operator diagnosis
             success = False
             error = str(exc)
@@ -420,14 +549,38 @@ class AutomationJobManager:
                 and memory_signature_before != memory_file_signature(self.root_dir)
             ):
                 self._auto_upload_memory_after_success()
+            result_context = dict(task_context or {})
+            if result_context.get("task_id"):
+                try:
+                    registry = TaskControl(self.root_dir)
+                    existing = registry.get(result_context["task_id"])
+                    parent = options.get("RESUME_STOPPED_TASK_ID")
+                    unstarted = existing.get("phase") in PRE_LOGIN_PHASES
+                    if existing.get("state") != "stopped":
+                        needs_review = existing.get("state") == "stop_requested" or (parent and not unstarted)
+                        registry.finish(result_context["task_id"], "completed" if success else "needs_review" if needs_review else "failed")
+                        if success is False and parent and unstarted:
+                            registry.release_unstarted_resume(parent)
+                    result_context["control"] = registry.get(result_context["task_id"])
+                except Exception:
+                    success = False
+                    error = "任务控制状态无法核对，请人工检查；不会自动恢复。"
+            try:
+                result_context["approval"] = approval_summary(self.root_dir)
+                result_context["review_queue"] = review_queue_summary(self.root_dir)
+            except Exception:
+                result_context["approval"] = {}
+                result_context["review_queue"] = {}
             with self._lock:
                 self.running = False
                 self.finished_at = datetime.now().isoformat(timespec="seconds")
+                finished_at = self.finished_at
                 self.success = success
                 self.error = error
                 self._persist_state()
             self._notify_completion_callbacks(action=action, success=success, error=error, options=options)
-            self._notify_task_result(action=action, success=success, error=error)
+            self._notify_task_result(action=action, success=success, error=error,
+                                     task_context={**result_context, "finished_at": finished_at})
 
     def add_completion_callback(self, callback: Callable[..., None]) -> None:
         with self._lock:
@@ -464,6 +617,7 @@ class AutomationJobManager:
             "error": repair_display_text(self.error),
             "run_log_path": self._run_log_path,
             "options": dict(self._last_options),
+            "task_id": self._task_id,
             "log_tail": log_tail,
         }
         atomic_write_text(
@@ -701,6 +855,11 @@ class AutomationJobManager:
             "SCHEDULED_RUN",
             "SCHEDULED_SKIP_MANUAL_REVIEW_LISTS",
             "APPROVAL_PIPELINE_VERSION",
+            "FREEZE_TODO_SCOPE",
+            "AUTOMATION_TASK_ID",
+            "RESUME_STOPPED_TASK_ID",
+            "ERP_WRITE_BACKEND",
+            "APPROVAL_WRITE_BATCH_SIZE",
         }
         return {
             key: value
@@ -708,25 +867,42 @@ class AutomationJobManager:
             if key in allowed_keys and value is not None
         }
 
-    def _notify_task_result(self, *, action: str, success: bool, error: str) -> None:
+    def _notify_task_result(self, *, action: str, success: bool, error: str,
+                            task_context: dict[str, Any] | None = None) -> None:
+        task_id = (task_context or {}).get("task_id")
         try:
             settings = load_settings()
             load_dotenv(ENV_PATH)
             message = build_task_result_message(
                 action=action,
                 success=success,
-                started_at=self.started_at,
-                finished_at=self.finished_at,
+                started_at=(task_context or {}).get("started_at", self.started_at),
+                finished_at=(task_context or {}).get("finished_at", self.finished_at),
                 error=error,
-                approval=approval_summary(self.root_dir),
-                review_queue=review_queue_summary(self.root_dir),
+                approval=task_context["approval"] if task_context and "approval" in task_context else approval_summary(self.root_dir),
+                review_queue=task_context["review_queue"] if task_context and "review_queue" in task_context else review_queue_summary(self.root_dir),
+                stopped=bool(task_context and (task_context.get("control") or {}).get("state") == "stopped"),
+                stop_details={**(((task_context or {}).get("control") or {}).get("details") or {}),
+                    "task_id": task_id or "", "phase": ((task_context or {}).get("control") or {}).get("phase", "")},
             )
-            result = send_task_result_notification(settings, message, root_dir=self.root_dir)
+            binding = DingTalkState(self.root_dir).load_target(task_id) if task_id else None
+            result = send_task_result_notification(settings, message, root_dir=self.root_dir, binding=binding)
+            for warning in result.get("warnings") or []:
+                self._record_result_notification_failure(f"DingTalk notification warning: {warning}", task_id)
             if result.get("sent") or result.get("skipped"):
                 return
-            self._record_notification_failure(f"DingTalk notification failed: {result.get('error') or result}")
+            self._record_result_notification_failure(f"DingTalk notification failed: {result.get('error') or result}", task_id)
         except Exception as exc:  # noqa: BLE001 - notification must not block automation
-            self._record_notification_failure(f"DingTalk notification failed: {exc}")
+            self._record_result_notification_failure(f"DingTalk notification failed: {exc}", task_id)
+
+    def _record_result_notification_failure(self, message: str, task_id: str | None) -> None:
+        with self._lock:
+            if task_id and task_id != self._task_id:
+                with contextlib.suppress(Exception):
+                    AuditLogger.from_settings(load_settings(), self.root_dir).warning(json.dumps(
+                        {"event": "task_notification_failure", "task_id": task_id, "detail": message}, ensure_ascii=False))
+                return
+            self._record_notification_failure(message)
 
     def _auto_upload_memory_after_success(self) -> None:
         try:
@@ -800,6 +976,14 @@ def workbuddy_outcome_counts(lines: list[str]) -> dict[str, int]:
     return counts
 
 
+def reported_workbuddy_reviews(lines: list[str]) -> int | None:
+    for line in reversed(lines):
+        match = re.fullmatch(r"\[workbuddy review_pending\] (\d+)", line)
+        if match:
+            return int(match.group(1))
+    return None
+
+
 def confirmed_api_write_count(lines: list[str]) -> int:
     confirmed_api_records: set[str] = set()
     for line in lines:
@@ -841,6 +1025,7 @@ def run_summary(
     todo = todo_tasks_summary(root_dir)
     suggestion_metrics = aggregate_suggestion_summaries(lines)
     workbuddy = workbuddy_outcome_counts(lines)
+    pending_reviews = reported_workbuddy_reviews(lines)
 
     write_success = confirmed_write_count(lines)
     write_failed = workbuddy["failed"] + sum(
@@ -899,6 +1084,8 @@ def run_summary(
         outcome = "待办清单刷新成功"
     elif success is True and action == "suggestions":
         outcome = "审批流程完成"
+    elif success is True and pending_reviews:
+        outcome = f"自动处理完成，待人工复核 {pending_reviews} 条"
     elif success is True:
         outcome = f"{action_label(action)}成功"
     elif success is False:
@@ -913,7 +1100,8 @@ def run_summary(
         "target_list_numbers": target_lists,
         "todo_count": int(todo.get("rows") or 0),
         "suggestion_count": int(suggestion_metrics.get("suggestion_total") or 0) + sum(workbuddy.values()),
-        "manual_review_count": int(suggestion_metrics.get("manual_review_candidate_count") or 0) + workbuddy["review"] + workbuddy["blocked"],
+        "manual_review_count": int(suggestion_metrics.get("manual_review_candidate_count") or 0)
+        + (workbuddy["review"] if pending_reviews is None else pending_reviews) + workbuddy["blocked"],
         "processed_pages": page_count,
         "write_success_count": write_success,
         "write_failure_count": write_failed,
@@ -951,6 +1139,7 @@ def light_run_summary(
     target_lists = parse_target_list_numbers(str(options.get("TARGET_LIST_NUMBERS") or options.get("target_list_numbers") or ""))
     suggestion_metrics = aggregate_suggestion_summaries(lines)
     workbuddy = workbuddy_outcome_counts(lines)
+    pending_reviews = reported_workbuddy_reviews(lines)
     source_summary = chemical_source_summary(lines)
     write_success = confirmed_write_count(lines)
     write_failed = workbuddy["failed"] + sum(
@@ -967,6 +1156,8 @@ def light_run_summary(
         outcome = "待办清单刷新成功"
     elif success is True and action == "suggestions":
         outcome = "审批流程完成"
+    elif success is True and pending_reviews:
+        outcome = f"自动处理完成，待人工复核 {pending_reviews} 条"
     elif success is True:
         outcome = f"{action_label(action)}成功"
     elif success is False:
@@ -980,7 +1171,8 @@ def light_run_summary(
         "target_list_numbers": target_lists,
         "todo_count": 0,
         "suggestion_count": int(suggestion_metrics.get("suggestion_total") or 0) + sum(workbuddy.values()),
-        "manual_review_count": int(suggestion_metrics.get("manual_review_candidate_count") or 0) + workbuddy["review"] + workbuddy["blocked"],
+        "manual_review_count": int(suggestion_metrics.get("manual_review_candidate_count") or 0)
+        + (workbuddy["review"] if pending_reviews is None else pending_reviews) + workbuddy["blocked"],
         "processed_pages": 0,
         "write_success_count": write_success,
         "write_failure_count": write_failed,
@@ -1279,6 +1471,8 @@ def result_label(running: bool, success: bool | None, error: str, health: str = 
 def run_health(lines: list[str], success: bool | None, error: str) -> str:
     if success is False or error:
         return "failed"
+    if reported_workbuddy_reviews(lines):
+        return "warning"
     text = "\n".join(str(line) for line in lines).lower()
     warning_tokens = (
         "[workbuddy attention]",
@@ -1331,6 +1525,8 @@ def current_approval_list_number(lines: list[str], options: dict[str, Any] | Non
         r"Auto-pass precheck for list:\s*(SJ\d+)",
     )
     for line in reversed(lines):
+        if "[workbuddy scope]" in str(line):
+            return str(line).split("[workbuddy scope]", 1)[1].strip()
         for pattern in patterns:
             match = re.search(pattern, str(line))
             if match:
@@ -1417,6 +1613,7 @@ def line_to_workflow_step(line: str) -> str:
         or "save result for sequence" in text
         or "save verified for sequence" in text
         or "apply_approval_write_mode" in text
+        or "[workbuddy library]" in text
     ):
         return "write"
     if "start " in text:
@@ -1562,7 +1759,7 @@ def build_todo_tasks_json_payload(json_path: Path) -> dict[str, Any]:
     for row in rows if isinstance(rows, list) else []:
         if not isinstance(row, dict):
             continue
-        list_number = first_dict_value(row, ["试剂清单号", "清单号", "list_number"])
+        list_number = normalize_todo_list_number(first_dict_value(row, ["试剂清单号", "清单号", "list_number"]))
         if not list_number:
             continue
         tasks.append(
@@ -1598,7 +1795,7 @@ def build_todo_tasks_excel_payload(path: Path) -> dict[str, Any]:
 
     tasks = []
     for _, row in frame.iterrows():
-        list_number = first_existing(row, ["试剂清单号", "清单号", "list_number"])
+        list_number = normalize_todo_list_number(first_existing(row, ["试剂清单号", "清单号", "list_number"]))
         if not list_number:
             continue
         tasks.append(
@@ -2561,6 +2758,7 @@ def runtime_config_snapshot() -> dict[str, Any]:
     schedule = scheduler_config(settings)
     dingtalk = dingtalk_notification_config(settings)
     dingtalk_stream = dingtalk_stream_config(settings)
+    dingtalk_chat = chat_config(settings)
     llm = settings.get("llm", {}) or {}
     app_settings = settings.get("app", {}) or {}
     workbuddy_settings = settings.get("workbuddy", {}) or {}
@@ -2593,6 +2791,7 @@ def runtime_config_snapshot() -> dict[str, Any]:
         "app_frozen": bool(getattr(sys, "frozen", False)),
         "app_dry_run": "true" if app_settings.get("dry_run") else "false",
         "workbuddy_desktop_enabled": bool(workbuddy_settings.get("desktop_enabled", False)),
+        "workbuddy_batch_size": workbuddy_settings.get("batch_size", 20),
         "update_token_configured": bool(
             os.getenv("REAGENT_APPROVAL_UPDATE_TOKEN", "").strip()
             or os.getenv("GITHUB_TOKEN", "").strip()
@@ -2646,6 +2845,16 @@ def runtime_config_snapshot() -> dict[str, Any]:
         "dingtalk_notification_enabled": "true" if dingtalk.get("enabled") else "false",
         "dingtalk_at_all": "true" if dingtalk.get("at_all", True) else "false",
         "dingtalk_stream_enabled": "true" if dingtalk_stream.get("enabled") else "false",
+        "dingtalk_chat_enabled": "true" if dingtalk_chat["enabled"] else "false",
+        "dingtalk_chat_use_main_llm": "true" if dingtalk_chat["use_main_llm"] else "false",
+        "dingtalk_chat_base_url": str((settings.get("dingtalk_chat", {}) or {}).get("base_url") or ""),
+        "dingtalk_chat_model": str((settings.get("dingtalk_chat", {}) or {}).get("model") or ""),
+        "dingtalk_chat_api_key_configured": bool(os.getenv("DINGTALK_CHAT_API_KEY", "").strip()),
+        "dingtalk_chat_timeout_seconds": str(dingtalk_chat["timeout_seconds"]),
+        "dingtalk_chat_context_turns": str(dingtalk_chat["context_turns"]),
+        "dingtalk_chat_requests_per_minute": str(dingtalk_chat["requests_per_minute"]),
+        "dingtalk_admin_user_ids": "\n".join((settings.get("dingtalk_control", {}) or {}).get("admin_user_ids") or []),
+        "dingtalk_management_group_ids": "\n".join((settings.get("dingtalk_control", {}) or {}).get("management_group_ids") or []),
         "dingtalk_stream_corp_id": dingtalk_stream.get("corp_id", ""),
         "dingtalk_stream_agent_id": dingtalk_stream.get("agent_id", ""),
         "dingtalk_stream_robot_code": dingtalk_stream.get("robot_code", ""),
@@ -2696,6 +2905,9 @@ def runtime_config_snapshot() -> dict[str, Any]:
 
 def save_runtime_config(form: dict[str, str]) -> dict[str, Any]:
     existing_settings = load_settings()
+    admins = parse_target_list_numbers(form.get("dingtalk_admin_user_ids", ""))
+    if any(value.count("/") != 1 or not all(value.split("/")) for value in admins):
+        raise ValueError("管理员 ID 必须使用 企业ID/用户ID 格式。")
     provider_id = form.get("llm_provider", "siliconflow").strip() or "siliconflow"
     provider = get_llm_provider(provider_id)
     llm_base_url = provider_base_url(provider.id, form.get("llm_base_url", "").strip())
@@ -2745,6 +2957,9 @@ def save_runtime_config(form: dict[str, str]) -> dict[str, Any]:
     dingtalk_stream_api_token = form.get("dingtalk_stream_api_token", "").strip()
     if dingtalk_stream_api_token:
         env_updates["DINGTALK_STREAM_API_TOKEN"] = dingtalk_stream_api_token
+    dingtalk_chat_api_key = form.get("dingtalk_chat_api_key", "").strip()
+    if dingtalk_chat_api_key:
+        env_updates["DINGTALK_CHAT_API_KEY"] = dingtalk_chat_api_key
 
     memory_sync_username = form.get("memory_sync_username", "").strip()
     if memory_sync_username:
@@ -2850,6 +3065,17 @@ def save_runtime_config(form: dict[str, str]) -> dict[str, Any]:
     stream["client_secret_env"] = "DINGTALK_STREAM_CLIENT_SECRET"
     stream["api_token_env"] = "DINGTALK_STREAM_API_TOKEN"
     stream["require_at_in_group"] = True
+    settings["dingtalk_control"] = {"admin_user_ids": admins,
+        "management_group_ids": parse_target_list_numbers(form.get("dingtalk_management_group_ids", ""))}
+
+    chat = settings.setdefault("dingtalk_chat", {})
+    chat["enabled"] = form.get("dingtalk_chat_enabled", "false") == "true"
+    chat["use_main_llm"] = form.get("dingtalk_chat_use_main_llm", "true") == "true"
+    chat["provider"] = "openai_compatible"
+    chat["base_url"] = form.get("dingtalk_chat_base_url", "").strip()
+    chat["model"] = form.get("dingtalk_chat_model", "").strip()
+    for name, default, low, high in (("timeout_seconds", 20, 3, 60), ("context_turns", 4, 0, 8), ("requests_per_minute", 6, 1, 30)):
+        chat[name] = max(low, min(high, coerce_int(form.get("dingtalk_chat_" + name, str(default)), default)))
 
     memory_sync = settings.setdefault("memory_sync", {})
     memory_sync["enabled"] = form.get("memory_sync_enabled", "false").strip().lower() == "true"

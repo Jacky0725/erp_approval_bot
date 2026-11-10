@@ -263,8 +263,8 @@ class ApprovalScheduler:
         if normalize_checkbox(options.get("SCHEDULED_RUN")) != "true":
             return
         with self._lock:
-            self._last_result = "success" if success else "failed"
-            self._last_message = "" if success else str(error or "Scheduled automation failed.")
+            self._last_result = "stopped" if success is None and not error else "success" if success else "failed"
+            self._last_message = "已人工安全停止，不自动恢复。" if success is None and not error else "" if success else str(error or "Scheduled automation failed.")
             self._persist_state()
 
     def _load_state(self) -> None:

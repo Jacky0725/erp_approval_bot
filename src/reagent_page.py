@@ -10,6 +10,12 @@ from playwright.sync_api import Error, Locator, Page, TimeoutError
 from ui_waits import wait_until_table_stable
 
 
+def normalize_todo_list_number(value: str) -> str:
+    number = str(value or "").strip()
+    tagged = re.fullmatch(r"(SJ\d+)\s*加急", number)
+    return tagged.group(1) if tagged else number
+
+
 class ReagentPageMixin:
 
     def enter_reagent_judgement_page(self, page: Page) -> None:
@@ -92,7 +98,7 @@ class ReagentPageMixin:
                 if not list_number or list_number in seen_list_numbers:
                     continue
                 seen_list_numbers.add(list_number)
-                tasks.append(task)
+                tasks.append({**task, list_number_key: normalize_todo_list_number(task.get(list_number_key, ""))})
 
             moved_next, terminal_or_error = self.click_next_todo_page(page)
             if not moved_next:
@@ -421,6 +427,8 @@ class ReagentPageMixin:
         return match.group(0) if match else text
 
     def perform_auto_match(self, page: Page) -> bool:
+        from task_control import checkpoint
+        checkpoint("V1 一键匹配前安全点")
         self.auto_match_succeeded = False
         target_list_number = str(getattr(self, "target_list_number", "") or "").strip()
         if target_list_number:
@@ -445,6 +453,7 @@ class ReagentPageMixin:
             return False
 
         print("Clicking auto-match button.")
+        checkpoint("V1 一键匹配提交前")
         auto_match_button.click(timeout=15000)
         page.wait_for_timeout(1500)
 

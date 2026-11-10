@@ -239,6 +239,18 @@
     setCheckbox(settingsForm, "dingtalk_notification_enabled", initialRuntime.dingtalk_notification_enabled);
     setCheckbox(settingsForm, "dingtalk_at_all", initialRuntime.dingtalk_at_all || "true");
     setCheckbox(settingsForm, "dingtalk_stream_enabled", initialRuntime.dingtalk_stream_enabled);
+    setCheckbox(settingsForm, "dingtalk_chat_enabled", initialRuntime.dingtalk_chat_enabled);
+    setCheckbox(settingsForm, "dingtalk_chat_use_main_llm", initialRuntime.dingtalk_chat_use_main_llm);
+    function renderDingtalkConnection(stream = {}) {
+      const labels = {disabled: "未启用", starting: "启动中", connecting: "连接中", connected: "已连接", reconnecting: "等待重连", disconnected: "已断开", stopping: "正在退出", stopped: "已停止", error: "启动失败"};
+      setText("#dingtalkConnectionState", stream.connected ? "已连接" : (labels[stream.connection_state] || "未连接"));
+      setText("#dingtalkThreadState", stream.running ? "存活" : "未运行");
+      setText("#dingtalkReconnectCount", stream.reconnect_count || 0);
+      setText("#dingtalkLastConnected", stream.last_connected_at || "-");
+      setText("#dingtalkLastReceived", stream.last_received_at || "-");
+      setText("#dingtalkConnectionError", stream.last_error || "");
+    }
+    renderDingtalkConnection(dashboardData.dingtalkStream || {});
     setCheckbox(settingsForm, "memory_sync_enabled", initialRuntime.memory_sync_enabled);
     setCheckbox(
       settingsForm,
@@ -356,6 +368,7 @@
     });
 
     on("#stopRunButton", "click", async () => {
+      if (!confirm("紧急强制停止可能使 ERP 或 WorkBuddy 结果待核对，且不会撤销已保存结果。确定强制结束？")) return;
       const response = await fetch("/api/stop", { method: "POST" });
       const payload = await response.json();
       await refreshStatus();
@@ -364,6 +377,74 @@
         alert(payload.message || payload.detail || "当前没有运行中的任务");
       }
     });
+
+    let currentControlTaskId = "";
+    let controlRunning = false;
+    const reviewedStoppedTasks = new Set();
+    let stoppedTasksLoading = false;
+    async function controlRequest(path, payload) {
+      const response = await fetch(path, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(payload)});
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.detail || "任务控制请求失败");
+      return data;
+    }
+    on("#safeStopRunButton", "click", async () => {
+      const taskId = currentControlTaskId;
+      if (!taskId || !confirm(`安全停止任务 ${taskId.slice(0, 12)}？已发出的操作会完成核对，已保存结果不会撤销。`)) return;
+      try {
+        const ticket = await controlRequest("/api/safe-stop/prepare", {task_id: taskId});
+        const result = await controlRequest("/api/safe-stop", {task_id: taskId, ticket: ticket.ticket});
+        alert(result.message || "停止请求已提交");
+        await refreshStatus();
+      } catch (error) { alert(error.message || String(error)); }
+    });
+    async function refreshStoppedTasks() {
+      const body = document.querySelector("#stoppedTasksTable");
+      if (!body || stoppedTasksLoading) return;
+      stoppedTasksLoading = true;
+      try {
+        const data = await readDashboardJSON("/api/stopped-tasks");
+        body.innerHTML = "";
+        for (const task of data.tasks || []) {
+          const row = document.createElement("tr");
+          const details = task.details || {};
+          row.innerHTML = `<td>${escapeHtml(task.task_id.slice(0, 12))}</td><td>${escapeHtml(task.action)}</td><td>${escapeHtml(task.phase)}</td><td>${escapeHtml(String(details.saved ?? "-"))} / ${escapeHtml(String(details.pending_library ?? "-"))}</td><td><label class="check"><input type="checkbox" aria-label="已人工核对 ERP、投递与结果文件">已核对</label></td><td><button type="button">核对恢复</button></td>`;
+          const check = row.querySelector("input");
+          const button = row.querySelector("button");
+          check.checked = reviewedStoppedTasks.has(task.task_id);
+          button.disabled = controlRunning || !check.checked;
+          check.addEventListener("change", () => {
+            if (check.checked) reviewedStoppedTasks.add(task.task_id); else reviewedStoppedTasks.delete(task.task_id);
+            button.disabled = controlRunning || !check.checked;
+          });
+          button.addEventListener("click", async () => {
+            if (!check.checked || !confirm(`已人工核对任务 ${task.task_id.slice(0, 12)} 的 ERP、投递状态与结果文件，并确认只恢复核对过的剩余步骤？结果不明的操作不会自动重发。`)) return;
+            button.disabled = true;
+            try {
+              const payload = {task_id: task.task_id, verified: true};
+              const ticket = await controlRequest("/api/resume/prepare", payload);
+              const result = await controlRequest("/api/resume", {...payload, ticket: ticket.ticket});
+              if (!result.started) alert(result.message || "任务未恢复");
+              reviewedStoppedTasks.delete(task.task_id);
+              await refreshStatus();
+            } catch (error) { alert(error.message || String(error)); }
+          });
+          body.appendChild(row);
+        }
+        if (!body.children.length) body.innerHTML = '<tr><td colspan="6">暂无人工停止任务</td></tr>';
+      } catch (error) { body.innerHTML = `<tr><td colspan="6">${escapeHtml(error.message || String(error))}</td></tr>`; }
+      finally { stoppedTasksLoading = false; }
+    }
+    function renderTaskControl(status = {}) {
+      currentControlTaskId = status.task_id || "";
+      controlRunning = Boolean(status.running);
+      const control = status.control || {};
+      setText("#controlTaskId", currentControlTaskId ? currentControlTaskId.slice(0, 12) : "-");
+      setText("#controlTaskState", control.label || "-");
+      setText("#controlTaskPhase", control.phase || "-");
+      setDisabled("#safeStopRunButton", !status.running || !currentControlTaskId || control.state === "stop_requested");
+      refreshStoppedTasks();
+    }
 
     on("#restartRunButton", "click", async () => {
       const response = await fetch("/api/restart", { method: "POST" });
@@ -646,6 +727,7 @@
       if (enrichmentKey) enrichmentKey.value = "";
       settingsForm.querySelector('[name="dingtalk_stream_client_secret"]').value = "";
       settingsForm.querySelector('[name="dingtalk_stream_api_token"]').value = "";
+      settingsForm.querySelector('[name="dingtalk_chat_api_key"]').value = "";
       settingsForm.querySelector('[name="memory_sync_password"]').value = "";
       settingsForm.querySelector('[name="update_token"]').value = "";
       await refreshStatus();
@@ -2061,7 +2143,9 @@
 
     async function readAndRenderStatus(options = {}) {
       const data = await readDashboardJSON("/api/status");
+      renderDingtalkConnection(data.dingtalk_stream || {});
       const status = data.status || {};
+      renderTaskControl(status);
       const runSummary = status.summary || {};
       const runtime = data.runtime || {};
       const todoTasks = data.todo_tasks || {};
@@ -2071,7 +2155,7 @@
         reviewCategories = runtime.review_decision_options;
       }
 
-      setText("#runBadge", status.running ? "运行中" : (status.success === false ? "失败" : (status.success === true ? "成功" : "空闲")));
+      setText("#runBadge", status.control?.state === "stopped" ? "已人工停止" : status.control?.state === "stop_requested" ? "等待安全停止" : status.running ? "运行中" : (status.success === false ? "失败" : (status.success === true ? "成功" : "空闲")));
       setClass("#runBadge", status.running ? "badge running" : (status.success === false ? "badge failed" : (status.success === true ? "badge succeeded" : "badge")));
       setDisabled("#stopRunButton", !status.running);
       setDisabled("#restartRunButton", false);

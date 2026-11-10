@@ -3038,16 +3038,22 @@ class ApprovalFlowTodoLoopTest(unittest.TestCase):
             def record_web_write_failure(self, suggestion: dict[str, object], category: str, reason: str) -> None:
                 self.failures.append((str(suggestion.get("\u5e8f\u53f7") or ""), reason))
 
-        bot = DeferredBot()
+        for ambient_mode in ("disabled", "generate_library", "multi_page"):
+            with self.subTest(ambient_mode=ambient_mode), patch.dict(
+                os.environ, {"APPROVAL_WRITE_MODE": ambient_mode}, clear=False
+            ):
+                bot = DeferredBot()
+                # Web UI imports may load a real .env during suite collection.
+                with patch.dict(os.environ, {"APPROVAL_WRITE_MODE": "multi_page"}, clear=False):
+                    result = bot.process_unmatched_reagent_pages(object(), None, None, {})
 
-        result = bot.process_unmatched_reagent_pages(object(), None, None, {})
-
-        self.assertEqual(len(result), 20)
-        self.assertEqual(len(bot.failures), 15)
-        self.assertEqual(bot.failures[0], ("6", "not_found_after_reread"))
-        self.assertEqual(bot.failures[-1], ("20", "not_found_after_reread"))
-        self.assertEqual(bot.sort_calls, 2)
-        self.assertEqual(bot.light_scan_calls, 0)
+                self.assertEqual(os.environ["APPROVAL_WRITE_MODE"], ambient_mode)
+                self.assertEqual(len(result), 20)
+                self.assertEqual(len(bot.failures), 15)
+                self.assertEqual(bot.failures[0], ("6", "not_found_after_reread"))
+                self.assertEqual(bot.failures[-1], ("20", "not_found_after_reread"))
+                self.assertEqual(bot.sort_calls, 2)
+                self.assertEqual(bot.light_scan_calls, 0)
 
     def test_multi_page_mode_advances_after_current_page_write_attempt(self) -> None:
         class RetryBot(Bot):

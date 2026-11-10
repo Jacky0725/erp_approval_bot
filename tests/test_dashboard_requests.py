@@ -88,7 +88,7 @@ vm.runInContext(helper, context);
   // A failed completion-dependent read must be retried on the next refresh.
   const renderSource = source.slice(source.indexOf('    async function readAndRenderStatus('),
                                     source.indexOf('    function setUpdateState('));
-  for (const name of ['setClass', 'setDisabled', 'updateDryRunUi', 'renderTodoTasks', 'renderWorkflow']) {
+  for (const name of ['setClass', 'setDisabled', 'updateDryRunUi', 'renderTodoTasks', 'renderWorkflow', 'renderDingtalkConnection', 'renderTaskControl']) {
     context[name] = () => {};
   }
   for (const name of ['approvalWriteModeLabel', 'erpWriteBackendLabel', 'erpApiDiscoveryLabel']) {

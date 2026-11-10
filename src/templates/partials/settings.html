@@ -60,18 +60,40 @@
           <div class="settings-subsection">
             <div class="settings-subsection-head">
               <h4>Stream 接收命令</h4>
-              <p>在钉钉群里 @机器人 后接收“状态、执行审批、执行审批 &lt;清单号&gt;、帮助”命令。</p>
+              <p>连接：<span id="dingtalkConnectionState">{{ dingtalk_stream.connection_state or 'stopped' }}</span>；线程：<span id="dingtalkThreadState">-</span>；重连次数：<span id="dingtalkReconnectCount">{{ dingtalk_stream.reconnect_count or 0 }}</span></p>
+              <p>最近连接：<span id="dingtalkLastConnected">{{ dingtalk_stream.last_connected_at or '-' }}</span>；最近接收：<span id="dingtalkLastReceived">{{ dingtalk_stream.last_received_at or '-' }}</span></p>
+              <p id="dingtalkConnectionError"></p>
             </div>
           <div class="settings-grid settings-grid-dingtalk-stream">
             <label class="check settings-check-field"><input type="checkbox" name="dingtalk_stream_enabled" value="true"> 启用 Stream 接收命令</label>
             <label>CorpId <input name="dingtalk_stream_corp_id" value="{{ runtime.dingtalk_stream_corp_id }}" placeholder="ding..."></label>
             <label>AgentId <input name="dingtalk_stream_agent_id" value="{{ runtime.dingtalk_stream_agent_id }}" placeholder="4322749407"></label>
-            <label>Robot Code <input name="dingtalk_stream_robot_code" value="{{ runtime.dingtalk_stream_robot_code }}" placeholder="企业机器人 robotCode / App ID"></label>
-            <label>默认群 openConversationId <input name="dingtalk_stream_open_conversation_id" value="{{ runtime.dingtalk_stream_open_conversation_id }}" placeholder="群里 @ 机器人后可自动绑定"></label>
+            <label>Robot Code <input name="dingtalk_stream_robot_code" value="{{ runtime.dingtalk_stream_robot_code }}" placeholder="机器人 robotCode / Client ID"></label>
+            <label>默认群 openConversationId <input name="dingtalk_stream_open_conversation_id" value="{{ runtime.dingtalk_stream_open_conversation_id }}" placeholder="cid..."></label>
             <label>Client ID <input name="dingtalk_stream_client_id" value="{{ runtime.dingtalk_stream_client_id }}" placeholder="ding..."></label>
             <label>Client Secret <input name="dingtalk_stream_client_secret" type="password" placeholder="{% if runtime.dingtalk_stream_client_secret_configured %}已配置，留空则不修改{% else %}留空则尝试使用 API Token{% endif %}"></label>
             <label>API Token <input name="dingtalk_stream_api_token" type="password" placeholder="{% if runtime.dingtalk_stream_api_token_configured %}已配置，留空则不修改{% else %}钉钉 Stream 模式 API Token{% endif %}"></label>
           </div>
+          </div>
+          <div class="settings-subsection">
+            <div class="settings-subsection-head"><h4>自然语言对话</h4></div>
+            <div class="settings-grid settings-grid-dingtalk-stream">
+              <label class="check settings-check-field"><input type="checkbox" name="dingtalk_chat_enabled" value="true"> 启用自然语言对话</label>
+              <label class="check settings-check-field"><input type="checkbox" name="dingtalk_chat_use_main_llm" value="true"> 使用主 LLM 连接</label>
+              <label>独立模型 Base URL <input name="dingtalk_chat_base_url" value="{{ runtime.dingtalk_chat_base_url }}" type="url"></label>
+              <label>独立模型 <input name="dingtalk_chat_model" value="{{ runtime.dingtalk_chat_model }}"></label>
+              <label>独立模型 API Key <input name="dingtalk_chat_api_key" type="password" autocomplete="new-password" placeholder="{% if runtime.dingtalk_chat_api_key_configured %}已配置，留空则不修改{% else %}未配置{% endif %}"></label>
+              <label>对话超时（秒） <input name="dingtalk_chat_timeout_seconds" type="number" min="3" max="60" value="{{ runtime.dingtalk_chat_timeout_seconds }}"></label>
+              <label>上下文轮数 <input name="dingtalk_chat_context_turns" type="number" min="0" max="8" value="{{ runtime.dingtalk_chat_context_turns }}"></label>
+              <label>每人每会话每分钟请求数 <input name="dingtalk_chat_requests_per_minute" type="number" min="1" max="30" value="{{ runtime.dingtalk_chat_requests_per_minute }}"></label>
+            </div>
+          </div>
+          <div class="settings-subsection dingtalk-notify-subsection">
+            <div class="settings-subsection-head"><h4>停止权限</h4></div>
+            <div class="settings-grid settings-grid-dingtalk">
+              <label>钉钉管理员 ID 白名单 <textarea name="dingtalk_admin_user_ids" rows="3" placeholder="corpId/userId">{{ runtime.dingtalk_admin_user_ids }}</textarea></label>
+              <label>管理群 ID 白名单 <textarea name="dingtalk_management_group_ids" rows="3" placeholder="cid...">{{ runtime.dingtalk_management_group_ids }}</textarea></label>
+            </div>
           </div>
           <div class="settings-subsection dingtalk-notify-subsection">
             <div class="settings-subsection-head">

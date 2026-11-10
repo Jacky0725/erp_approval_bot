@@ -30,7 +30,7 @@
 
 ### Windows 安装包
 
-发布下载：[GitHub Releases](https://github.com/Jacky0725/erp_approval_bot/releases)。以 Release 页面实际上传的资产为准，Git 标签或仓库 `VERSION` 不代表安装包已发布。当前仓库版本为 `0.1.21`，采用核心程序与浏览器拆包方案。
+发布下载：[GitHub Releases](https://github.com/Jacky0725/erp_approval_bot/releases)。以 Release 页面实际上传的资产为准，Git 标签或仓库 `VERSION` 不代表安装包已发布。当前仓库版本为 `0.1.22`，采用核心程序与浏览器拆包方案。
 
 - `ReagentApprovalBot-setup-<版本>-windows-amd64.exe`：当前用户安装器，无需管理员权限。
 - `ReagentApprovalBot-core-<版本>-windows-amd64.zip`：供安装器/更新器使用的核心包，不含浏览器，不是完整便携包。

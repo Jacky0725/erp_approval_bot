@@ -10,6 +10,7 @@ from dotenv import load_dotenv
 
 from browser_bot import BrowserBot
 from runtime_paths import ensure_runtime_layout, runtime_root
+from task_control import checkpoint, SafeStop, TaskControl, SAFE_STOP_EXIT_CODE
 
 
 ensure_runtime_layout()
@@ -43,6 +44,7 @@ def run_action(action: str) -> None:
     bot = BrowserBot(settings=settings, root_dir=ROOT_DIR)
     bot.target_list_number = os.getenv("TARGET_LIST_NUMBER", "").strip()
     bot.target_list_numbers = parse_target_list_numbers(os.getenv("TARGET_LIST_NUMBERS", ""))
+    checkpoint("准备登录")
 
     if action == "debug_capture":
         bot.run_debug_capture()
@@ -79,7 +81,17 @@ def main() -> None:
         ],
     )
     args = parser.parse_args()
-    run_action(args.action)
+    try:
+        run_action(args.action)
+        if os.getenv("AUTOMATION_TASK_ID", ""):
+            TaskControl(ROOT_DIR).finish(os.environ["AUTOMATION_TASK_ID"], "completed")
+    except SafeStop:
+        task_id = os.getenv("AUTOMATION_TASK_ID", "")
+        if not task_id:
+            raise
+        TaskControl(ROOT_DIR).finish(task_id, "stopped")
+        print("[safe_stop] 已人工停止；已保存结果不会撤销。", flush=True)
+        raise SystemExit(SAFE_STOP_EXIT_CODE)
 
 
 if __name__ == "__main__":

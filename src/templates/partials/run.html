@@ -84,7 +84,7 @@
           <div class="approval-mode-switch" role="group" aria-label="选择审批模式">
             <button type="button" id="approvalModeV1" data-approval-mode-switch="v1" aria-pressed="true" aria-controls="approvalModePanelV1">V1 审批</button>
             <button type="button" id="approvalModeWorkbuddy" data-approval-mode-switch="workbuddy" aria-pressed="false" aria-controls="approvalModePanelWorkbuddy">
-              WorkBuddy 审批 <span class="mode-beta-badge">试运行</span>
+              WorkBuddy 审批 <span class="mode-beta-badge">自动批次</span>
             </button>
           </div>
           <section class="run-mode-panel" id="approvalModePanelV1" data-approval-mode-panel="v1" aria-labelledby="approvalModeV1">
@@ -102,13 +102,13 @@
             <div class="run-action-group run-action-workbuddy">
               <div class="run-mode-panel-heading">
                 <h4>WorkBuddy 审批</h4>
-                <span>独立协同链路 · 试运行</span>
+                <span>独立协同链路 · ERP 匹配与回写</span>
               </div>
-              <p class="workbuddy-mode-summary">准备与导入支持手动文件交接。自动批次循环和正式回写仍受客户端适配及安全配置约束。</p>
+              <p class="workbuddy-mode-summary">批次循环先执行 ERP 一键匹配，再判定剩余空项。选择“保存并生成试剂库”时，保存核对成功后自动入库；异常保留文件和原因。</p>
               <div class="workbuddy-flow">
                 <div class="workbuddy-flow-step">
                   <span>01 · 准备</span>
-                  <button type="button" data-action="workbuddy_prepare">准备下一批（最多20条）</button>
+                  <button type="button" data-action="workbuddy_prepare">准备下一批（最多{{ runtime.workbuddy_batch_size|default(20) }}条）</button>
                 </div>
                 <div class="workbuddy-flow-step">
                   <span>02 · 导入</span>
@@ -121,7 +121,7 @@
               </div>
               <p class="workbuddy-availability" id="workbuddyAvailabilityNote" {% if runtime.workbuddy_desktop_enabled %}hidden{% endif %}>批次循环当前不可用：需完成客户端适配并在配置中启用；准备与导入仍可手动使用。</p>
               <details class="workbuddy-safety-note">
-                <summary>试运行与写入安全说明</summary>
+                <summary>执行与写入说明</summary>
                 <p>禁用写入模式下只测试一批，不写入记忆库或删除文件；正式回写还需通过 ERP API 安全校验。WorkBuddy 流程不会执行 AUTO_PASS。</p>
               </details>
             </div>
@@ -130,7 +130,8 @@
             <div class="run-action-group">
               <span>共用运行控制</span>
               <div class="button-row">
-                <button type="button" id="stopRunButton" class="danger-button">停止运行</button>
+                <button type="button" id="safeStopRunButton">安全停止</button>
+                <button type="button" id="stopRunButton" class="danger-button">紧急强制停止</button>
                 <button type="button" id="restartRunButton">重启程序</button>
               </div>
             </div>
@@ -144,5 +145,10 @@
             </div>
           </div>
         </form>
+        <p>任务：<span id="controlTaskId">-</span>；控制状态：<span id="controlTaskState">-</span>；当前操作：<span id="controlTaskPhase">-</span></p>
+        <h3>人工停止任务</h3>
+        <div class="table-wrap">
+          <table><thead><tr><th>任务</th><th>链路</th><th>停止位置</th><th>已保存 / 待入库</th><th>人工核对</th><th>操作</th></tr></thead><tbody id="stoppedTasksTable"></tbody></table>
+        </div>
       </section>
     </section>

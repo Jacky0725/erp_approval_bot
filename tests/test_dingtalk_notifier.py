@@ -90,7 +90,7 @@ class DingTalkNotifierTests(unittest.TestCase):
             )
             message = build_task_result_message(action="suggestions", success=False, error="ERP timeout")
             with patch("dingtalk_notifier.post_json") as post_json:
-                post_json.return_value = {"sent": True, "status": 200, "body": "{}"}
+                post_json.return_value = {"sent": True, "status": 200, "body": '{"errcode":0}'}
 
                 result = send_task_result_notification(
                     {

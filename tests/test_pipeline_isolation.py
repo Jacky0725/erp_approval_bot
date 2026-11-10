@@ -32,7 +32,7 @@ class PipelineIsolationTest(unittest.TestCase):
     def test_default_pipeline_is_v1_for_dingtalk_runs(self):
         self.assertEqual(load_settings()["approval"]["pipeline_version"], "v1")
         with patch("web_app.runtime_config_snapshot", return_value={"approval_pipeline_version": "v1"}):
-            self.assertEqual(dingtalk_run_options()["APPROVAL_PIPELINE_VERSION"], "v1")
+            self.assertEqual(dingtalk_run_options(pipeline="v1")["APPROVAL_PIPELINE_VERSION"], "v1")
 
 
 if __name__ == "__main__":

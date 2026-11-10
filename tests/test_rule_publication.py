@@ -34,6 +34,30 @@ def test_reviewed_publication_preserves_backup_and_metadata(publication):
     assert Path(outcome["backup"]).with_suffix(".json").exists()
 
 
+def test_compact_rule_cache_is_published_by_reviewed_source_version(publication):
+    maintainer, incoming, _, digest = publication
+    maintainer.settings["workbuddy"] = {"compact_rules": True}
+    outcome = maintainer.publish_reviewed_workbook(incoming, expected_sha256=digest, reviewer="tester", reason="test")
+    from workbuddy_rules import copy_compact, verify_compact
+    cache = maintainer.root_dir / "data/workbuddy/.rules-cache"
+    manifest = copy_compact(cache, maintainer.root_dir, outcome["sha256"])
+    verify_compact(maintainer.root_dir, outcome["sha256"], manifest)
+    assert not (cache / f"{digest}.json").exists()
+
+
+def test_compact_generation_failure_preserves_reviewed_xlsx_publication(publication, monkeypatch):
+    maintainer, incoming, _, digest = publication
+    maintainer.settings["workbuddy"] = {"compact_rules": True}
+
+    def unavailable(*_):
+        raise OSError("cache unavailable")
+
+    monkeypatch.setattr(WorkBuddyBridge, "publish_compact_rules", unavailable)
+    outcome = maintainer.publish_reviewed_workbook(incoming, expected_sha256=digest, reviewer="tester", reason="test")
+    assert "cache unavailable" in outcome["compact_warning"]
+    assert maintainer.structured_rules_path.read_bytes() == incoming.read_bytes()
+
+
 @pytest.mark.parametrize("invalid", ["format", "stale", "reviewer"])
 def test_invalid_or_unreviewed_publication_keeps_original(publication, invalid):
     maintainer, incoming, original, digest = publication

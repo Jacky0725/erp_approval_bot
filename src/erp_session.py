@@ -9,6 +9,7 @@ from playwright.sync_api import Error, Locator, Page, TimeoutError, sync_playwri
 
 from erp_api_discovery import ApiDiscoveryRecorder
 from stage_logger import StageLogger
+from task_control import checkpoint
 
 
 USERNAME_SELECTORS = [
@@ -80,6 +81,7 @@ class ErpSessionMixin:
             last_error: Exception | None = None
 
             for attempt in range(1, 4):
+                checkpoint("ERP 登录前安全点")
                 browser = playwright.chromium.launch(
                     headless=self.effective_browser_headless(browser_settings),
                     slow_mo=int(browser_settings.get("slow_mo_ms", 0)),
@@ -128,6 +130,7 @@ class ErpSessionMixin:
                         self.wait_for_app_shell(page)
 
                     if after_login:
+                        checkpoint("ERP 登录完成安全点")
                         callback_started = True
                         with stage_logger.stage(getattr(after_login, "__name__", "after_login")):
                             after_login(page)

@@ -34,6 +34,16 @@ class ErpApiUnsupported(RuntimeError):
     pass
 
 
+class ErpRpcError(ErpApiUnsupported):
+    def __init__(self, model: str, method: str, error: dict[str, Any]):
+        data = error.get("data") or {}
+        if not isinstance(data, dict):
+            data = {}
+        self.exception_name = str(data.get("name") or "")
+        self.business_message = str(data.get("message") or error.get("message") or "Unknown ERP error")
+        super().__init__(f"ERP {model}.{method}: {self.business_message}")
+
+
 class ErpApiClient:
     """Configuration-driven ERP API adapter.
 
@@ -142,6 +152,75 @@ class ErpApiClient:
             if not self._has_next_page(payload, page_number, page_size, len(page_records)):
                 break
         return records
+
+    def match_reagent_list(self, list_number: str) -> dict[str, Any]:
+        """Invoke the ERP list-level button once and return its read-back changes."""
+        if self.protocol != "odoo_jsonrpc" or not self.write_enabled():
+            raise ErpApiUnsupported("ERP matching requires verified Odoo API writes.")
+        before = self.fetch_reagent_detail(list_number)
+        if not before or any(r.get("_erp_parent_state") != "wait" for r in before):
+            raise ErpApiUnsupported("ERP matching requires a nonempty pending list.")
+        if any(not self.record_id_from_record(r) or "phchproperty_id" not in r for r in before):
+            raise ErpApiUnsupported("ERP matching requires stable line ids and category fields.")
+        parent_ids = {str(r.get("_erp_parent_id") or "") for r in before}
+        if len(parent_ids) != 1 or not next(iter(parent_ids)).isdigit():
+            raise ErpApiUnsupported("ERP matching needs one stable parent id.")
+        self._rpc_call(self._rpc_model("list_model", "reagent.list"),
+                       "get_phchproperty_nature", [int(next(iter(parent_ids)))],
+                       {"context": self._odoo_rpc_context()})
+        after = self.fetch_reagent_detail(list_number)
+        old = {self.record_id_from_record(r): r for r in before}
+        new = {self.record_id_from_record(r): r for r in after}
+        if (len(old) != len(before) or len(new) != len(after) or set(old) != set(new)
+                or any(r.get("_erp_parent_state") != "wait" or "phchproperty_id" not in r for r in after)):
+            raise ErpApiUnsupported("ERP list changed during matching; stopped for reconciliation.")
+        changes = [{"record_id": key, "before": self._odoo_property_identity(old[key]),
+                    "after": self._odoo_property_identity(new[key])}
+                   for key in old if self._odoo_property_identity(old[key]) != self._odoo_property_identity(new[key])]
+        if any(c["before"][0] for c in changes):
+            raise ErpApiUnsupported(f"ERP matching changed existing categories; reconciliation required: {changes}")
+        return {"list_number": list_number, "changes": changes, "records": after}
+
+    def generate_reagent_library_by_id(self, record_id: str, identity: dict[str, Any], category: str) -> dict[str, Any]:
+        """Never confirms the ERP's separate existing-library overwrite operation."""
+        if self.protocol != "odoo_jsonrpc" or not self.write_enabled():
+            raise ErpApiUnsupported("ERP library generation requires verified Odoo API writes.")
+        record = self._read_odoo_line_record(record_id)
+        if (not record or not identity.get("试剂名称")
+                or self._text(identity.get("试剂名称")) != self._text(record.get("name"))
+                or self._normalize_cas(identity.get("CAS号")) != self._normalize_cas(record.get("cas_code"))
+                or not self.identity_matches_record(identity, self.normalize_record(record))):
+            raise ErpApiUnsupported("ERP library generation blocked: line identity changed.")
+        if self._odoo_property_identity(record)[1] != category:
+            raise ErpApiUnsupported("ERP library generation blocked: saved category differs.")
+        parent = record.get("reagent_list_id")
+        parents = self._rpc_search_read(self._rpc_model("list_model", "reagent.list"),
+                                       [["id", "=", parent[0] if isinstance(parent, (list, tuple)) and parent else 0]],
+                                       ["name", "state"], limit=2)
+        if (len(parents) != 1 or parents[0].get("state") != "wait"
+                or str(parents[0].get("name") or "") != str(identity.get("试剂清单号") or "")):
+            raise ErpApiUnsupported("ERP library generation blocked: parent identity/state changed.")
+        name, cas = record.get("name"), record.get("cas_code") or False
+        domain = [["name", "=", name], ["cas_code", "=", cas]]
+        model = "reagent.cas"
+        before = self._rpc_search_read(model, domain, ["name", "cas_code", "phchproperty_id"], limit=100)
+        try:
+            result = self._rpc_call(self._rpc_model("line_model", "reagent.list.line"),
+                                    "add_reagent_cas", [int(record_id)], {"context": self._odoo_rpc_context()})
+        except ErpRpcError as error:
+            if (error.exception_name == "odoo.exceptions.ValidationError"
+                    and "试剂库已存在，并且没有修改项" in error.business_message):
+                return {"status": "existing_unchanged", "detail": error.business_message}
+            raise
+        if isinstance(result, dict) and result.get("reagent_id"):
+            return {"status": "needs_confirmation", "detail": "ERP 试剂库已存在且需要修改确认；未覆盖。",
+                    "library_id": result["reagent_id"]}
+        after = self._rpc_search_read(model, domain, ["name", "cas_code", "phchproperty_id"], limit=100)
+        old_ids = {r["id"] for r in before}
+        created = [r for r in after if r["id"] not in old_ids and self._odoo_property_identity(r) == self._odoo_property_identity(record)]
+        if result and len(created) == 1:
+            return {"status": "created_verified", "detail": "试剂库新建成功并已回读核对。", "library_id": created[0]["id"]}
+        return {"status": "unverified", "detail": "生成请求已返回，但未确认唯一新建记录；不自动重试。"}
 
     def resolve_reagent_record_id(
         self,
@@ -729,7 +808,7 @@ class ErpApiClient:
         payload = {"params": {"model": model, "method": method, "args": args, "kwargs": kwargs}}
         response = self._request_json("POST", endpoint, data=payload)
         if isinstance(response, dict) and response.get("error"):
-            raise ErpApiUnsupported(f"ERP Odoo JSON-RPC {model}.{method} returned an error.")
+            raise ErpRpcError(model, method, response["error"])
         if not isinstance(response, dict) or "result" not in response:
             raise ErpApiUnsupported(f"ERP Odoo JSON-RPC {model}.{method} returned no result.")
         return response.get("result")

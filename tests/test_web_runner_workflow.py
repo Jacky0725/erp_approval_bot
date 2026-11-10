@@ -96,6 +96,31 @@ class WorkflowSummaryTest(unittest.TestCase):
             self.assertEqual(status["result_label"], "审批流程完成")
             self.assertEqual(status["action"], "suggestions")
 
+    def test_workbuddy_dashboard_counts_verified_saves_outside_log_tail(self) -> None:
+        from task_control import TaskControl
+
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            control = TaskControl(root)
+            task_id = "workbuddy-test"
+            control.register(task_id, "workbuddy_loop", {}, {"source": "web"}, {})
+            control.record_details(task_id, verified_saved_keys=["batch1:first", "batch2:second"], saved=2)
+            control.finish(task_id, "completed")
+            manager = AutomationJobManager(root_dir=root)
+            manager.action = "workbuddy_loop"
+            manager._task_id = task_id
+            manager.success = True
+            manager.lines = ["[workbuddy] earlier saved: confirmed", *(["diagnostic"] * 160),
+                             "[workbuddy] later saved: confirmed", "[workbuddy review_pending] 1"]
+            manager._persist_state()
+            for instance in (manager, AutomationJobManager(root_dir=root)):
+                summary = instance.status(light=True)["summary"]
+                self.assertEqual(summary["write_success_count"], 2)
+                self.assertEqual(summary["api_write_success_count"], 2)
+                self.assertEqual(summary["api_write_attempt_count"], 2)
+                self.assertEqual(summary["suggestion_count"], 2)
+                self.assertEqual(summary["manual_review_count"], 1)
+
     def test_manager_persists_state_and_run_paths_under_its_root(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -290,7 +315,7 @@ class WorkflowSummaryTest(unittest.TestCase):
             log_dir = root / "data" / "logs"
             log_dir.mkdir(parents=True)
             (log_dir / "todo_tasks.json").write_text(
-                '[{"试剂清单号":"SJ202608040001","客户名称":"上海交通大学","申请人":"戚明燕"}]',
+                '[{"试剂清单号":"SJ202608040001 加急","客户名称":"上海交通大学","申请人":"戚明燕"}]',
                 encoding="utf-8",
             )
 
@@ -304,6 +329,21 @@ class WorkflowSummaryTest(unittest.TestCase):
         result = parse_target_list_numbers("SJ1, SJ2;SJ1\nSJ3")
 
         self.assertEqual(result, ["SJ1", "SJ2", "SJ3"])
+
+    def test_run_options_normalizes_stale_urgent_todo_labels(self) -> None:
+        options = run_options(
+            target_list_numbers="SJ1 加急, SJ1;SJ2\nOTHER-SJ3",
+            process_all_todos="false",
+            process_all_todos_max="50",
+            approval_write_mode="generate_library",
+            approval_write_min_confidence="0.8",
+            approval_write_batch_size="20",
+            erp_write_backend="api_write_with_web_verify",
+            auto_pass="false",
+        )
+
+        self.assertEqual(options["TARGET_LIST_NUMBERS"], "SJ1,SJ2,OTHER-SJ3")
+        self.assertEqual(options["PROCESS_ALL_TODOS"], "false")
 
     def test_current_approval_list_number_uses_latest_processing_log(self) -> None:
         lines = [

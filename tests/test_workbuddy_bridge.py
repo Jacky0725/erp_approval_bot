@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import json
 from pathlib import Path
 import sqlite3
 import sys
@@ -89,6 +90,72 @@ def test_corrupt_result_never_imported(bridge, corruption):
     with pytest.raises(ValueError):
         bridge.load_results(state)
     assert all("result" not in i for i in state["items"])
+
+
+def test_reviewed_row_only_reconciles_after_explicit_confirmation_and_erp_readback(bridge):
+    source = records(2)
+    state = bridge.prepare(source)
+    results(bridge, state, "需人工复核")
+    client = Client(source)
+    library_calls = []
+    client.generate_reagent_library_by_id = lambda key, *_: (
+        library_calls.append(key) or {"status": "created_verified", "detail": "模拟回读"}
+    )
+    memory = ReagentMemory(bridge.root_dir)
+    bridge.process(state, client, memory, dry_run=False, generate_library=True)
+    assert state["status"] == "review_pending"
+    item = state["items"][0]
+    path = bridge.root_dir / "data" / "workbuddy_review_confirmations" / f"{state['batch_id']}.json"
+    path.parent.mkdir()
+    path.write_text(json.dumps({item["key"]: "普通类"}, ensure_ascii=False), encoding="utf-8")
+    bridge.process(state, client, memory, dry_run=False)
+    with pytest.raises(ValueError, match="人工保存类别未核对"):
+        bridge.process(state, client, memory, dry_run=False, confirm_reviews=True)
+    assert not client.writes and not library_calls
+    bridge.rules_path().write_bytes(b"new formal rules")
+    client.records[0]["物化特性"] = "普通类"
+    bridge.process(state, client, memory, dry_run=False, confirm_reviews=True)
+    bridge.process(state, client, memory, dry_run=False, confirm_reviews=True)
+    assert state["status"] == "review_pending"
+    assert item["result"]["物化特性类别"] == "需人工复核"
+    assert item["operator_confirmed_category"] == "普通类"
+    assert state["items"][1]["status"] == "review"
+    assert library_calls == ["1"] and not client.writes
+
+
+def test_reviewed_erp_record_is_not_rebatched_after_rules_or_identity_change(bridge):
+    source = records(1)
+    state = bridge.prepare(source)
+    results(bridge, state, "需人工复核")
+    bridge.process(state, Client(source), ReagentMemory(bridge.root_dir), dry_run=False)
+    bridge.rules_path().write_bytes(b"new rules")
+    source[0]["试剂名称"] = "人工核对前已有名称更新"
+    assert bridge.prepare(source) is None
+
+
+def test_model_review_does_not_hide_an_uncertain_library_write(bridge):
+    source = records(2)
+    state = bridge.prepare(source)
+    rows = results(bridge, state)
+    rows[1]["物化特性类别"] = "需人工复核"
+    pd.DataFrame(rows, columns=RESULT_COLUMNS).to_excel(bridge.batch_path(state) / "result.xlsx", index=False)
+    client = Client(source)
+    calls = []
+
+    def generate(key, *_):
+        calls.append(key)
+        raise TimeoutError("试剂库请求响应丢失")
+
+    client.generate_reagent_library_by_id = generate
+    memory = ReagentMemory(bridge.root_dir)
+    bridge.process(state, client, memory, dry_run=False, generate_library=True)
+    bridge.process(state, client, memory, dry_run=False)
+    assert state["status"] == "needs_attention"
+    assert state["items"][0]["library"]["status"] == "failed"
+    assert state["items"][1]["status"] == "review"
+    assert calls == client.writes == ["1"]
+    with pytest.raises(RuntimeError, match="1 条写入或入库待核对"):
+        bridge.require_safe_continuation(state, {"SJ001"})
 
 
 def test_dry_run_never_writes_memory_or_erp(bridge):
@@ -273,3 +340,127 @@ def test_new_rules_allow_reclassification_without_deleting_old_batch(bridge):
     assert new["batch_id"] != old["batch_id"]
     assert new["items"][0]["key"] == old["items"][0]["key"]
     assert (bridge.batch_path(old) / "state.json").exists()
+
+@pytest.mark.parametrize('library_status',['created_verified','existing_unchanged','needs_confirmation','unverified','failed'])
+def test_library_state_is_separate_and_never_repeated(bridge,library_status):
+    source=records(1)
+    state=bridge.prepare(source)
+    results(bridge,state)
+    client=Client(source)
+    calls=[]
+    def generate(key,identity,category):
+        calls.append(key)
+        assert client.records[0]['物化特性']==category
+        if library_status=='failed':raise TimeoutError('library response lost')
+        return {'status':library_status,'detail':'business reason'}
+    client.generate_reagent_library_by_id=generate
+    memory=ReagentMemory(bridge.root_dir)
+    bridge.process(state,client,memory,dry_run=False,generate_library=True)
+    assert state['items'][0]['status']=='saved'
+    assert state['items'][0]['library']['status']==library_status
+    complete=library_status in {'created_verified','existing_unchanged'}
+    assert (state['status']=='completed')==complete
+    assert (bridge.batch_path(state)/'result.xlsx').exists()!=complete
+    bridge.process(bridge.batches()[0],client,memory,dry_run=False,generate_library=False)
+    assert calls==['1'] and client.writes==['1']
+
+
+def test_library_is_not_generated_when_category_save_fails(bridge):
+    source=records(1);state=bridge.prepare(source);results(bridge,state)
+    client=Client(source);client.fail=True
+    client.generate_reagent_library_by_id=lambda *args:pytest.fail('not saved')
+    bridge.process(state,client,ReagentMemory(bridge.root_dir),dry_run=False,generate_library=True)
+    assert 'library' not in state['items'][0]
+
+
+def test_match_checkpoint_prevents_repeat_and_dry_run_is_read_only(bridge):
+    source=records(1);client=Client(source);calls=[]
+    client.match_reagent_list=lambda number:calls.append(number) or {'changes':[],'records':deepcopy(source)}
+    assert bridge.matched_records(client,'SJ001',dry_run=True)==source
+    assert not calls
+    bridge.matched_records(client,'SJ001',dry_run=False)
+    bridge.matched_records(client,'SJ001',dry_run=False)
+    assert calls==['SJ001']
+
+
+def test_match_response_lost_is_not_repeated(bridge):
+    client=Client(records(1));calls=[]
+    def match(number):
+        calls.append(number)
+        raise TimeoutError('response lost')
+    client.match_reagent_list=match
+    with pytest.raises(TimeoutError):bridge.matched_records(client,'SJ001',dry_run=False)
+    with pytest.raises(RuntimeError,match='待核对'):bridge.matched_records(client,'SJ001',dry_run=False)
+    assert len(calls)==1
+
+
+def test_unsent_stale_batch_retains_evidence_and_requeues_only_empty(bridge):
+    source=records(2);state=bridge.prepare(source);client=Client(source)
+    client.records[0]['物化特性']='普通类'
+    assert bridge.reconcile_unsent_batch(state,client)
+    assert state['status']=='superseded_before_dispatch'
+    assert (bridge.batch_path(state)/'input.xlsx').exists()
+    new=bridge.prepare(client.records)
+    assert [i['input']['_erp_record_id'] for i in new['items']]==['2']
+
+
+@pytest.mark.parametrize('dispatch',['sending','submitted'])
+def test_sent_batch_is_never_superseded(bridge,dispatch):
+    source=records(1);state=bridge.prepare(source);state['dispatch_state']=dispatch
+    client=Client(source);client.records[0]['物化特性']='普通类'
+    assert bridge.reconcile_unsent_batch(state,client) is False
+    assert state['status']=='waiting_result'
+
+
+def test_checkpoint_sharing_violation_retries_only_local_replace(bridge,monkeypatch):
+    original=Path.replace;calls=[]
+    def replace(path,target):
+        calls.append(str(path))
+        if len(calls)<3:raise PermissionError('sharing violation')
+        return original(path,target)
+    monkeypatch.setattr(Path,'replace',replace)
+    monkeypatch.setattr('workbuddy_bridge.time.sleep',lambda duration:None)
+    state=bridge.prepare(records(1))
+    assert len(calls)==3 and bridge.batches()[0]['batch_id']==state['batch_id']
+
+
+def test_checkpoint_permanent_access_error_is_bounded(bridge,monkeypatch):
+    calls=[]
+    def replace(path,target):
+        calls.append(str(path));raise PermissionError('denied')
+    monkeypatch.setattr(Path,'replace',replace)
+    monkeypatch.setattr('workbuddy_bridge.time.sleep',lambda duration:None)
+    with pytest.raises(PermissionError):bridge.prepare(records(1))
+    assert len(calls)==6
+
+
+@pytest.mark.parametrize('size',[30,40,50,100])
+def test_larger_batches_round_trip_and_stop_at_configured_size(bridge,size):
+    bridge.config['batch_size']=size
+    def source():
+        yield from records(size)
+        pytest.fail('batch consumed more than the configured limit')
+    state=bridge.prepare(source())
+    assert len(state['items'])==size and state['batch_size_limit']==size
+    results(bridge,state)
+    bridge.config['batch_size']=20
+    bridge.process(state,Client(records(size)),ReagentMemory(bridge.root_dir),dry_run=False)
+    assert state['status']=='completed' and state['cleaned']
+    assert len(state['items'])==size
+
+
+@pytest.mark.parametrize('size',[0,-1,101,True,None,'30.5','bad'])
+def test_invalid_batch_sizes_fail_explicitly(bridge,size):
+    bridge.config['batch_size']=size
+    with pytest.raises(ValueError,match='batch_size'):
+        bridge.prepare(records(1))
+
+
+def test_larger_batch_rejects_foreign_extra_row_before_any_write(bridge):
+    bridge.config['batch_size']=30
+    state=bridge.prepare(records(30));rows=results(bridge,state)
+    rows.append({**rows[-1],'记录ID':'foreign'})
+    pd.DataFrame(rows,columns=RESULT_COLUMNS).to_excel(bridge.batch_path(state)/'result.xlsx',index=False)
+    client=Client(records(30))
+    with pytest.raises(ValueError):bridge.process(state,client,ReagentMemory(bridge.root_dir),dry_run=False)
+    assert not client.writes

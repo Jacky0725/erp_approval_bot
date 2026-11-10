@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import json
 from contextlib import asynccontextmanager
 from pathlib import Path
 import subprocess
@@ -17,6 +18,8 @@ from dotenv import load_dotenv
 
 from llm_providers import fetch_provider_models, provider_options
 from dingtalk_stream_bot import DingTalkStreamBot
+from task_control import TaskControl
+from audit_logger import AuditLogger
 from scheduler import ApprovalScheduler
 from update_checker import (
     browser_is_installed,
@@ -45,6 +48,7 @@ from web_runner import (
     memory_sync_versions,
     normalize_web_write_mode,
     normalize_pipeline_version,
+    parse_target_list_numbers,
     current_run_lines,
     review_queue_summary,
     runtime_config_snapshot,
@@ -59,6 +63,7 @@ from data_health import apply_data_health_repairs, data_health_summary
 from runtime_paths import source_root
 from config_migration import migrate_security_defaults
 from web_security import SECURITY_HEADERS, WebSecurity, normalize_run_confirmation_options
+from reagent_page import normalize_todo_list_number
 
 
 SOURCE_ROOT = source_root()
@@ -73,7 +78,7 @@ scheduler = ApprovalScheduler(root_dir=ROOT_DIR, settings_loader=load_settings, 
 dingtalk_stream_bot = DingTalkStreamBot(
     settings_loader=load_settings,
     job_manager=manager,
-    run_options_builder=lambda list_number: dingtalk_run_options(list_number),
+    run_options_builder=lambda list_number, pipeline: dingtalk_run_options(list_number, pipeline),
     status_provider=manager.status,
     root_dir=ROOT_DIR,
 )
@@ -570,6 +575,16 @@ def api_settings(
     dingtalk_stream_client_id: Annotated[str, Form()] = "",
     dingtalk_stream_client_secret: Annotated[str, Form()] = "",
     dingtalk_stream_api_token: Annotated[str, Form()] = "",
+    dingtalk_chat_enabled: Annotated[str, Form()] = "",
+    dingtalk_chat_use_main_llm: Annotated[str, Form()] = "",
+    dingtalk_chat_base_url: Annotated[str, Form()] = "",
+    dingtalk_chat_model: Annotated[str, Form()] = "",
+    dingtalk_chat_api_key: Annotated[str, Form()] = "",
+    dingtalk_chat_timeout_seconds: Annotated[str, Form()] = "20",
+    dingtalk_chat_context_turns: Annotated[str, Form()] = "4",
+    dingtalk_chat_requests_per_minute: Annotated[str, Form()] = "6",
+    dingtalk_admin_user_ids: Annotated[str, Form()] = "",
+    dingtalk_management_group_ids: Annotated[str, Form()] = "",
     memory_sync_enabled: Annotated[str, Form()] = "",
     memory_sync_base_url: Annotated[str, Form()] = "",
     memory_sync_remote_dir: Annotated[str, Form()] = "",
@@ -634,6 +649,16 @@ def api_settings(
             "dingtalk_stream_client_id": dingtalk_stream_client_id,
             "dingtalk_stream_client_secret": dingtalk_stream_client_secret,
             "dingtalk_stream_api_token": dingtalk_stream_api_token,
+            "dingtalk_chat_enabled": normalize_checkbox(dingtalk_chat_enabled),
+            "dingtalk_chat_use_main_llm": normalize_checkbox(dingtalk_chat_use_main_llm),
+            "dingtalk_chat_base_url": dingtalk_chat_base_url,
+            "dingtalk_chat_model": dingtalk_chat_model,
+            "dingtalk_chat_api_key": dingtalk_chat_api_key,
+            "dingtalk_chat_timeout_seconds": dingtalk_chat_timeout_seconds,
+            "dingtalk_chat_context_turns": dingtalk_chat_context_turns,
+            "dingtalk_chat_requests_per_minute": dingtalk_chat_requests_per_minute,
+            "dingtalk_admin_user_ids": dingtalk_admin_user_ids,
+            "dingtalk_management_group_ids": dingtalk_management_group_ids,
             "memory_sync_enabled": normalize_checkbox(memory_sync_enabled),
             "memory_sync_base_url": memory_sync_base_url,
             "memory_sync_remote_dir": memory_sync_remote_dir,
@@ -712,6 +737,10 @@ def api_run(
         pipeline_version="v1",
         auto_pass=auto_pass,
     )
+    if (action == "workbuddy_loop" and not options["TARGET_LIST_NUMBERS"]
+            and options["PROCESS_ALL_TODOS"] == "true"
+            and (load_settings().get("workbuddy") or {}).get("freeze_web_todo_scope") is True):
+        options["FREEZE_TODO_SCOPE"] = "true"
     return JSONResponse(manager.start(action, options))
 
 
@@ -730,6 +759,56 @@ async def api_run_prepare(request: Request) -> JSONResponse:
 @app.post("/api/stop")
 def api_stop() -> JSONResponse:
     return JSONResponse(manager.stop())
+
+
+@app.post("/api/safe-stop/prepare")
+async def api_safe_stop_prepare(request: Request) -> JSONResponse:
+    payload = await request.json()
+    task_id = str(payload.get("task_id") or "") if isinstance(payload, dict) else ""
+    status = manager.status(light=True)
+    if not status.get("running") or task_id != status.get("task_id"):
+        raise HTTPException(status_code=409, detail="任务已结束或已切换，请刷新状态。")
+    return JSONResponse(security.issue_ticket("safe_stop", {"task_id": task_id}))
+
+
+@app.post("/api/safe-stop")
+async def api_safe_stop(request: Request) -> JSONResponse:
+    payload = await request.json()
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="操作参数格式无效。")
+    task_id = str(payload.get("task_id") or "")
+    security.consume_ticket(str(payload.get("ticket") or ""), "safe_stop", {"task_id": task_id})
+    return JSONResponse(manager.request_safe_stop(task_id, {"source": "web"}))
+
+
+@app.get("/api/stopped-tasks")
+def api_stopped_tasks() -> JSONResponse:
+    tasks = TaskControl(ROOT_DIR).stopped()
+    return JSONResponse({"tasks": [{key: task[key] for key in ("task_id", "action", "phase", "details")} for task in tasks]})
+
+
+@app.post("/api/resume/prepare")
+async def api_resume_prepare(request: Request) -> JSONResponse:
+    payload = await request.json()
+    if not isinstance(payload, dict) or payload.get("verified") is not True:
+        raise HTTPException(status_code=400, detail="必须先人工核对 ERP、投递状态和结果文件。")
+    task_id = str(payload.get("task_id") or "")
+    task = TaskControl(ROOT_DIR).get(task_id)
+    if task.get("state") != "stopped":
+        raise HTTPException(status_code=409, detail="原任务不是已人工停止状态。")
+    return JSONResponse(security.issue_ticket("resume", {"task_id": task_id, "verified": True}))
+
+
+@app.post("/api/resume")
+async def api_resume(request: Request) -> JSONResponse:
+    payload = await request.json()
+    if not isinstance(payload, dict) or payload.get("verified") is not True:
+        raise HTTPException(status_code=400, detail="请先完成手工核对。")
+    task_id = str(payload.get("task_id") or "")
+    security.consume_ticket(str(payload.get("ticket") or ""), "resume", {"task_id": task_id, "verified": True})
+    result = manager.resume_stopped_task(task_id)
+    AuditLogger.from_settings(load_settings(), ROOT_DIR).info(json.dumps({"event": "manual_task_resume", "task_id": task_id, "started": bool(result.get("started"))}, ensure_ascii=False))
+    return JSONResponse(result)
 
 
 @app.post("/api/restart")
@@ -806,9 +885,12 @@ def run_options(
     auto_pass: str,
     pipeline_version: str = "v1",
 ) -> dict[str, str]:
+    list_numbers = dict.fromkeys(
+        normalize_todo_list_number(number) for number in parse_target_list_numbers(target_list_numbers)
+    )
     return {
         "TARGET_LIST_NUMBER": "",
-        "TARGET_LIST_NUMBERS": target_list_numbers.strip(),
+        "TARGET_LIST_NUMBERS": ",".join(list_numbers),
         "PROCESS_ALL_TODOS": normalize_checkbox(process_all_todos),
         "PROCESS_ALL_TODOS_MAX": process_all_todos_max.strip() or "50",
         "APPROVAL_WRITE_MODE": normalize_web_write_mode(approval_write_mode),
@@ -820,10 +902,19 @@ def run_options(
     }
 
 
-def dingtalk_run_options(list_number: str = "") -> dict[str, str]:
+def dingtalk_run_options(list_number: str = "", pipeline: str = "workbuddy") -> dict[str, str]:
+    if pipeline not in {"workbuddy", "v1"}:
+        raise ValueError("不支持的审批链路。")
     runtime = runtime_config_snapshot()
+    settings = load_settings()
+    if pipeline == "workbuddy":
+        workbuddy = settings.get("workbuddy", {}) or {}
+        if not workbuddy.get("desktop_enabled", False):
+            raise ValueError("WorkBuddy 客户端自动投递未启用。")
+        if not Path(str(workbuddy.get("executable") or "")).is_file():
+            raise ValueError("WorkBuddy 程序路径无效，请先在本机完成客户端配置。")
     target_list_number = str(list_number or "").strip()
-    return run_options(
+    options = run_options(
         target_list_numbers=target_list_number,
         process_all_todos="false" if target_list_number else "true",
         process_all_todos_max=str(runtime.get("process_all_todos_max") or "50"),
@@ -831,9 +922,22 @@ def dingtalk_run_options(list_number: str = "") -> dict[str, str]:
         approval_write_min_confidence=str(runtime.get("approval_write_min_confidence") or "0.8"),
         approval_write_batch_size=str(runtime.get("approval_write_batch_size") or "3"),
         erp_write_backend=str(runtime.get("erp_write_backend") or "web_ui"),
-        pipeline_version=str(runtime.get("approval_pipeline_version") or "v1"),
+        pipeline_version="v1",
         auto_pass=str(runtime.get("auto_pass") or "false"),
     )
+    options["FREEZE_TODO_SCOPE"] = "true"
+    dry_run = normalize_checkbox(str((settings.get("app", {}) or {}).get("dry_run", False))) == "true"
+    dry_run = dry_run or normalize_checkbox(os.getenv("APP_DRY_RUN") or os.getenv("DRY_RUN") or "false") == "true"
+    options["DINGTALK_TRIAL_MODE"] = "true" if dry_run or options["APPROVAL_WRITE_MODE"] == "disabled" else "false"
+    if pipeline == "workbuddy" and options["DINGTALK_TRIAL_MODE"] == "false":
+        if not workbuddy.get("write_enabled", False):
+            raise ValueError("WorkBuddy 正式写入尚未启用。")
+        if options["ERP_WRITE_BACKEND"] != "api_write_with_web_verify":
+            raise ValueError("WorkBuddy 正式回写需要接口写入后端 api_write_with_web_verify。")
+        erp_api = settings.get("erp_api", {}) or {}
+        if erp_api.get("enabled_for_write") is not True or str((erp_api.get("discovery", {}) or {}).get("status") or "").lower() != "verified":
+            raise ValueError("ERP API 尚未验证或未启用写入。")
+    return options
 
 
 def normalize_checkbox(value: str) -> str:

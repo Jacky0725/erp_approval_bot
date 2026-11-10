@@ -2,6 +2,7 @@
 from pathlib import Path
 import sys
 from types import ModuleType, SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
@@ -167,6 +168,33 @@ def test_send_waits_for_batch_message_and_empty_editor(desktop):
     desktop.button.click_action = submitted
     desktop.adapter.send("执行批次 batch-123", batch_id="batch-123")
     assert desktop.editor.value == ""
+
+
+def test_followup_requires_exact_previous_completion_in_configured_chat(desktop):
+    link = SimpleNamespace(is_visible=lambda: True)
+    desktop.window.links = [link]
+    desktop.window.messages = [SimpleNamespace(is_visible=lambda: True, window_text=lambda: "【批次完成】prior")]
+    desktop.adapter._open_project = Mock(side_effect=AssertionError("should stay in chat"))
+    assert desktop.adapter.send("完整规则", reuse=("prior", "继续下一批"))
+    assert desktop.editor.value == "继续下一批"
+
+
+def test_followup_with_only_a_quoted_completion_opens_new_task(desktop):
+    desktop.window.links = [SimpleNamespace(is_visible=lambda: True)]
+    desktop.window.messages = [SimpleNamespace(is_visible=lambda: True, window_text=lambda: "示例：【批次完成】prior")]
+    desktop.adapter._open_project = Mock()
+    assert not desktop.adapter.send("完整规则", reuse=("prior", "继续下一批"))
+    desktop.adapter._open_project.assert_called_once()
+    assert desktop.editor.value == "完整规则"
+
+
+def test_followup_change_after_typing_never_submits(desktop):
+    desktop.adapter._is_completed_chat = Mock(side_effect=[True, True, False])
+    guard = Mock()
+    with pytest.raises(RuntimeError, match="续聊会话在输入后发生变化"):
+        desktop.adapter.send("完整规则", reuse=("prior", "继续下一批"), before_submit=guard)
+    guard.assert_not_called()
+    assert desktop.calls == ["click", "type"]
 
 
 def test_send_ack_timeout_is_uncertain_and_does_not_retry(desktop):
@@ -460,4 +488,31 @@ def test_hidden_project_tab_does_not_authorize_input(desktop):
     desktop.window.tabs[0].is_visible = lambda: False
     with pytest.raises(RuntimeError, match="未确认项目身份"):
         desktop.adapter.send("test")
+    assert not desktop.calls
+
+
+def test_submission_confirmation_reobserves_transient_value_pattern(desktop):
+    original=desktop.editor.get_value;calls=[]
+    def get_value():
+        calls.append(1)
+        if len(calls)==1:raise RuntimeError('transient Value pattern unavailable')
+        return original()
+    desktop.editor.get_value=get_value
+    desktop.window.messages=[type(desktop.editor)(name='abc')]
+    desktop.adapter._wait_for_submitted_message(desktop.window,None,'abc',timeout_seconds=1)
+    assert len(calls)==2 and not desktop.calls
+
+
+def test_reconcile_existing_submission_requires_configured_project(desktop,monkeypatch):
+    monkeypatch.setattr(desktop.adapter,'_window',lambda:desktop.window)
+    with pytest.raises(RuntimeError,match='未确认当前对话'):
+        desktop.adapter.confirm_existing_submission('abc')
+    assert not desktop.calls
+
+
+def test_reconcile_existing_submission_never_clicks_send(desktop,monkeypatch):
+    monkeypatch.setattr(desktop.adapter,'_window',lambda:desktop.window)
+    desktop.window.links=[type(desktop.editor)(name='试剂审批')]
+    desktop.window.messages=[type(desktop.editor)(name='abc')]
+    desktop.adapter.confirm_existing_submission('abc')
     assert not desktop.calls
