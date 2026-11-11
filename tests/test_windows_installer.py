@@ -228,10 +228,36 @@ def test_remove_program_files_keeps_legacy_data_until_runtime_migration(tmp_path
     assert not (target / "ReagentApprovalBot.exe").exists()
 
 
+@pytest.mark.skipif(os.name != "nt", reason="requires the native Windows Shell Link COM API")
+def test_native_shell_link_round_trips_unicode_paths_and_arguments(tmp_path):
+    installer = load_installer_module()
+    target = tmp_path / "\u8bd5\u5242 App"
+    target.mkdir()
+    exe = target / installer.LAUNCHER_NAME
+    exe.write_bytes(b"MZ")
+    link = tmp_path / "\u5378\u8f7d\u8bd5\u5242.lnk"
+    script = installer.shell_link_powershell() + r"""
+    $ErrorActionPreference = 'Stop'
+    $argsText = '-File "' + (Join-Path $env:RAB_TEST_ROOT 'uninstall_installed.ps1') + '"'
+    [UnicodeShellLink]::Save($env:RAB_TEST_LINK, $env:RAB_TEST_EXE, $env:RAB_TEST_ROOT, $argsText)
+    $entry = [UnicodeShellLink]::Read($env:RAB_TEST_LINK)
+    if ($entry.TargetPath -cne $env:RAB_TEST_EXE -or $entry.WorkingDirectory -cne $env:RAB_TEST_ROOT -or
+        $entry.Arguments -cne $argsText) { throw 'Unicode shortcut round trip failed.' }
+    """
+    result = subprocess.run(
+        ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", "-"],
+        input=script + "\n", text=True, capture_output=True, timeout=30,
+        env={**os.environ, "RAB_TEST_LINK": str(link), "RAB_TEST_ROOT": str(target), "RAB_TEST_EXE": str(exe)},
+    )
+    assert result.returncode == 0, result.stderr
+    assert not result.stderr, result.stderr
+    assert link.is_file()
+
+
 @pytest.mark.skipif(os.name != "nt", reason="Windows PowerShell locks its working directory")
 def test_uninstaller_can_remove_directory_when_started_from_its_shortcut(tmp_path):
     installer = load_installer_module()
-    target = tmp_path / "App With Spaces"
+    target = tmp_path / "\u8bd5\u5242 App With Spaces"
     target.mkdir()
     (target / installer.LAUNCHER_NAME).write_bytes(b"MZ")
     (target / "versions").mkdir()

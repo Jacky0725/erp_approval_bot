@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import os
 from pathlib import Path
 import shutil
@@ -391,6 +392,12 @@ def remove_program_files(target: Path) -> None:
             item.unlink()
 
 
+def shell_link_powershell() -> str:
+    # WScript.Shell shortcut methods can lose characters outside the system code page.
+    source = Path(__file__).with_name("UnicodeShellLink.cs").read_text(encoding="ascii")
+    return "Add-Type -TypeDefinition @'\n" + source + "\n'@\n"
+
+
 def write_uninstaller(target: Path) -> None:
     script = target / "uninstall_installed.ps1"
     install_path = str(target).replace("'", "''")
@@ -431,6 +438,7 @@ def write_uninstaller(target: Path) -> None:
             if ($Running.Count) {{ throw 'Close Reagent Approval Bot and wait for active tasks to finish, then try uninstalling again.' }}
             $Shell = New-Object -ComObject WScript.Shell
             if (!$Quiet -and $Shell.Popup('Uninstall Reagent Approval Bot? Runtime data will be kept.', 0, 'Reagent Approval Bot', 36) -ne 6) {{ exit 0 }}
+            __SHELL_LINK_HELPER__
             Write-UninstallLog "Uninstalling $InstallDir (keep runtime data)"
             foreach ($Name in @('versions', 'shared', '_internal', '{LAUNCHER_NAME}', 'ReagentApprovalBotUpdater.exe',
                                 'current.json', 'previous.json', 'browser-current.json', 'install.json',
@@ -455,7 +463,7 @@ def write_uninstaller(target: Path) -> None:
                 foreach ($Name in @($ShortcutName, $UninstallShortcutName)) {{
                     $Link = Join-Path $Directory "$Name.lnk"
                     if (Test-Path -LiteralPath $Link -PathType Leaf) {{
-                        $Shortcut = $Shell.CreateShortcut($Link)
+                        $Shortcut = [UnicodeShellLink]::Read($Link)
                         if ($Shortcut.WorkingDirectory -eq $InstallDir) {{
                             Remove-Item -LiteralPath $Link -Force
                         }}
@@ -479,7 +487,7 @@ def write_uninstaller(target: Path) -> None:
             Write-UninstallLog 'Uninstall complete; runtime data preserved.'
             if (!$Quiet) {{ [void]$Shell.Popup('Uninstall complete. Runtime data was kept.', 0, 'Reagent Approval Bot', 64) }}
             """
-        ).strip()
+        ).replace("__SHELL_LINK_HELPER__", shell_link_powershell()).strip()
         + "\n",
         encoding="utf-8-sig",
     )
@@ -489,38 +497,36 @@ def shortcut_command(folder: str, target: Path | None = None, *, uninstall: bool
     ps = r"""
     $ErrorActionPreference = 'Stop'
     [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
+    __SHELL_LINK_HELPER__
     $directory = [Environment]::GetFolderPath([Environment+SpecialFolder]$env:RAB_SHORTCUT_FOLDER)
     if (!$directory) { throw 'Windows known folder is unavailable.' }
     $name = -join ([char[]](0x8bd5, 0x5242, 0x5ba1, 0x6279, 0x52a9, 0x624b))
     if ($env:RAB_UNINSTALL_LINK -eq '1') { $name = (-join ([char[]](0x5378, 0x8f7d))) + $name }
     $link = Join-Path $directory "$name.lnk"
-    $shell = New-Object -ComObject WScript.Shell
     if (!$env:RAB_SHORTCUT_ROOT) {
-        if (Test-Path -LiteralPath $link -PathType Leaf) { $shell.CreateShortcut($link).TargetPath }
+        if (Test-Path -LiteralPath $link -PathType Leaf) { [UnicodeShellLink]::Read($link).TargetPath }
         exit
     }
     [IO.Directory]::CreateDirectory($directory) | Out-Null
-    $shortcut = $shell.CreateShortcut($link)
     $exe = Join-Path $env:RAB_SHORTCUT_ROOT 'ReagentApprovalBot.exe'
+    $arguments = ''
     if ($env:RAB_UNINSTALL_LINK -eq '1') {
         $exe = Join-Path $PSHOME 'powershell.exe'
-        $shortcut.Arguments = '-NoProfile -ExecutionPolicy RemoteSigned -File "' + (Join-Path $env:RAB_SHORTCUT_ROOT 'uninstall_installed.ps1') + '"'
-    } else {
-        $shortcut.Arguments = ''
+        $arguments = '-NoProfile -ExecutionPolicy RemoteSigned -File "' + (Join-Path $env:RAB_SHORTCUT_ROOT 'uninstall_installed.ps1') + '"'
     }
-    $shortcut.TargetPath = $exe
-    $shortcut.WorkingDirectory = $env:RAB_SHORTCUT_ROOT
-    $shortcut.IconLocation = "$exe,0"
-    $shortcut.Save()
-    if (!(Test-Path -LiteralPath $link -PathType Leaf) -or $shell.CreateShortcut($link).TargetPath -ne $exe) {
+    [UnicodeShellLink]::Save($link, $exe, $env:RAB_SHORTCUT_ROOT, $arguments)
+    $shortcut = [UnicodeShellLink]::Read($link)
+    if ($shortcut.TargetPath -ne $exe -or $shortcut.WorkingDirectory -ne $env:RAB_SHORTCUT_ROOT -or $shortcut.Arguments -cne $arguments) {
         throw 'Shortcut target verification failed.'
     }
     $link
-    """
+    """.replace("__SHELL_LINK_HELPER__", shell_link_powershell())
     env = {**os.environ, "RAB_SHORTCUT_FOLDER": folder, "RAB_SHORTCUT_ROOT": str(target) if target else "",
            "RAB_UNINSTALL_LINK": "1" if uninstall else "0"}
+    powershell = Path(os.environ["SystemRoot"]) / "System32/WindowsPowerShell/v1.0/powershell.exe"
+    encoded = base64.b64encode(ps.encode("utf-16-le")).decode("ascii")
     result = subprocess.run(
-        ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", ps], env=env,
+        [str(powershell), "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded], env=env,
         capture_output=True, encoding="utf-8", errors="replace", timeout=15, **hidden_subprocess_kwargs(),
     )
     if result.returncode:

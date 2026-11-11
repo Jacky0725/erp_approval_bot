@@ -37,7 +37,9 @@ $testEnv = @{
     REAGENT_APPROVAL_LAUNCHER_LOG_REDIRECTED=$null; TEMP=$root; TMP=$root
 }
 $passed = $false
-$shell = New-Object -ComObject WScript.Shell
+$linkSource = Join-Path $PSScriptRoot '..\packaging\windows\UnicodeShellLink.cs'
+if (!(Test-Path -LiteralPath $linkSource -PathType Leaf)) { $linkSource = Join-Path $PSScriptRoot 'UnicodeShellLink.cs' }
+Add-Type -LiteralPath $linkSource
 
 function Invoke-Setup {
     $process = Start-Process -FilePath $setup.FullName -PassThru -WindowStyle Hidden
@@ -57,7 +59,7 @@ try {
     if ((Get-ItemProperty -LiteralPath $registry -Name InstallLocation).InstallLocation -ine $target) { throw 'HKCU installation record mismatch.' }
     foreach ($link in $links) {
         if (!(Test-Path -LiteralPath $link -PathType Leaf)) { throw "Missing shortcut: $link" }
-        $entry = $shell.CreateShortcut($link)
+        $entry = [UnicodeShellLink]::Read($link)
         if ($entry.WorkingDirectory -ine $target -or ($link -ne $links[2] -and $entry.TargetPath -ine $launcher)) { throw "Unexpected shortcut target: $link" }
     }
     $result.Add('PASS: real offline Setup, HKCU install record, Desktop and Start menu shortcuts.')
@@ -85,7 +87,7 @@ try {
         $arp.DisplayName -cne $expectedName -or $arp.UninstallString -cne "$engine $expectedArguments") {
         throw 'Windows Installed Apps registration mismatch.'
     }
-    $uninstallLink = $shell.CreateShortcut($links[2])
+    $uninstallLink = [UnicodeShellLink]::Read($links[2])
     if ($uninstallLink.TargetPath -ine $engine -or $uninstallLink.Arguments -cne $expectedArguments) {
         throw 'Start menu and Windows Installed Apps do not use the same uninstaller.'
     }
@@ -106,7 +108,7 @@ try {
     foreach ($key in $saved.Keys) { [Environment]::SetEnvironmentVariable($key, $saved[$key], 'Process') }
     try {
         foreach ($link in $links) {
-            if ((Test-Path -LiteralPath $link) -and $shell.CreateShortcut($link).WorkingDirectory -ieq $target) {
+            if ((Test-Path -LiteralPath $link) -and [UnicodeShellLink]::Read($link).WorkingDirectory -ieq $target) {
                 Remove-Item -LiteralPath $link -Force
             }
         }

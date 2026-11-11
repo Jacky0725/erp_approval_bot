@@ -55,6 +55,7 @@ if (Test-Path $InstallerPath) {
     --workpath $WorkDir `
     --specpath $SpecDir `
     --add-data "$StageDir\payload;payload" `
+    --add-data "$PSScriptRoot\UnicodeShellLink.cs;." `
     --hidden-import tkinter `
     --hidden-import tkinter.ttk `
     --icon $IconPath `
