@@ -65,10 +65,18 @@ if (Test-Path $DistAppDir) {
     Remove-Item $DistAppDir -Recurse -Force
 }
 
+$DefaultSettings = Join-Path $RepoRoot "dist\packaged-defaults\settings.yaml"
+& $Python (Join-Path $PSScriptRoot "build_runtime_defaults.py") (Join-Path $RepoRoot "config\settings.yaml") $DefaultSettings
+if ($LASTEXITCODE -ne 0) { throw "Could not generate safe packaged settings." }
+
 $addData = @(
     "$RepoRoot\src\templates;app\src\templates",
     "$RepoRoot\src\static;app\src\static",
-    "$RepoRoot\config;app\config",
+    "$DefaultSettings;app\config",
+    "$RepoRoot\config\rules.xlsx;app\config",
+    "$RepoRoot\config\rules_structured.xlsx;app\config",
+    "$RepoRoot\config\name_aliases.yaml;app\config",
+    "$RepoRoot\config\non_reagent_items.yaml;app\config",
     "$RepoRoot\.env.example;app",
     "$RepoRoot\VERSION;app",
     "$RepoRoot\assets;app\assets"
@@ -148,6 +156,7 @@ $args = @(
     "--onedir",
     "--windowed",
     "--name", $BuildName,
+    "--paths", (Join-Path $RepoRoot "src"),
     "--distpath", (Join-Path $RepoRoot "dist"),
     "--workpath", $WorkDir,
     "--specpath", $SpecDir
@@ -176,6 +185,7 @@ $args += $Launcher
 
 Write-Host "Building $BuildName $Arch with PyInstaller..."
 & $Python @args
+if ($LASTEXITCODE -ne 0) { throw "PyInstaller failed to build $BuildName." }
 
 function Remove-IfExists([string]$Path) {
     if (Test-Path $Path) {

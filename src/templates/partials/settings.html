@@ -22,6 +22,25 @@
         </section>
 
         <section class="settings-section">
+          <div class="settings-section-head"><h3>WorkBuddy 本机配置</h3></div>
+          <div class="settings-grid settings-grid-connection">
+            <input type="hidden" name="workbuddy_config_present" value="true">
+            <label class="settings-field-wide">客户端路径
+              <input name="workbuddy_executable" value="{{ runtime.workbuddy_executable }}" autocomplete="off">
+            </label>
+            <label>项目名称 <input name="workbuddy_project_name" value="{{ runtime.workbuddy_project_name }}"></label>
+            <label class="check"><input type="checkbox" name="workbuddy_desktop_enabled" value="true" {% if runtime.workbuddy_desktop_enabled %}checked{% endif %}> 启用桌面联动</label>
+            <div class="settings-field-wide">
+              <div class="model-picker">
+                <select id="workbuddyCandidates" aria-label="WorkBuddy 客户端候选" hidden></select>
+                <button type="button" id="detectWorkBuddy">检测客户端</button>
+              </div>
+              <p class="field-note" id="workbuddyDetectionState" role="status">{% if runtime.workbuddy_executable and not runtime.workbuddy_path_valid %}已保存的客户端路径无效。{% endif %}</p>
+            </div>
+          </div>
+        </section>
+
+        <section class="settings-section">
           <div class="settings-section-head">
             <div>
               <h3>V1 缺 CAS 名称补全</h3>

@@ -12,6 +12,7 @@ import subprocess
 import ctypes
 from typing import Any, Callable
 from task_control import checkpoint
+from workbuddy_discovery import client_path
 
 
 def literal_keys(value: str) -> str:
@@ -252,9 +253,12 @@ class WorkBuddyDesktop:
             if -1 in running_pids:
                 raise RuntimeError("检测到同名 WorkBuddy 进程，但无法读取其程序路径；为避免启动重复客户端，已暂停。")
             raise RuntimeError("WorkBuddy 进程仍在运行，但任务栏/通知区域未能恢复可操作主窗口；请检查登录或弹窗。")
-        print(f"[workbuddy] 客户端未启动，按当前项目用户权限启动：{executable}", flush=True)
+        path = client_path(executable)
+        if path is None:
+            raise RuntimeError("已配置的 WorkBuddy 客户端路径无效；请在基础设置重新检测或手动填写。")
+        print(f"[workbuddy] 客户端未启动，按当前项目用户权限启动：{path}", flush=True)
         try:
-            launched = subprocess.Popen([executable], cwd=os.path.dirname(executable) or None,
+            launched = subprocess.Popen([str(path)], cwd=str(path.parent),
                              stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                              stderr=subprocess.DEVNULL, close_fds=True)
         except Exception as error:

@@ -6,6 +6,13 @@ import json
 from pathlib import Path
 import zipfile
 
+from check_package_size import LIMITS
+
+
+def check_budget(path: Path, kind: str, errors: list[str]) -> None:
+    if path.stat().st_size > LIMITS[kind] * 1024 * 1024:
+        errors.append(f"{kind} asset exceeds {LIMITS[kind]} MiB hard limit: {path.name}")
+
 
 def sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
@@ -76,6 +83,7 @@ def verify_release_assets(release_dir: Path, version: str) -> list[str]:
         if not path.is_file():
             errors.append(f"missing {kind} asset: {name}")
             continue
+        check_budget(path, kind, errors)
         if path.stat().st_size != asset.get("size"):
             errors.append(f"{kind} asset size mismatch: {name}")
         if sha256_file(path).lower() != str(asset.get("sha256") or "").lower():
@@ -86,8 +94,10 @@ def verify_release_assets(release_dir: Path, version: str) -> list[str]:
     setup = release_dir / f"ReagentApprovalBot-setup-{version}-windows-amd64.exe"
     if not setup.is_file():
         errors.append(f"missing setup asset: {setup.name}")
-    elif not is_pe(setup):
-        errors.append(f"invalid setup PE header: {setup.name}")
+    else:
+        check_budget(setup, "setup", errors)
+        if not is_pe(setup):
+            errors.append(f"invalid setup PE header: {setup.name}")
     if not (release_dir / f"{setup.name}.size.json").is_file():
         errors.append(f"missing setup size report: {setup.name}.size.json")
     for name in ("ReagentApprovalBotBootstrap.exe", "ReagentApprovalBotUpdater.exe"):

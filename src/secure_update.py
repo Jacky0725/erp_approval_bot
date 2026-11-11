@@ -11,6 +11,7 @@ import shutil
 import stat
 import tempfile
 import threading
+import time
 from typing import Any, Callable
 from urllib.parse import urlparse
 import urllib.request
@@ -137,6 +138,7 @@ def verified_download(
     headers: dict[str, str] | None = None,
     timeout_seconds: int = 600,
     opener: Callable[..., Any] = urllib.request.urlopen,
+    progress: Callable[[int, int], None] | None = None,
 ) -> Path:
     validate_download_url(asset.url)
     destination_dir.mkdir(parents=True, exist_ok=True)
@@ -157,12 +159,16 @@ def verified_download(
             content_length = int(response.headers.get("Content-Length") or 0)
             if content_length and content_length != asset.size:
                 raise ValueError("Download Content-Length does not match the manifest.")
+            if progress is not None:
+                progress(0, asset.size)
             while chunk := response.read(1024 * 1024):
                 downloaded += len(chunk)
                 if downloaded > asset.size or downloaded > MAX_ASSET_SIZE:
                     raise ValueError("Downloaded asset exceeds its declared size.")
                 digest.update(chunk)
                 output.write(chunk)
+                if progress is not None:
+                    progress(downloaded, asset.size)
             output.flush()
             os.fsync(output.fileno())
         if downloaded != asset.size:
@@ -195,12 +201,18 @@ def safe_extract_zip(archive: Path, destination: Path) -> None:
                 target.relative_to(root)
             except ValueError as exc:
                 raise ValueError(f"Archive path escapes destination: {info.filename}") from exc
-            if info.is_dir():
-                target.mkdir(parents=True, exist_ok=True)
-            else:
-                target.parent.mkdir(parents=True, exist_ok=True)
-                with bundle.open(info) as source, target.open("wb") as output:
-                    shutil.copyfileobj(source, output, 1024 * 1024)
+            try:
+                if info.is_dir():
+                    target.mkdir(parents=True, exist_ok=True)
+                else:
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    with bundle.open(info) as source, target.open("wb") as output:
+                        shutil.copyfileobj(source, output, 1024 * 1024)
+            except OSError as error:
+                if (getattr(error, "winerror", None) in {3, 206}
+                        and len(str(target).encode("utf-16-le")) // 2 >= 248):
+                    raise OSError("Windows path limit reached. Choose a shorter application install directory.") from error
+                raise
 
 
 def atomic_json(path: Path, payload: dict[str, Any]) -> None:
@@ -225,30 +237,50 @@ def read_pointer(install_root: Path, name: str = "current.json") -> dict[str, An
         return None
 
 
-def stage_version(core_zip: Path, install_root: Path, version: str) -> Path:
+def stage_version(core_zip: Path, install_root: Path, version: str, *, repair: bool = False) -> Path:
     if not SEMVER.fullmatch(version):
         raise ValueError("Invalid target version.")
     versions = install_root / "versions"
     versions.mkdir(parents=True, exist_ok=True)
-    staging = versions / f".{version}.staging-{os.getpid()}"
-    shutil.rmtree(staging, ignore_errors=True)
-    safe_extract_zip(core_zip, staging)
-    candidates = list(staging.rglob("ReagentApprovalBot.exe"))
-    if len(candidates) != 1:
-        shutil.rmtree(staging, ignore_errors=True)
-        raise ValueError("Core archive must contain exactly one application executable.")
-    payload_root = candidates[0].parent
     target = versions / version
-    if target.exists():
-        shutil.rmtree(staging, ignore_errors=True)
-        return target
-    if payload_root != staging:
-        normalized = versions / f".{version}.normalized-{os.getpid()}"
-        payload_root.rename(normalized)
-        shutil.rmtree(staging, ignore_errors=True)
-        staging = normalized
-    staging.rename(target)
+    with tempfile.TemporaryDirectory(prefix=".v-", dir=versions) as temporary:
+        staging = Path(temporary)
+        safe_extract_zip(core_zip, staging)
+        candidates = list(staging.rglob("ReagentApprovalBot.exe"))
+        if len(candidates) != 1 or not candidates[0].is_file():
+            raise ValueError("Core archive must contain exactly one application executable.")
+        if not target.exists() or repair:
+            replace_staged_directory(candidates[0].parent, target)
     return target
+
+
+def replace_staged_directory(staging: Path, target: Path) -> None:
+    """Keep the original directory available until its replacement is in place."""
+    if target.exists():
+        backup = Path(tempfile.mkdtemp(prefix=f".{target.name}.repair-", dir=target.parent))
+        previous = backup / "version"
+        rename_staged_path(target, previous)
+        try:
+            rename_staged_path(staging, target)
+        except OSError:
+            rename_staged_path(previous, target)
+            backup.rmdir()
+            raise
+        shutil.rmtree(backup, ignore_errors=True)
+    else:
+        rename_staged_path(staging, target)
+
+
+def rename_staged_path(source: Path, target: Path) -> None:
+    # On Windows antivirus can briefly retain handles to freshly extracted binaries.
+    for attempt in range(5):
+        try:
+            source.rename(target)
+            return
+        except OSError as error:
+            if getattr(error, "winerror", None) not in {5, 32, 33} or attempt == 4:
+                raise
+            time.sleep(0.2 * 2 ** attempt)
 
 
 def switch_current(install_root: Path, version: str, browser_revision: str = "") -> None:
@@ -256,7 +288,7 @@ def switch_current(install_root: Path, version: str, browser_revision: str = "")
     if not target.is_dir():
         raise FileNotFoundError(target)
     current = read_pointer(install_root)
-    if current:
+    if current and current.get("version") != version:
         atomic_json(install_root / "previous.json", current)
     atomic_json(
         install_root / "current.json",

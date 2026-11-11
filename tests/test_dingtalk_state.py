@@ -164,7 +164,11 @@ def test_explicit_empty_target_never_falls_back_to_default(tmp_path, monkeypatch
 def test_task_target_is_durable_and_isolated_from_newer_task(tmp_path, monkeypatch):
     import web_runner
     from web_runner import AutomationJobManager
-    monkeypatch.setattr(web_runner, "load_settings", lambda: {})
+    client = tmp_path / "WorkBuddy.exe"
+    client.touch()
+    monkeypatch.setattr(web_runner, "load_settings", lambda: {
+        "workbuddy": {"desktop_enabled": True, "executable": str(client)},
+    })
     monkeypatch.setattr(web_runner.threading, "Thread", Mock())
     manager = AutomationJobManager(root_dir=tmp_path)
     first = manager.start("workbuddy_loop", notification_target={"openConversationId": "a", "sessionWebhook": "https://example.test/a"})

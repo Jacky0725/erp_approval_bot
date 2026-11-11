@@ -41,6 +41,7 @@ if (!$Repository) { $Repository = "Jacky0725/erp_approval_bot" }
 
 foreach ($item in @(@("core", $Core), @("browser", $BrowserPackage))) {
     & $Python (Join-Path $PSScriptRoot "check_package_size.py") --kind $item[0] --artifact $item[1]
+    if ($LASTEXITCODE -ne 0) { throw "Package size check failed: $($item[0])" }
 }
 Write-Host "Core: $Core"
 Write-Host "Browser: $BrowserPackage"

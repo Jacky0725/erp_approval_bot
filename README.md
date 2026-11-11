@@ -30,7 +30,7 @@
 
 ### Windows 安装包
 
-发布下载：[GitHub Releases](https://github.com/Jacky0725/erp_approval_bot/releases)。以 Release 页面实际上传的资产为准，Git 标签或仓库 `VERSION` 不代表安装包已发布。当前仓库版本为 `0.1.22`，采用核心程序与浏览器拆包方案。
+发布下载：[GitHub Releases](https://github.com/Jacky0725/erp_approval_bot/releases)。以 Release 页面实际上传的资产为准，Git 标签或仓库 `VERSION` 不代表安装包已发布。当前仓库版本为 `0.1.23`，采用核心程序与浏览器拆包方案。预发布用于验收，不作为稳定自动更新目标。
 
 - `ReagentApprovalBot-setup-<版本>-windows-amd64.exe`：当前用户安装器，无需管理员权限。
 - `ReagentApprovalBot-core-<版本>-windows-amd64.zip`：供安装器/更新器使用的核心包，不含浏览器，不是完整便携包。
@@ -38,7 +38,11 @@
 - `release-manifest.json`：核心包和浏览器包的大小、SHA-256、架构及浏览器 revision 清单。
 - `*.size.json`：对应产物的体积检查报告。
 
-在线安装运行 Setup；缺失浏览器时安装器从同一 Release 获取。离线安装请把同一 Release 的 Setup、核心 ZIP、浏览器 ZIP 放在同一目录，勿混用不同发布的资产。缺少浏览器且无法联网时，补齐资产后重试，不要把不完整安装视为成功。
+在线安装运行 Setup；浏览器包从同一 Release 获取。离线安装只需把同一 Release 的 Setup 和浏览器 ZIP 放在同一目录，直接运行 Setup，不必另外下载核心 ZIP。不要混用不同发布的资产。
+
+新版安装向导（本仓库源码，是否已发布请看 Releases）支持选择新装目录、勾选桌面快捷方式，并显示下载字节及安装步骤。已有安装选择原目录修复或升级，不支持自动搬到另一块盘。完成页分别显示桌面和开始菜单入口；入口失败可重试。也可用开始菜单的「试剂审批助手」或直接运行安装根目录的 `ReagentApprovalBot.exe`。安装日志位于 `%TEMP%\reagent_approval_bot_install.log`。
+
+新版 Setup 安装或修复后，可从当前账号的「设置 → 应用 → 已安装的应用」查找并卸载「试剂审批助手」，也可使用开始菜单的卸载入口。先结束审批任务并关闭助手，再确认卸载；卸载默认保留运行数据。失败时查看 `%TEMP%\reagent_approval_bot_uninstall.log` 并重试。不要直接双击 `.ps1`。此说明不适用于未登记系统卸载入口的旧安装包。
 
 `0.1.19` 及更旧版本须手工运行新版 Setup 迁移，勿使用旧更新器无人值守跨越安装架构。升级前备份 `%LOCALAPPDATA%\ReagentApprovalBot\`，升级后先确认测试模式、写入开关、规则和凭据，再连接隔离 ERP 验证。
 
@@ -146,7 +150,8 @@ python scripts/cleanup_reagent_memory_conflicts.py --yes
 
 - 运行页新增“WorkBuddy 准备20条”“WorkBuddy 导入结果”“WorkBuddy 批次循环”。WorkBuddy 独立判定，项目只校验文件、身份和类别映射，只保存物化特性，不执行顶部“通过”。
 - 每批文件位于 `data/workbuddy/<批次ID>/`。`prompt.txt` 是本批任务，输入、规则快照和模板位于同一目录。结果固定为 `result.xlsx`，五列：批次ID、记录ID、试剂名称、物化特性类别、判断依据。
-- 首次启用前应将 `workbuddy.desktop_enabled` 和 `workbuddy.write_enabled` 设为 `false`，先使用准备/导入验证；不要假定现有业务配置仍为关闭状态。自动循环还需验证 `workbuddy.executable` 对应客户端及控件。测试模式只预览一批，不入记忆、不写 ERP、不删结果。
+- 新版安装包首次运行默认关闭桌面联动和正式写入，不预填开发机路径。每台电脑用实际操作的 Windows 账号登录，在「配置项 → WorkBuddy 本机配置」检测客户端，选中候选或手填本机 `WorkBuddy.exe` 的完整路径，填写实际项目名称并保存。检测不会启动客户端或保存候选。已有配置升级时不会被默认配置覆盖。
+- 自定义程序安装目录不会移动运行数据，批次默认仍在 `%LOCALAPPDATA%\ReagentApprovalBot\data\workbuddy\`。换电脑或账号时重新核对路径、项目和本机凭据，先使用测试模式验证一个批次，不入记忆、不写 ERP、不删结果。启用桌面联动不等于开启正式写入。
 - 正式写入需要专用写入开关与已验证的 ERP API 同时启用。失败原因保存在本批 `state.json` 和审计日志；修正配置后可再次导入原文件，成功记录不会重复写入。
 - 判定入记忆时保留 WorkBuddy 来源，不冒充人工核实，不覆盖人工记忆；全部成功才清理结果 Excel，数据库和状态保留。
 - Windows 客户端适配依赖 `pywinauto`，已列入依赖。执行时保持桌面解锁，客户端与项目使用同一普通用户和权限级别。适配器核对窗口就绪、项目身份、空草稿和发送回执；结果文件出现后还需确认 `【批次完成】<批次ID>`。发送状态不明时暂停，不自动重发，也不自动提权。
@@ -162,7 +167,7 @@ python scripts/cleanup_reagent_memory_conflicts.py --yes
 - 正式安装包默认并强制使用无头浏览器；源码开发调试时可在 `config/settings.yaml` 中临时改为 headed 浏览器。
 - 正式安装包启动 Web UI 时优先使用 `127.0.0.1:8000`；如果端口被其他程序占用，会自动尝试后续端口并打开正确地址。
 - 正式安装包的用户数据和日志与程序文件分开，默认位于 `%LOCALAPPDATA%\ReagentApprovalBot\data\`；启动日志位于其中的 `logs\launcher.log`，审批任务日志位于 `logs\runs\`。安装目录仅放程序版本和启动器，升级不应覆盖用户数据。
-- Windows 安装包默认安装到当前用户的 `%LOCALAPPDATA%\Programs\ReagentApprovalBot`；默认不弹目录选择以避免安装进度窗遮挡。需要自定义目录时，可先设置 `REAGENT_APPROVAL_INSTALL_DIR`，或设置 `REAGENT_APPROVAL_PROMPT_INSTALL_DIR=1` 后再运行安装包。在线更新会沿用当前安装目录。
+- Windows 安装包默认安装到当前用户的 `%LOCALAPPDATA%\Programs\ReagentApprovalBot`。已发布的 `v0.1.22` 双击不弹目录选择，可在运行 Setup 前以 `REAGENT_APPROVAL_INSTALL_DIR` 指定新装目录。新版向导默认可选目录，仍支持这个显式路径参数。在线更新沿用当前安装目录。
 - `.env.example` 使用 `APP_DRY_RUN=true`、`APPROVAL_WRITE_MODE=disabled`。安全迁移会重置常规写入和调度；已有运行环境或自定义配置仍需逐项检查。启用 `multi_page` 后可能保存 ERP 字段；`AUTO_PASS=false` 仅表示不点击顶部“通过”。
 - 默认 `AUTO_PASS=false`，不会点击顶部“通过”。
 - 所有审批建议和阻断原因应保存在 `data/logs/` 中。

@@ -64,6 +64,7 @@ from scheduler import scheduler_config
 from llm_extractor import LlmExtractor
 from rule_engine import RuleEngine
 from excel_exports import write_excel_atomic
+from workbuddy_discovery import client_path, update_client_settings
 
 
 PRE_LOGIN_PHASES = {"准备启动", "准备登录", "ERP 登录前安全点", "ERP 登录完成安全点"}
@@ -292,6 +293,10 @@ class AutomationJobManager:
 
             task_id = uuid.uuid4().hex
             try:
+                if action == "workbuddy_loop":
+                    workbuddy = load_settings().get("workbuddy") or {}
+                    if not workbuddy.get("desktop_enabled") or client_path(str(workbuddy.get("executable") or "")) is None:
+                        raise ValueError("WorkBuddy 联动未启用或客户端路径失效，请在基础设置核对本机配置。")
                 TaskControl(self.root_dir).ensure_allowed_start(action, options, resume_task_id)
                 binding = task_notification_binding(load_settings(), notification_target, self.root_dir)
                 DingTalkState(self.root_dir).save_target(task_id, binding)
@@ -2791,6 +2796,9 @@ def runtime_config_snapshot() -> dict[str, Any]:
         "app_frozen": bool(getattr(sys, "frozen", False)),
         "app_dry_run": "true" if app_settings.get("dry_run") else "false",
         "workbuddy_desktop_enabled": bool(workbuddy_settings.get("desktop_enabled", False)),
+        "workbuddy_executable": str(workbuddy_settings.get("executable") or ""),
+        "workbuddy_project_name": str(workbuddy_settings.get("project_name") or ""),
+        "workbuddy_path_valid": client_path(str(workbuddy_settings.get("executable") or "")) is not None,
         "workbuddy_batch_size": workbuddy_settings.get("batch_size", 20),
         "update_token_configured": bool(
             os.getenv("REAGENT_APPROVAL_UPDATE_TOKEN", "").strip()
@@ -2904,7 +2912,16 @@ def runtime_config_snapshot() -> dict[str, Any]:
 
 
 def save_runtime_config(form: dict[str, str]) -> dict[str, Any]:
+    with manager._lock:
+
+        if manager.running:
+            raise ValueError("当前有任务正在运行，不能修改基础设置。")
+        return _save_runtime_config(form)
+
+
+def _save_runtime_config(form: dict[str, str]) -> dict[str, Any]:
     existing_settings = load_settings()
+    update_client_settings(existing_settings, form)
     admins = parse_target_list_numbers(form.get("dingtalk_admin_user_ids", ""))
     if any(value.count("/") != 1 or not all(value.split("/")) for value in admins):
         raise ValueError("管理员 ID 必须使用 企业ID/用户ID 格式。")

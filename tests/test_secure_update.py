@@ -1,4 +1,5 @@
 import hashlib
+import io
 import json
 import sys
 from pathlib import Path
@@ -8,7 +9,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from secure_update import atomic_json, parse_manifest, read_pointer, safe_extract_zip, stage_version, switch_current
+from secure_update import ManifestAsset, atomic_json, parse_manifest, read_pointer, rename_staged_path, safe_extract_zip, stage_version, switch_current, verified_download
 
 
 def manifest(version="0.1.21"):
@@ -52,3 +53,45 @@ def test_staged_version_switch_preserves_previous_pointer(tmp_path):
     switch_current(root, "0.1.21")
     assert read_pointer(root)["version"] == "0.1.21"
     assert read_pointer(root, "previous.json")["version"] == "0.1.20"
+    stage_version(archive, root, "0.1.21", repair=True)
+    switch_current(root, "0.1.21")
+    assert read_pointer(root, "previous.json")["version"] == "0.1.20"
+
+
+def test_verified_download_reports_bytes_without_weakening_verification(tmp_path):
+    payload = b"x" * (1024 * 1024 + 50)
+    url = "https://github.com/owner/repo/releases/download/v0.1.23/browser.zip"
+
+    class Response(io.BytesIO):
+        headers = {"Content-Length": str(len(payload))}
+
+        def geturl(self):
+            return url
+
+    asset = ManifestAsset("browser.zip", "browser", "amd64", len(payload), hashlib.sha256(payload).hexdigest(), url)
+    updates = []
+    output = verified_download(asset, tmp_path, opener=lambda *args, **kwargs: Response(payload),
+                               progress=lambda received, total: updates.append((received, total)))
+    assert output.read_bytes() == payload
+    assert updates == [(0, len(payload)), (1024 * 1024, len(payload)), (len(payload), len(payload))]
+
+
+def test_staged_rename_retries_transient_windows_lock(tmp_path, monkeypatch):
+    source = tmp_path / "stage"
+    target = tmp_path / "ready"
+    source.mkdir()
+    original_rename = Path.rename
+    waits = []
+
+    def rename(path, destination):
+        if not waits:
+            lock = PermissionError("locked during scan")
+            lock.winerror = 5
+            raise lock
+        return original_rename(path, destination)
+
+    monkeypatch.setattr(Path, "rename", rename)
+    monkeypatch.setattr("secure_update.time.sleep", waits.append)
+    rename_staged_path(source, target)
+    assert target.is_dir() and not source.exists()
+    assert waits == [0.2]

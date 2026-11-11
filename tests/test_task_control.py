@@ -34,6 +34,9 @@ def managed(tmp_path, monkeypatch):
     import web_runner
     settings = copy.deepcopy(POLICY)
     settings["approval"] = {"write_mode": "multi_page"}
+    client = tmp_path / "WorkBuddy.exe"
+    client.touch()
+    settings["workbuddy"] = {"desktop_enabled": True, "executable": str(client)}
     (tmp_path / "config").mkdir()
     (tmp_path / "config/rules_structured.xlsx").write_bytes(b"test-rules")
     monkeypatch.setattr(web_runner, "load_settings", lambda: settings)

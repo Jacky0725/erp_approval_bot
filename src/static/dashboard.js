@@ -707,6 +707,36 @@
       apply();
     }
 
+    const workbuddyCandidates = document.querySelector("#workbuddyCandidates");
+    const detectWorkBuddy = document.querySelector("#detectWorkBuddy");
+    const workbuddyDetectionState = document.querySelector("#workbuddyDetectionState");
+    detectWorkBuddy?.addEventListener("click", async () => {
+      detectWorkBuddy.disabled = true;
+      workbuddyCandidates.hidden = true;
+      workbuddyDetectionState.textContent = "检测中…";
+      try {
+        const response = await fetch("/api/settings/workbuddy/detect", { method: "POST" });
+        const payload = await response.json();
+        if (!response.ok) throw new Error(apiErrorMessage(payload));
+        const candidates = payload.candidates;
+        const sources = { running: "当前会话", user_registry: "用户注册", machine_registry: "系统注册" };
+        workbuddyCandidates.replaceChildren(new Option("选择检测结果", ""), ...candidates.map(
+          ({ path, source }) => new Option(`${path}（${sources[source] || source}）`, path),
+        ));
+        workbuddyCandidates.hidden = !candidates.length;
+        workbuddyDetectionState.textContent = candidates.length ? `找到 ${candidates.length} 个候选` : "未检测到客户端，可填写完整路径。";
+      } catch (error) {
+        workbuddyDetectionState.textContent = error.message || "检测失败";
+      } finally {
+        detectWorkBuddy.disabled = false;
+      }
+    });
+    workbuddyCandidates?.addEventListener("change", () => {
+      if (!workbuddyCandidates.value) return;
+      settingsForm.elements.namedItem("workbuddy_executable").value = workbuddyCandidates.value;
+      workbuddyDetectionState.textContent = "已选定，尚未保存。";
+    });
+
     settingsForm?.addEventListener("submit", async (event) => {
       event.preventDefault();
       const state = document.querySelector("#settingsSaveState");
@@ -721,6 +751,10 @@
       }
       state.textContent = "已保存";
       state.className = "save-state saved";
+      if (workbuddyDetectionState) {
+        workbuddyDetectionState.textContent = payload.runtime?.workbuddy_executable && !payload.runtime.workbuddy_path_valid
+          ? "已保存的客户端路径无效。" : "";
+      }
       settingsForm.querySelector('[name="erp_password"]').value = "";
       settingsForm.querySelector('[name="llm_api_key"]').value = "";
       const enrichmentKey = settingsForm.querySelector('[name="identity_enrichment_api_key"]');

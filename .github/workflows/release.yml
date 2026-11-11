@@ -34,7 +34,7 @@ jobs:
       - name: Compile and test
         run: |
           python -m compileall -q src packaging\windows
-          python -m pytest -q
+          python -m pytest -q tests
       - name: Build split release assets
         shell: pwsh
         run: |
@@ -63,9 +63,16 @@ jobs:
           $status = Get-MpComputerStatus
           if (!$status.AntivirusEnabled) { throw "Windows Defender must be enabled for release validation" }
           Start-MpScan -ScanPath "$pwd\dist\releases" -ScanType CustomScan
-      - name: Publish stable assets
+      - name: Verify frozen Setup lifecycle
+        shell: pwsh
+        timeout-minutes: 8
+        run: .\scripts\verify_windows_test_account.ps1 -CI -ReleaseDir .\dist\releases
+      - name: Prepare release draft
         uses: softprops/action-gh-release@v2
         with:
+          draft: true
+          prerelease: true
+          fail_on_unmatched_files: true
           generate_release_notes: true
           files: |
             dist/releases/ReagentApprovalBot-core-*-windows-amd64.zip

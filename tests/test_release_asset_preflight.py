@@ -10,6 +10,7 @@ import zipfile
 
 
 MODULE_PATH = Path(__file__).resolve().parents[1] / "packaging" / "windows" / "verify_release_assets.py"
+sys.path.insert(0, str(MODULE_PATH.parent))
 SPEC = importlib.util.spec_from_file_location("verify_release_assets", MODULE_PATH)
 assert SPEC and SPEC.loader
 MODULE = importlib.util.module_from_spec(SPEC)
@@ -62,6 +63,12 @@ def test_release_asset_preflight_detects_missing_and_tampered_assets(tmp_path: P
     )
 
     assert MODULE.verify_release_assets(tmp_path, version) == []
+    errors = []
+    oversized = tmp_path / "oversized.exe"
+    with oversized.open("wb") as stream:
+        stream.truncate(MODULE.LIMITS["setup"] * 1024 * 1024 + 1)
+    MODULE.check_budget(oversized, "setup", errors)
+    assert errors == ["setup asset exceeds 130 MiB hard limit: oversized.exe"]
     (tmp_path / assets[0]["name"]).write_bytes(b"modified")
     assert any("SHA-256 mismatch" in error for error in MODULE.verify_release_assets(tmp_path, version))
     (tmp_path / assets[1]["name"]).unlink()

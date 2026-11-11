@@ -331,6 +331,7 @@ def test_disabled_send_not_clicked(desktop):
 def test_window_from_different_executable_never_used(desktop, monkeypatch):
     monkeypatch.setattr(sys.modules["pywinauto.application"], "process_module", lambda pid: "Other.exe")
     monkeypatch.setattr("workbuddy_desktop.subprocess.run", lambda *a, **k: SimpleNamespace(stdout=""))
+    monkeypatch.setattr("workbuddy_desktop.client_path", lambda _: Path("WorkBuddy.exe"))
     monkeypatch.setattr("workbuddy_desktop.subprocess.Popen", lambda *a, **k: (_ for _ in ()).throw(OSError("test")))
     with pytest.raises(RuntimeError, match="启动失败"):
         desktop.adapter.send("test")
@@ -436,6 +437,7 @@ def test_ambiguous_taskbar_icons_are_not_clicked(desktop):
 
 def test_missing_client_is_started_and_window_prepared(desktop, monkeypatch):
     launched = []
+    monkeypatch.setattr("workbuddy_desktop.client_path", lambda _: Path("WorkBuddy.exe"))
     monkeypatch.setattr("workbuddy_desktop.subprocess.run", lambda *a, **k: SimpleNamespace(stdout='"other.exe","1"'))
     monkeypatch.setattr("workbuddy_desktop.subprocess.Popen", lambda *a, **k: launched.append((a, k)))
     monkeypatch.setattr("workbuddy_desktop.time.sleep", lambda _: None)
@@ -473,6 +475,15 @@ def test_focus_loss_blocks_keyboard_input(desktop, monkeypatch):
     with pytest.raises(RuntimeError, match="前台焦点"):
         desktop.adapter.send("test")
     assert "type" not in desktop.calls
+
+
+def test_stale_path_is_not_launched(desktop, monkeypatch):
+    monkeypatch.setattr(sys.modules["pywinauto"], "Desktop", lambda **kwargs: SimpleNamespace(windows=lambda **kw: []))
+    monkeypatch.setattr("workbuddy_desktop.subprocess.run", lambda *a, **k: SimpleNamespace(stdout=""))
+    monkeypatch.setattr("workbuddy_desktop.client_path", lambda _: None)
+    monkeypatch.setattr("workbuddy_desktop.subprocess.Popen", lambda *a, **k: pytest.fail("stale path was launched"))
+    with pytest.raises(RuntimeError, match="客户端路径无效"):
+        desktop.adapter._window()
 
 
 def test_focus_loss_mid_prompt_keeps_partial_draft_and_does_not_send(desktop, monkeypatch):

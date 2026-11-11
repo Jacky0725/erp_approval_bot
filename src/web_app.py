@@ -64,6 +64,7 @@ from runtime_paths import source_root
 from config_migration import migrate_security_defaults
 from web_security import SECURITY_HEADERS, WebSecurity, normalize_run_confirmation_options
 from reagent_page import normalize_todo_list_number
+from workbuddy_discovery import WorkBuddyConfigError, client_path, discover_clients
 
 
 SOURCE_ROOT = source_root()
@@ -532,8 +533,17 @@ async def api_llm_models(request: Request) -> JSONResponse:
     return JSONResponse(result)
 
 
+@app.post("/api/settings/workbuddy/detect")
+def api_detect_workbuddy() -> JSONResponse:
+    return JSONResponse({"candidates": discover_clients()})
+
+
 @app.post("/api/settings")
 def api_settings(
+    workbuddy_config_present: Annotated[str, Form()] = "",
+    workbuddy_executable: Annotated[str, Form()] = "",
+    workbuddy_project_name: Annotated[str, Form()] = "",
+    workbuddy_desktop_enabled: Annotated[str, Form()] = "",
     erp_url: Annotated[str, Form()] = "",
     erp_username: Annotated[str, Form()] = "",
     erp_password: Annotated[str, Form()] = "",
@@ -609,6 +619,10 @@ def api_settings(
 
     snapshot = save_runtime_config(
         {
+            **({"workbuddy_executable": workbuddy_executable,
+                "workbuddy_project_name": workbuddy_project_name,
+                "workbuddy_desktop_enabled": normalize_checkbox(workbuddy_desktop_enabled)}
+               if normalize_checkbox(workbuddy_config_present) == "true" else {}),
             "erp_url": erp_url,
             "erp_username": erp_username,
             "erp_password": erp_password,
@@ -911,7 +925,7 @@ def dingtalk_run_options(list_number: str = "", pipeline: str = "workbuddy") -> 
         workbuddy = settings.get("workbuddy", {}) or {}
         if not workbuddy.get("desktop_enabled", False):
             raise ValueError("WorkBuddy 客户端自动投递未启用。")
-        if not Path(str(workbuddy.get("executable") or "")).is_file():
+        if client_path(str(workbuddy.get("executable") or "")) is None:
             raise ValueError("WorkBuddy 程序路径无效，请先在本机完成客户端配置。")
     target_list_number = str(list_number or "").strip()
     options = run_options(
