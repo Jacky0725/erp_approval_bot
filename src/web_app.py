@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import asyncio
+from contextlib import suppress
 import os
 import json
+import hashlib
 from contextlib import asynccontextmanager
 from pathlib import Path
 import subprocess
@@ -10,12 +13,13 @@ import threading
 import time
 from typing import Annotated
 
-from fastapi import FastAPI, Form, HTTPException, Request
+from fastapi import FastAPI, Form, HTTPException, Request, UploadFile, File
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from dotenv import load_dotenv
 
+from app_info import app_version
 from llm_providers import fetch_provider_models, provider_options
 from dingtalk_stream_bot import DingTalkStreamBot
 from task_control import TaskControl
@@ -31,6 +35,7 @@ from update_checker import (
 from memory_sync import MemorySyncError
 from erp_api_client import normalize_erp_write_backend
 from web_runner import (
+    CONFIG_PATH,
     ENV_PATH,
     ROOT_DIR,
     approval_summary,
@@ -62,6 +67,7 @@ from web_runner import (
 from data_health import apply_data_health_repairs, data_health_summary
 from runtime_paths import source_root
 from config_migration import migrate_security_defaults
+import config_transfer
 from web_security import SECURITY_HEADERS, WebSecurity, normalize_run_confirmation_options
 from reagent_page import normalize_todo_list_number
 from workbuddy_discovery import WorkBuddyConfigError, client_path, discover_clients
@@ -72,6 +78,7 @@ TEMPLATES_DIR = SOURCE_ROOT / "src" / "templates"
 STATIC_DIR = SOURCE_ROOT / "src" / "static"
 LOG_DIR = ROOT_DIR / "data" / "logs"
 
+config_transfer.recover_pending(ROOT_DIR, CONFIG_PATH, ENV_PATH)
 load_dotenv(ENV_PATH, override=True)
 security = WebSecurity(ticket_ttl_seconds=60)
 update_operation_lock = threading.Lock()
@@ -90,11 +97,21 @@ async def lifespan(app: FastAPI):
     migrated = ROOT_DIR.resolve() != SOURCE_ROOT.resolve() and migrate_security_defaults(ROOT_DIR)
     if migrated:
         load_dotenv(ENV_PATH, override=True)
+    manager.recover_workbuddy_on_startup()
+    async def finish_startup_recovery():
+        while manager._unsettled_workbuddy_startup() and not manager.running:
+            await asyncio.sleep(5)
+            await asyncio.to_thread(manager.recover_workbuddy_on_startup)
+
+    recovery = asyncio.create_task(finish_startup_recovery())
     scheduler.start()
     dingtalk_stream_bot.start()
     try:
         yield
     finally:
+        recovery.cancel()
+        with suppress(asyncio.CancelledError):
+            await recovery
         dingtalk_stream_bot.stop()
         scheduler.stop()
 
@@ -104,8 +121,9 @@ app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 templates = Jinja2Templates(directory=TEMPLATES_DIR)
 
 
-@app.exception_handler(ValueError)
-async def value_error_response(_: Request, error: ValueError) -> JSONResponse:
+@app.exception_handler(config_transfer.ConfigTransferError)
+@app.exception_handler(WorkBuddyConfigError)
+async def configuration_error_response(_: Request, error: config_transfer.ConfigTransferError) -> JSONResponse:
     """Expose configuration validation failures without a server-error page."""
     return JSONResponse(status_code=422, content={"detail": str(error)})
 
@@ -283,6 +301,13 @@ def api_status() -> JSONResponse:
             "dingtalk_stream": dingtalk_stream_bot.status(),
         }
     )
+
+
+@app.get("/api/health")
+def api_health() -> JSONResponse:
+    executable = Path(sys.executable).resolve()
+    install_root = executable.parent.parent.parent if getattr(sys, "frozen", False) else ROOT_DIR.resolve()
+    return JSONResponse({"ok": True, "version": app_version(), "install_root": str(install_root)})
 
 
 @app.get("/api/approval_summary")
@@ -705,6 +730,58 @@ def api_settings(
     )
 
 
+@app.post("/api/settings/export")
+def api_export_configuration(passphrase: Annotated[str, Form()]) -> Response:
+    with manager._lock:
+        profile = config_transfer.export_profile(load_settings(), ENV_PATH, environment=os.environ)
+    payload = config_transfer.encrypt_profile(profile, passphrase)
+    return Response(payload, media_type="application/octet-stream",
+                    headers={"Content-Disposition": 'attachment; filename="reagent-approval.rabconfig"'})
+
+
+@app.post("/api/settings/import/preview")
+def api_preview_configuration(profile: Annotated[UploadFile, File()], passphrase: Annotated[str, Form()]) -> JSONResponse:
+    blob = profile.file.read(config_transfer.MAX_BYTES + 1)
+    value = config_transfer.decrypt_profile(blob, passphrase)
+    with manager._lock:
+        _, _, changes = config_transfer.merge_profile(value, load_settings(), ENV_PATH)
+        binding = configuration_binding(blob)
+    ticket = security.issue_ticket("settings_import", binding)["ticket"]
+    return JSONResponse({"changes": changes, "ticket": ticket})
+
+
+def configuration_binding(blob: bytes) -> dict[str, str]:
+    return {"file": hashlib.sha256(blob).hexdigest(),
+            "target": config_transfer.config_revision(CONFIG_PATH, ENV_PATH)}
+
+
+@app.post("/api/settings/import")
+def api_import_configuration(profile: Annotated[UploadFile, File()], passphrase: Annotated[str, Form()],
+                             ticket: Annotated[str, Form()]) -> JSONResponse:
+    from workbuddy_bridge import WorkBuddyBridge
+
+    blob = profile.file.read(config_transfer.MAX_BYTES + 1)
+    value = config_transfer.decrypt_profile(blob, passphrase)
+    with manager._lock:
+        if manager.running or TaskControl(ROOT_DIR).has_unsettled_recovery():
+            raise HTTPException(status_code=409, detail="存在正在运行或等待恢复的任务，不能导入配置。")
+        settings = load_settings()
+        bridge = WorkBuddyBridge(ROOT_DIR, settings)
+        with bridge.exclusive():
+            if bridge.has_unsettled_batch():
+                raise HTTPException(status_code=409, detail="存在未收尾的 WorkBuddy 批次或 ERP 操作，不能导入配置。")
+            security.consume_ticket(ticket, "settings_import", configuration_binding(blob))
+            merged, updates, changes = config_transfer.merge_profile(value, settings, ENV_PATH)
+            if changes:
+                config_transfer.apply_profile(ROOT_DIR, CONFIG_PATH, ENV_PATH, merged, updates)
+                load_dotenv(ENV_PATH, override=True)
+        if changes:
+            scheduler.reload()
+    if changes:
+        dingtalk_stream_bot.reload()
+    return JSONResponse({"saved": True, "changes": len(changes)})
+
+
 @app.post("/api/run")
 def api_run(
     request: Request,
@@ -718,6 +795,7 @@ def api_run(
     erp_write_backend: Annotated[str, Form()] = "web_ui",
     pipeline_version: Annotated[str, Form()] = "v1",
     auto_pass: Annotated[str, Form()] = "false",
+    workbuddy_batch_size: Annotated[str, Form()] = "",
     operation_ticket: Annotated[str, Form()] = "",
 ) -> JSONResponse:
     if pipeline_version.strip().lower() not in {"", "v1"}:
@@ -737,6 +815,7 @@ def api_run(
         "erp_write_backend": erp_write_backend,
         "pipeline_version": "v1",
         "auto_pass": auto_pass,
+        "workbuddy_batch_size": workbuddy_batch_size,
     })
     if request.headers.get("host") != "testserver":
         security.consume_ticket(operation_ticket, "run", raw_options)
@@ -755,6 +834,7 @@ def api_run(
             and options["PROCESS_ALL_TODOS"] == "true"
             and (load_settings().get("workbuddy") or {}).get("freeze_web_todo_scope") is True):
         options["FREEZE_TODO_SCOPE"] = "true"
+    options.update(workbuddy_run_size(raw_options))
     return JSONResponse(manager.start(action, options))
 
 
@@ -767,7 +847,35 @@ async def api_run_prepare(request: Request) -> JSONResponse:
     if requested_pipeline != "v1":
         raise HTTPException(status_code=400, detail="审批链路已固定为 V1，V2/V3 已停用。")
     payload["pipeline_version"] = "v1"
-    return JSONResponse(security.issue_ticket("run", normalize_run_confirmation_options(payload)))
+    options = normalize_run_confirmation_options(payload)
+    workbuddy_run_size(options)
+    return JSONResponse(security.issue_ticket("run", options))
+
+
+def workbuddy_run_size(options: dict[str, str]) -> dict[str, str]:
+    from workbuddy_bridge import WEB_BATCH_TIMEOUTS, web_batch_sizes
+
+    size = options.get("workbuddy_batch_size", "20" if options.get("action") == "workbuddy_loop" else None)
+    if size is None:
+        return {}
+    if size not in {"20", "30", "50"}:
+        raise HTTPException(status_code=422, detail="WorkBuddy 每批只能选择 20、30 或 50 条。")
+    amount = int(size)
+    config = load_settings().get("workbuddy") or {}
+    accepted = web_batch_sizes(config)
+    canary = config.get("batch_size_canary") or {}
+    trial = (
+        amount not in accepted and config.get("fixed_result_writer") is True
+        and canary.get("size") == amount and (amount != 50 or 30 in accepted)
+        and canary.get("list_number") and options.get("target_list_numbers") == canary["list_number"]
+        and options.get("process_all_todos") == "false" and options.get("approval_write_mode") == "generate_library"
+    )
+    if amount not in accepted and not trial:
+        raise HTTPException(status_code=422, detail=f"WorkBuddy 每批 {size} 条尚未正式放行。")
+    result = {"WORKBUDDY_BATCH_SIZE": size, "WORKBUDDY_RESULT_TIMEOUT_SECONDS": str(WEB_BATCH_TIMEOUTS[amount])}
+    if trial:
+        result["WORKBUDDY_CANARY_BATCH"] = "true"
+    return result
 
 
 @app.post("/api/stop")

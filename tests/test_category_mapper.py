@@ -4,6 +4,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import pandas as pd
 
@@ -19,9 +20,32 @@ from category_mapper import (  # noqa: E402
     to_erp_property,
     to_rule_category,
 )
+import category_mapper  # noqa: E402
 
 
 class CategoryMapperTest(unittest.TestCase):
+    def test_rule_categories_reads_once_per_file_signature(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "config" / "rules_structured.xlsx"
+            path.parent.mkdir(parents=True)
+            with pd.ExcelWriter(path, engine="openpyxl") as writer:
+                pd.DataFrame([{"category": "普通类", "priority": 1, "enabled": True}]).to_excel(
+                    writer, sheet_name="categories", index=False
+                )
+            settings = {"paths": {"structured_rules_excel": str(path)}}
+            original = pd.read_excel
+            with patch.object(category_mapper.pd, "read_excel", wraps=original) as reader:
+                self.assertIn("普通类", [item["rule_category"] for item in category_mapping_summary(settings, root)["mappings"]])
+                category_mapping_summary(settings, root)
+                self.assertEqual(reader.call_count, 1)
+                with pd.ExcelWriter(path, engine="openpyxl") as writer:
+                    pd.DataFrame([{"category": "未知类", "priority": 1, "enabled": True}]).to_excel(
+                        writer, sheet_name="categories", index=False
+                    )
+                self.assertEqual(category_mapper.rule_categories(settings, root), ["未知类"])
+                self.assertEqual(reader.call_count, 2)
+
     def test_erp_options_come_from_settings(self) -> None:
         settings = {
             "reagent": {

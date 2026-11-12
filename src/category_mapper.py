@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -88,19 +89,25 @@ def rule_categories(settings: dict[str, Any] | None = None, root_dir: Path | Non
     path = Path(rules_path)
     if not path.is_absolute():
         path = root_dir / path
-    if not path.exists():
+    try:
+        stat = path.stat()
+    except FileNotFoundError:
         return []
+    return list(_rule_categories_from_file(str(path.resolve()), stat.st_size, stat.st_mtime_ns))
 
+
+@lru_cache(maxsize=16)
+def _rule_categories_from_file(path: str, size: int, mtime_ns: int) -> tuple[str, ...]:
     frame = pd.read_excel(path, sheet_name="categories", dtype=str, engine="openpyxl").fillna("")
     if "category" not in frame.columns:
-        return []
+        return ()
     if "enabled" in frame.columns:
         enabled = frame["enabled"].astype(str).str.strip().str.lower()
         frame = frame[~enabled.isin({"false", "0", "no", "n"})]
     if "priority" in frame.columns:
         frame["_priority_num"] = pd.to_numeric(frame["priority"], errors="coerce")
         frame = frame.sort_values("_priority_num", kind="stable").drop(columns=["_priority_num"])
-    return [str(value or "").strip() for value in frame["category"].tolist() if str(value or "").strip()]
+    return tuple(str(value or "").strip() for value in frame["category"].tolist() if str(value or "").strip())
 
 
 def erp_candidates_for_rule_category(category: str, settings: dict[str, Any] | None = None) -> list[str]:

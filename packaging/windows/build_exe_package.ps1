@@ -34,22 +34,16 @@ $BrowserRoot = Join-Path $env:LOCALAPPDATA "ms-playwright"
 if (!(Test-Path $Launcher)) {
     throw "Launcher not found: $Launcher"
 }
-function Find-PlaywrightBrowserDir([string]$Pattern) {
-    if (!(Test-Path $BrowserRoot)) {
-        return $null
-    }
-    Get-ChildItem $BrowserRoot -Directory -Filter $Pattern |
-        Sort-Object LastWriteTime -Descending |
-        Select-Object -First 1 -ExpandProperty FullName
+$BrowserRevisions = & $Python (Join-Path $PSScriptRoot "playwright_browser_revision.py") | ConvertFrom-Json
+if ($LASTEXITCODE -ne 0 -or !$BrowserRevisions.headless -or !$BrowserRevisions.chromium) {
+    throw "Could not read the Chromium revisions required by Playwright."
 }
-
-$HeadlessShellDir = Find-PlaywrightBrowserDir "chromium_headless_shell-*"
-$FullChromiumDir = Find-PlaywrightBrowserDir "chromium-*"
-if ($BrowserBundle -ne "none" -and (!$HeadlessShellDir -or ($BrowserBundle -eq "full" -and !$FullChromiumDir))) {
+$HeadlessShellDir = Join-Path $BrowserRoot "chromium_headless_shell-$($BrowserRevisions.headless)"
+$FullChromiumDir = Join-Path $BrowserRoot "chromium-$($BrowserRevisions.chromium)"
+if ($BrowserBundle -ne "none" -and (!(Test-Path $HeadlessShellDir) -or ($BrowserBundle -eq "full" -and !(Test-Path $FullChromiumDir)))) {
     Write-Host "Required Playwright Chromium runtime was not found. Installing chromium package..."
     & $Python -m playwright install chromium
-    $HeadlessShellDir = Find-PlaywrightBrowserDir "chromium_headless_shell-*"
-    $FullChromiumDir = Find-PlaywrightBrowserDir "chromium-*"
+    if ($LASTEXITCODE -ne 0) { throw "Could not install the Chromium revision required by Playwright." }
 }
 if ($BrowserBundle -ne "none" -and (!$HeadlessShellDir -or !(Test-Path $HeadlessShellDir))) {
     throw "Playwright headless Chromium shell was not found under: $BrowserRoot"
@@ -72,6 +66,7 @@ if ($LASTEXITCODE -ne 0) { throw "Could not generate safe packaged settings." }
 $addData = @(
     "$RepoRoot\src\templates;app\src\templates",
     "$RepoRoot\src\static;app\src\static",
+    "$RepoRoot\src\workbuddy_result_writer.py;app\src",
     "$DefaultSettings;app\config",
     "$RepoRoot\config\rules.xlsx;app\config",
     "$RepoRoot\config\rules_structured.xlsx;app\config",

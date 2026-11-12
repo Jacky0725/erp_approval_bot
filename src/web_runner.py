@@ -74,6 +74,37 @@ BEFORE_SCOPE_PHASES = PRE_LOGIN_PHASES | {
 }
 
 
+def worker_may_be_alive(pid: int | None) -> bool:
+    if pid is None:
+        return False
+    if not isinstance(pid, int) or pid <= 0:
+        return True
+    if os.name != "nt":
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        except OSError:
+            return True
+        return True
+    import ctypes
+    from ctypes import wintypes
+
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+    kernel.OpenProcess.restype = wintypes.HANDLE
+    kernel.WaitForSingleObject.argtypes = (wintypes.HANDLE, wintypes.DWORD)
+    kernel.WaitForSingleObject.restype = wintypes.DWORD
+    kernel.CloseHandle.argtypes = (wintypes.HANDLE,)
+    handle = kernel.OpenProcess(0x00100000, False, pid)
+    if not handle:
+        return ctypes.get_last_error() != 87
+    try:
+        return kernel.WaitForSingleObject(handle, 0) != 0
+    finally:
+        kernel.CloseHandle(handle)
+
+
 ensure_runtime_layout()
 ROOT_DIR = runtime_root()
 SOURCE_ROOT = source_root()
@@ -288,8 +319,14 @@ class AutomationJobManager:
               resume_task_id: str = "") -> dict[str, Any]:
         options = options or {}
         with self._lock:
+            from config_transfer import import_pending
+
+            if import_pending(self.root_dir):
+                return {"started": False, "message": "配置恢复尚未完成，请先重启控制台以恢复本机配置。"}
             if self.running:
                 return {"started": False, "message": "已有任务正在运行。"}
+            if self._unsettled_workbuddy_startup():
+                return {"started": False, "message": "原 WorkBuddy 进程仍待核对，暂不能启动新任务。"}
 
             task_id = uuid.uuid4().hex
             try:
@@ -379,7 +416,10 @@ class AutomationJobManager:
         if not self.running and state in {"running", "stop_requested"}:
             state = "needs_review"
         labels = {"running": "运行中", "stop_requested": "等待安全停止", "stopped": "已人工停止", "needs_review": "结果待核对", "completed": "已正常结束", "failed": "失败", "resuming": "已进入人工恢复"}
-        return {"task_id": task_id, "state": state, "label": labels.get(state, state), "phase": task["phase"], "details": task["details"]}
+        label = labels.get(state, state)
+        if state == "stopped" and (reason := task["details"].get("automatic_recovery_blocked")):
+            label = f"自动接续暂停。{reason}"
+        return {"task_id": task_id, "state": state, "label": label, "phase": task["phase"], "details": task["details"]}
 
     def resume_stopped_task(self, task_id: str) -> dict[str, Any]:
         task = TaskControl(self.root_dir).get(task_id)
@@ -404,6 +444,8 @@ class AutomationJobManager:
         with self._lock:
             if not self.running:
                 return {"stopped": False, "message": "No automation task is running."}
+            if self.action == "workbuddy_loop" and self._task_id:
+                TaskControl(self.root_dir).record_details(self._task_id, operator_force_stop=True)
             self._stop_requested = True
             process = self._process
 
@@ -500,6 +542,73 @@ class AutomationJobManager:
                 "workflow": workflow_summary(log_tail, running=running, success=success, error=error),
             }
 
+    def recover_workbuddy_on_startup(self) -> None:
+        state_path = self.root_dir / "data" / "logs" / "web_run_state.yaml"
+        if not state_path.is_file():
+            return
+        try:
+            prior = yaml.safe_load(state_path.read_text(encoding="utf-8")) or {}
+        except (OSError, yaml.YAMLError):
+            return
+        if not isinstance(prior, dict):
+            return
+        task_id = str(prior.get("task_id") or "")
+        if prior.get("action") != "workbuddy_loop" or not prior.get("running") or not task_id:
+            return
+        control = TaskControl(self.root_dir)
+        task = control.get(task_id)
+        if not task.get("details", {}).get("automatic_recovery"):
+            return
+        with self._lock:
+            if self.running:
+                return
+            from workbuddy_bridge import WorkBuddyBridge
+            settings = load_settings()
+            try:
+                with WorkBuddyBridge(self.root_dir, settings).exclusive():
+                    if worker_may_be_alive(control.get(task_id).get("details", {}).get("worker_pid")):
+                        return
+                    options = control.claim_workbuddy_restart(task_id, settings, before_scope=BEFORE_SCOPE_PHASES)
+            except RuntimeError:
+                return
+            if options is None:
+                return
+            self.running = True
+            self._task_id, self.action = task_id, "workbuddy_loop"
+            self.started_at = str(prior.get("started_at") or datetime.now().isoformat(timespec="seconds"))
+            self._last_action, self._last_options = self.action, options
+            old_log = Path(str(prior.get("run_log_path") or "")).resolve()
+            log_root = (self.root_dir / "data" / "logs" / "runs").resolve()
+            self._run_log_path = str(old_log if old_log.is_relative_to(log_root) and old_log.is_file()
+                                     else new_run_log_path(self.action, self.root_dir))
+            self.lines = current_run_lines(self._run_log_path)[-160:]
+            self._persist_state()
+            self._thread = threading.Thread(target=self._run, args=(self.action, options, {
+                "task_id": task_id, "started_at": self.started_at, "recovered": True}),
+                name="approval-web-recovery", daemon=True)
+            try:
+                self._thread.start()
+            except Exception:
+                self.running = False
+                self.success = False
+                self.error = "自动恢复工作线程启动失败，请核对原任务。"
+                control.finish(task_id, "stopped")
+                self._persist_state()
+
+    def _unsettled_workbuddy_startup(self) -> bool:
+        state_path = self.root_dir / "data" / "logs" / "web_run_state.yaml"
+        if not state_path.is_file():
+            return False
+        try:
+            prior = yaml.safe_load(state_path.read_text(encoding="utf-8")) or {}
+        except (OSError, yaml.YAMLError):
+            return False
+        if not isinstance(prior, dict) or prior.get("action") != "workbuddy_loop" or not prior.get("running"):
+            return False
+        task = TaskControl(self.root_dir).get(str(prior.get("task_id") or ""))
+        details = task.get("details") or {}
+        return bool(task.get("state") == "running" and details.get("automatic_recovery"))
+
     def _run(self, action: str, options: dict[str, str], task_context: dict[str, Any] | None = None) -> None:
         log_dir = self.root_dir / "data" / "logs"
         log_dir.mkdir(parents=True, exist_ok=True)
@@ -510,10 +619,30 @@ class AutomationJobManager:
         memory_signature_before = memory_file_signature(self.root_dir) if action == "suggestions" else None
 
         try:
+            replayed = bool((task_context or {}).get("recovered"))
             if action == "todo_export":
                 clear_todo_task_cache(self.root_dir)
             writer.write(f"{datetime.now().isoformat(timespec='seconds')} START {action}\n")
+            if replayed:
+                writer.write("[workbuddy] Web UI 重启后接续原任务。\n")
             return_code = self._run_worker_process(action, options, writer)
+            if action == "workbuddy_loop" and (return_code < 0 or return_code >= 0x80000000):
+                with self._lock:
+                    retry = None
+                    if not self._stop_requested and options.get("AUTOMATION_TASK_ID"):
+                        from workbuddy_bridge import WorkBuddyBridge
+                        settings = load_settings()
+                        with WorkBuddyBridge(self.root_dir, settings).exclusive():
+                            retry = TaskControl(self.root_dir).claim_workbuddy_restart(
+                                options["AUTOMATION_TASK_ID"], settings, before_scope=BEFORE_SCOPE_PHASES)
+                if retry is not None:
+                    replayed = True
+                    writer.write(f"[workbuddy] 审批进程异常退出 ({return_code})，按原范围接续一次。\n")
+                    writer.failure_reason = ""
+                    return_code = self._run_worker_process(action, retry, writer)
+                    if return_code < 0 or return_code >= 0x80000000:
+                        TaskControl(self.root_dir).claim_workbuddy_restart(
+                            options["AUTOMATION_TASK_ID"], load_settings(), before_scope=BEFORE_SCOPE_PHASES)
             control = TaskControl(self.root_dir).get((task_context or {}).get("task_id", "")) if (task_context or {}).get("task_id") else {}
             if return_code == SAFE_STOP_EXIT_CODE and control.get("state") == "stopped":
                 success = None
@@ -524,7 +653,7 @@ class AutomationJobManager:
                 error = "用户停止运行"
                 writer.write(f"{datetime.now().isoformat(timespec='seconds')} STOPPED {action}\n")
             elif return_code == 0:
-                failure_reason = writer.failure_reason or automation_failure_reason(self.lines)
+                failure_reason = writer.failure_reason or ("" if replayed else automation_failure_reason(self.lines))
                 if failure_reason:
                     success = False
                     error = failure_reason
@@ -561,7 +690,9 @@ class AutomationJobManager:
                     existing = registry.get(result_context["task_id"])
                     parent = options.get("RESUME_STOPPED_TASK_ID")
                     unstarted = existing.get("phase") in PRE_LOGIN_PHASES
-                    if existing.get("state") != "stopped":
+                    if existing.get("details", {}).get("automatic_recovery") and existing.get("details", {}).get("operator_force_stop"):
+                        registry.finish(result_context["task_id"], "stopped")
+                    elif existing.get("state") != "stopped":
                         needs_review = existing.get("state") == "stop_requested" or (parent and not unstarted)
                         registry.finish(result_context["task_id"], "completed" if success else "needs_review" if needs_review else "failed")
                         if success is False and parent and unstarted:
@@ -726,6 +857,9 @@ class AutomationJobManager:
         with self._lock:
             if self._stop_requested:
                 return 130
+            tracked = action == "workbuddy_loop" and options.get("AUTOMATION_TASK_ID")
+            if tracked:
+                TaskControl(self.root_dir).record_details(tracked, worker_pid=None, worker_launching=True)
             popen_kwargs: dict[str, Any] = {}
             if os.name == "nt":
                 startupinfo = subprocess.STARTUPINFO()
@@ -751,6 +885,12 @@ class AutomationJobManager:
             if self._stop_requested:
                 self._terminate_process_tree(process)
         try:
+            if tracked:
+                try:
+                    TaskControl(self.root_dir).record_details(tracked, worker_pid=process.pid, worker_launching=False)
+                except Exception:
+                    self._terminate_process_tree(process)
+                    raise
             assert process.stdout is not None
             for line in process.stdout:
                 writer.write(line)
@@ -865,6 +1005,9 @@ class AutomationJobManager:
             "RESUME_STOPPED_TASK_ID",
             "ERP_WRITE_BACKEND",
             "APPROVAL_WRITE_BATCH_SIZE",
+            "WORKBUDDY_BATCH_SIZE",
+            "WORKBUDDY_RESULT_TIMEOUT_SECONDS",
+            "WORKBUDDY_CANARY_BATCH",
         }
         return {
             key: value
@@ -1856,7 +1999,6 @@ def review_queue_summary(
         return {"exists": False, "rows": 0, "pending": 0, "preview": [], "list_numbers": []}
 
     try:
-        migrate_pending_review_reasons(path)
         payload = cached_file_payload("review_queue", path, lambda: build_review_queue_payload(path))
     except Exception as exc:  # noqa: BLE001
         return {"exists": True, "error": str(exc), "rows": 0, "pending": 0, "preview": [], "list_numbers": []}
@@ -1905,6 +2047,7 @@ class DateSortKey:
 
 def build_review_queue_payload(path: Path) -> dict[str, Any]:
     frame = canonicalize_review_queue_columns(pd.read_excel(path, dtype=str).fillna(""))
+    migrate_pending_review_reasons(path, frame=frame)
     settings = load_settings()
 
     def first_existing(row: pd.Series, columns: list[str]) -> str:
@@ -2756,6 +2899,8 @@ def normalize_pipeline_version(value: object, *, emit_deprecation: bool = False)
 
 
 def runtime_config_snapshot() -> dict[str, Any]:
+    from workbuddy_bridge import web_batch_sizes
+
     load_dotenv(ENV_PATH)
     settings = load_settings()
     approval = settings.get("approval", {}) or {}
@@ -2800,6 +2945,8 @@ def runtime_config_snapshot() -> dict[str, Any]:
         "workbuddy_project_name": str(workbuddy_settings.get("project_name") or ""),
         "workbuddy_path_valid": client_path(str(workbuddy_settings.get("executable") or "")) is not None,
         "workbuddy_batch_size": workbuddy_settings.get("batch_size", 20),
+        "workbuddy_accepted_batch_sizes": web_batch_sizes(workbuddy_settings),
+        "workbuddy_batch_size_canary": (workbuddy_settings.get("batch_size_canary") or {}).get("size"),
         "update_token_configured": bool(
             os.getenv("REAGENT_APPROVAL_UPDATE_TOKEN", "").strip()
             or os.getenv("GITHUB_TOKEN", "").strip()
@@ -2913,7 +3060,10 @@ def runtime_config_snapshot() -> dict[str, Any]:
 
 def save_runtime_config(form: dict[str, str]) -> dict[str, Any]:
     with manager._lock:
+        from config_transfer import import_pending
 
+        if import_pending(manager.root_dir):
+            raise ValueError("配置恢复尚未完成，请先重启控制台以恢复本机配置。")
         if manager.running:
             raise ValueError("当前有任务正在运行，不能修改基础设置。")
         return _save_runtime_config(form)

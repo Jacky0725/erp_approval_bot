@@ -9,6 +9,9 @@ workbuddy:
   compact_rules: true
   freeze_web_todo_scope: true
   batch_size: 20
+  fixed_result_writer: true
+  auto_recover: true
+  accepted_batch_sizes: [20]
   batch_dir: data/workbuddy
   max_write_attempts: 2
   result_timeout_seconds: 900

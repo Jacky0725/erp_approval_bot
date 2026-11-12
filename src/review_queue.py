@@ -1210,7 +1210,7 @@ def manual_review_reason_cn(text: Any, evidence_source_type: str = "") -> str:
     return "试剂名称、来源证据或规则判定存在不确定性，需要人工核对物化特性。"
 
 
-def migrate_pending_review_reasons(path: Path) -> bool:
+def migrate_pending_review_reasons(path: Path, *, frame: pd.DataFrame | None = None) -> bool:
     """Localize pending review reasons once, preserving original audit text."""
     path = Path(path)
     if not path.exists():
@@ -1222,10 +1222,11 @@ def migrate_pending_review_reasons(path: Path) -> bool:
         return False
     if _MIGRATED_REVIEW_SIGNATURES.get(cache_key) == signature:
         return False
-    try:
-        frame = canonicalize_review_queue_columns(pd.read_excel(path, dtype=str).fillna(""))
-    except Exception:
-        return False
+    if frame is None:
+        try:
+            frame = canonicalize_review_queue_columns(pd.read_excel(path, dtype=str).fillna(""))
+        except Exception:
+            return False
     if frame.empty or "reason" not in frame.columns:
         _MIGRATED_REVIEW_SIGNATURES[cache_key] = signature
         return False

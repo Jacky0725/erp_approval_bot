@@ -12,7 +12,7 @@ import json
 import os
 import time
 from pathlib import Path
-from typing import Any, Iterable, Iterator
+from typing import Any, Callable, Iterable, Iterator
 from uuid import uuid4
 
 import pandas as pd
@@ -21,14 +21,19 @@ from openpyxl import load_workbook
 from audit_logger import AuditLogger
 from category_mapper import erp_candidates_for_rule_category, erp_property_options
 from excel_exports import write_excel_atomic
+from runtime_paths import source_root
 from task_control import checkpoint, TaskControl
+from workbuddy_result_writer import (
+    FIXED_WRITER_INSTRUCTIONS, JUDGMENTS_NAME, RESULT_COLUMNS, WRITER_NAME, read_judgments, valid_basis,
+)
 from workbuddy_rules import copy_compact, publish_compact, verify_compact
 
 
-RESULT_COLUMNS = ["批次ID", "记录ID", "试剂名称", "物化特性类别", "判断依据"]
 REVIEW_CATEGORIES = {"", "需人工复核", "无法判定", "证据不足"}
 EMPTY_PROPERTIES = {"", "-", "—"}
 MAX_BATCH_SIZE = 100
+WEB_BATCH_TIMEOUTS = {20: 900, 30: 1200, 50: 1500}
+SUPERSEDED_FAILURE = "superseded_failed"
 LIBRARY_DONE = {"created_verified", "existing_unchanged"}
 
 
@@ -45,20 +50,8 @@ def pending_model_review(item: dict[str, Any]) -> bool:
     return item.get("status") == "review" and item.get("error_code") == "MODEL_UNRESOLVED"
 
 
-LIBRARY_DONE = {"created_verified", "existing_unchanged"}
-
-
-def batch_in_scope(state: dict[str, Any], scope: set[str] | None, *, reject_partial: bool = False) -> bool:
-    if scope is None:
-        return True
-    numbers = {item["input"]["试剂清单号"] for item in state["items"]}
-    if reject_partial and numbers & scope and not numbers <= scope:
-        raise RuntimeError(f"批次 {state['batch_id']} 与所选清单部分重合，请选择原批次的全部清单：{', '.join(sorted(numbers))}。")
-    return numbers <= scope
-
-
-def pending_model_review(item: dict[str, Any]) -> bool:
-    return item.get("status") == "review" and item.get("error_code") == "MODEL_UNRESOLVED"
+def requires_review(state: dict[str, Any], item: dict[str, Any]) -> bool:
+    return pending_model_review(item) or item["key"] in (state.get("replacement") or {}).get("identity_review", [])
 
 
 def configured_batch_size(config: dict[str, Any]) -> int:
@@ -69,6 +62,13 @@ def configured_batch_size(config: dict[str, Any]) -> int:
     if not 1 <= size <= MAX_BATCH_SIZE:
         raise ValueError("workbuddy.batch_size 必须是 1–100 的整数。")
     return size
+
+
+def web_batch_sizes(config: dict[str, Any]) -> list[int]:
+    accepted = config.get("accepted_batch_sizes") or []
+    if config.get("fixed_result_writer") is not True or 30 not in accepted:
+        return [20]
+    return [20, 30, 50] if 50 in accepted else [20, 30]
 
 
 def text(value: Any) -> str:
@@ -118,6 +118,12 @@ class WorkBuddyBridge:
         version = state["rules_sha256"]
         if hashlib.sha256((path / "rules.xlsx").read_bytes()).hexdigest() != version:
             raise ValueError("本批规则快照被修改，禁止投递。")
+        fixed_writer = state.get("result_writer_sha256")
+        if fixed_writer and hashlib.sha256((path / WRITER_NAME).read_bytes()).hexdigest() != fixed_writer:
+            raise ValueError("本批固定写表脚本被修改，禁止投递。")
+        delivery = FIXED_WRITER_INSTRUCTIONS if fixed_writer else (
+            "使用 Python/openpyxl 读输入和模板，按五列协议校验并关闭 pending 后重命名为 result.xlsx，再回复对应批次完成标记。"
+        )
         compact_sha = state.get("compact_rules_sha256")
         if compact_sha:
             try:
@@ -134,15 +140,13 @@ class WorkBuddyBridge:
                       "本批 rules.xlsx 的完整等价读取版为 rules_compact。"
                       f"源版本 SHA-256 为 {version}。先读取 rules_compact/manifest.json 核对版本，"
                       "再按编号每次工具调用只读一个 part 文本，完整读取所有段。保留各表的原列序和规则优先级。"
-                      "禁止合并输出各段、重读 XLSX 或查阅旧结果。使用 Python/openpyxl 读输入和模板，"
-                      "按五列协议校验并关闭 pending 后重命名为 result.xlsx，再回复对应批次完成标记。")
+                      f"禁止合并输出各段、重读 XLSX 或查阅旧结果。{delivery}")
         elif self.config.get("compact_rules") is True:
             prompt += "\n只读取本批原始 XLSX。分段完整读取规则和示例，禁止一次输出整表或引用旧批次结果。"
         followup = (f"按 WB-EXCEL-v1 续做同一会话的新批次目录：{path}。仅处理本批，不访问 ERP 或旧结果。"
                     f"本批 rules.xlsx 源 SHA-256 为 {version}。核对版本相同后沿用本会话已完整读取的规则，"
                     "包括优先级、阈值、排除条件和示例。只在需要时定向核对，不全量重读。"
-                    "若规则或版本无法确认，停止并说明。只用 Python/openpyxl 读本批输入和模板，"
-                    "按五列协议校验并关闭 pending 后重命名为 result.xlsx，再回复对应批次完成标记。")
+                    f"若规则或版本无法确认，停止并说明。{delivery}")
         return prompt, followup, "compact" if compact_sha else "xlsx"
 
     def pause_operator_batch(self, state: dict[str, Any] | None) -> None:
@@ -212,7 +216,7 @@ class WorkBuddyBridge:
                 raise RuntimeError(f"清单 {number} 上次一键匹配结果待核对，未自动重试。")
             return records
         pending_ids = {item["input"]["_erp_record_id"] for state in self.batches() for item in state["items"]
-                       if pending_model_review(item) and item["input"]["试剂清单号"] == number}
+                       if requires_review(state, item) and item["input"]["试剂清单号"] == number}
         if any(text(row.get("_erp_record_id") or row.get("id")) in pending_ids
                and text(row.get("物化特性")) in EMPTY_PROPERTIES for row in records):
             print(f"[workbuddy] 清单 {number} 含仍为空的人工复核项，跳过整表一键匹配。", flush=True)
@@ -279,6 +283,15 @@ class WorkBuddyBridge:
             batches.append(state)
         return batches
 
+    def has_unsettled_batch(self) -> bool:
+        if any(state["status"] in {"imported", "needs_attention", "operator_stopped"}
+               or state["status"] == "waiting_result" and (state.get("dispatch_state") or state.get("replacement"))
+               for state in self.batches()):
+            return True
+        matches = self.directory / "erp_matches.json"
+        return matches.is_file() and any(
+            entry["status"] != "completed" for entry in json.loads(matches.read_text(encoding="utf-8")).values())
+
     def batch_path(self, state: dict[str, Any]) -> Path:
         batch_id = state["batch_id"]
         if not batch_id or Path(batch_id).name != batch_id or any(c not in "0123456789_abcdef" for c in batch_id):
@@ -334,7 +347,7 @@ class WorkBuddyBridge:
         return problems
 
     def prepare(self, records: Iterable[dict[str, Any]], *, compact: bool = False,
-                scope: set[str] | None = None) -> dict[str, Any] | None:
+                scope: set[str] | None = None, require_full: bool = False) -> dict[str, Any] | None:
         checkpoint("准备 WorkBuddy 批次")
         existing = self.batches()
         allowed_pauses = self.authorized_pause_ids()
@@ -354,7 +367,8 @@ class WorkBuddyBridge:
         # A failed row is retried from its original batch, not silently reissued.
         known = {item["key"] for s in existing if s["rules_sha256"] == rule_digest and s["status"] != "superseded_before_dispatch" for item in s["items"]}
         pending_reviews = {(item["input"]["试剂清单号"], item["input"]["_erp_record_id"])
-                           for state in existing for item in state["items"] if pending_model_review(item)}
+                           for state in existing for item in state["items"]
+                           if requires_review(state, item)}
         stable_ids: set[tuple[str, str]] = set()
         selected = []
         size = configured_batch_size(self.config)
@@ -374,12 +388,34 @@ class WorkBuddyBridge:
             selected.append({"key": record_key(record), "input": identity, "status": "pending", "attempts": 0})
             if len(selected) == size:
                 break
+        if require_full and len(selected) != size:
+            raise RuntimeError(f"一键匹配后不足 {size} 条待判定记录，未投递试跑。")
         if not selected:
             return None
-        batch_id = datetime.now().strftime("%Y%m%d_%H%M%S_") + uuid4().hex[:8]
-        state = {"batch_id": batch_id, "status": "waiting_result", "rules_sha256": hashlib.sha256(rule_bytes).hexdigest(), "batch_size_limit": size, "items": selected}
+        return self._create_batch(selected, rule_bytes, size, compact=compact)
+
+    def _create_batch(self, selected: list[dict[str, Any]], rule_bytes: bytes, size: int, *,
+                      compact: bool, batch_id: str | None = None, replacement: dict[str, Any] | None = None) -> dict[str, Any]:
+        mode = (replacement or {}).get("prompt_mode", self.config.get("prompt_mode", "full"))
+        rule_digest = hashlib.sha256(rule_bytes).hexdigest()
+        writer = None
+        if replacement is not None and replacement.get("result_writer_sha256"):
+            writer = (self.batch_path(replacement) / WRITER_NAME).read_bytes()
+            if hashlib.sha256(writer).hexdigest() != replacement["result_writer_sha256"]:
+                raise ValueError("原批次固定写表脚本已变化。")
+        elif replacement is None and self.config.get("fixed_result_writer") is True:
+            writer = (source_root() / "src" / "workbuddy_result_writer.py").read_bytes()
+        batch_id = batch_id or self._new_batch_id()
+        state = {"batch_id": batch_id, "status": "waiting_result", "rules_sha256": rule_digest, "batch_size_limit": size, "items": selected}
+        if replacement is not None:
+            state["replaces_batch_id"] = replacement["batch_id"]
+        timeout = self.config.get("selected_result_timeout_seconds")
+        if replacement is not None:
+            timeout = replacement.get("result_timeout_seconds", timeout)
+        if timeout is not None:
+            state["result_timeout_seconds"] = timeout
         path = self.batch_path(state)
-        path.mkdir(parents=True)
+        path.mkdir(parents=True, exist_ok=replacement is not None)
         (path / "rules.xlsx").write_bytes(rule_bytes)
         if compact:
             try:
@@ -407,11 +443,75 @@ class WorkBuddyBridge:
             prompt = (f"按 WB-EXCEL-v1 执行批次目录：{path}。仅处理本批，结果保存到该目录的 result.xlsx。"
                       "本批使用本机 Python/openpyxl 读写 Excel，不使用表格子代理或编辑器 SDK，避免文件占用；"
                       "写完关闭文件后再重命名。分段完整读取规则及示例，避免整表输出截断。无需创建工作日志或额外产物。")
+        if writer is not None:
+            (path / WRITER_NAME).write_bytes(writer)
+            state["result_writer_sha256"] = hashlib.sha256(writer).hexdigest()
+            prompt = (
+                f"按 WB-EXCEL-v1 执行批次目录：{path}。仅处理本批，不访问 ERP。"
+                "用本机 Python/openpyxl 读取 input.xlsx，分段完整读取本批 rules.xlsx 并独立判定。"
+                f"{FIXED_WRITER_INSTRUCTIONS}"
+            )
         state["prompt_mode"] = mode
         (path / "prompt.txt").write_text(prompt, encoding="utf-8")
         self.save(state)
         self.audit.info(json.dumps({"event": "workbuddy_batch_prepared", "batch_id": batch_id, "rows": len(selected)}, ensure_ascii=False))
         return state
+
+    @staticmethod
+    def _new_batch_id() -> str:
+        return datetime.now().strftime("%Y%m%d_%H%M%S_") + uuid4().hex[:8]
+
+    def replace_failed_dispatch(self, state: dict[str, Any], client: Any, *, compact: bool,
+                                still_failed: Callable[[], bool] | None = None) -> bool:
+        """Reserve one replacement before materializing its files under the batch lock."""
+        path = self.batch_path(state)
+        if (state["status"] != "waiting_result" or state.get("dispatch_state") != "submitted"
+                or state.get("replaces_batch_id") or state.get("result_sha256")
+                or any(item.get("status") != "pending" or item.get("write_started") for item in state["items"])):
+            raise RuntimeError("原批次不可自动补跑，结果与检查点已保留。")
+        reservation = state.get("replacement")
+        if reservation is None and (path / "result.xlsx").exists():
+            return False
+        rules = (path / "rules.xlsx").read_bytes()
+        if hashlib.sha256(rules).hexdigest() != state["rules_sha256"] or rules != self.rules_path().read_bytes():
+            raise RuntimeError("规则版本变化，需人工核对后补跑。")
+        child = next((s for s in self.batches() if reservation and s["batch_id"] == reservation["id"]), None)
+        if child is not None and child.get("replaces_batch_id") != state["batch_id"]:
+            raise RuntimeError("补跑批次关联不一致。")
+        if child is None:
+            rows_by_list = {}
+            selected, changed = [], []
+            for item in state["items"]:
+                identity = item["input"]
+                number = identity["试剂清单号"]
+                if number not in rows_by_list:
+                    rows_by_list[number] = client.fetch_reagent_detail(number)
+                matches = [r for r in rows_by_list[number] if text(r.get("_erp_record_id")) == identity["_erp_record_id"]]
+                if (len(matches) != 1 or record_identity(matches[0]) != identity
+                        or matches[0].get("_erp_parent_state") != "wait" or "物化特性" not in matches[0]):
+                    changed.append(item["key"])
+                elif text(matches[0]["物化特性"]) in EMPTY_PROPERTIES:
+                    selected.append({"key": item["key"], "input": identity, "status": "pending", "attempts": 0})
+            if reservation is None:
+                if (path / "result.xlsx").exists() or still_failed is None or not still_failed():
+                    return False
+                reservation = state["replacement"] = {"id": self._new_batch_id(), "identity_review": changed}
+                self.save(state)
+            else:
+                reservation["identity_review"] = list(dict.fromkeys(reservation["identity_review"] + changed))
+            if selected:
+                child = self._create_batch(selected, rules, state.get("batch_size_limit", 20), compact=compact,
+                                           batch_id=reservation["id"], replacement=state)
+        state["status"] = SUPERSEDED_FAILURE
+        state["replacement"]["created"] = child is not None
+        self.save(state)
+        self.audit.info(json.dumps({"event": "workbuddy_failed_batch_replaced", "batch_id": state["batch_id"],
+                                    **state["replacement"]}, ensure_ascii=False))
+        print(f"[workbuddy] 已结束失败批次 {state['batch_id']}，补跑：{child['batch_id'] if child else '无剩余空项'}。",
+              flush=True)
+        if state["replacement"]["identity_review"]:
+            print(f"[workbuddy attention] 批次 {state['batch_id']} 有 {len(state['replacement']['identity_review'])} 条 ERP 身份或状态变化，待核对。", flush=True)
+        return True
 
     def reconcile_unsent_batch(self, state: dict[str, Any], client: Any) -> bool:
         """Retire an unsent snapshot only when ERP categories have moved on."""
@@ -441,6 +541,8 @@ class WorkBuddyBridge:
         return True
 
     def load_results(self, state: dict[str, Any]) -> None:
+        if state.get("replacement") or state["status"] == SUPERSEDED_FAILURE:
+            raise ValueError("批次已交由补跑流程，禁止导入原结果。")
         rules = self.batch_path(state) / "rules.xlsx"
         if hashlib.sha256(rules.read_bytes()).hexdigest() != state["rules_sha256"]:
             raise ValueError("本批规则快照被修改，禁止导入。")
@@ -472,6 +574,12 @@ class WorkBuddyBridge:
             if not rows or list(rows[0]) != RESULT_COLUMNS:
                 raise ValueError(f"结果表头必须为：{'、'.join(RESULT_COLUMNS)}")
             expected = {i["key"]: i for i in state["items"]}
+            judgments = None
+            if state.get("result_writer_sha256"):
+                try:
+                    judgments = read_judgments(self.batch_path(state) / JUDGMENTS_NAME, set(expected))
+                except (ValueError, OSError) as error:
+                    raise self._result_rejection(state, "", f"原始判定文件校验失败。{error}") from error
             parsed = {}
             for raw in rows[1:]:
                 if not any(v is not None for v in raw):
@@ -480,8 +588,12 @@ class WorkBuddyBridge:
                 key = values["记录ID"]
                 if key not in expected or key in parsed or values["批次ID"] != state["batch_id"]:
                     raise ValueError("结果存在重复记录、未知记录或批次不一致。")
-                if values["试剂名称"] != expected[key]["input"]["试剂名称"] or not values["判断依据"]:
-                    raise ValueError("试剂名称被修改或缺少判断依据。")
+                if values["试剂名称"] != expected[key]["input"]["试剂名称"]:
+                    raise ValueError("试剂名称被修改。")
+                if not valid_basis(values["判断依据"]):
+                    raise self._result_rejection(state, key, "判断依据为空、仅含符号或不足两个有效字符。")
+                if judgments is not None and raw[3:] != judgments[key]:
+                    raise self._result_rejection(state, key, "结果 Excel 与原始判定不一致。")
                 parsed[key] = values
             if set(parsed) != set(expected):
                 raise ValueError("结果记录不完整，禁止部分导入。")
@@ -492,6 +604,13 @@ class WorkBuddyBridge:
             self.save(state)
         finally:
             workbook.close()
+
+    def _result_rejection(self, state: dict[str, Any], key: str, reason: str) -> ValueError:
+        batch = state["batch_id"]
+        self.audit.warning(json.dumps({"event": "workbuddy_result_rejected", "batch_id": batch,
+                                       "record_id": key, "detail": reason}, ensure_ascii=False))
+        location = f"批次 {batch}" + (f" 记录 {key}" if key else "")
+        return ValueError(f"{location}：{reason}")
 
     def process(self, state: dict[str, Any], client: Any, memory: Any, *, dry_run: bool = True,
                 generate_library: bool = False, confirm_reviews: bool = False) -> dict[str, Any]:
@@ -675,6 +794,8 @@ class WorkBuddyBridge:
             return
         try:
             (self.batch_path(state) / "result.xlsx").unlink(missing_ok=True)
+            if state.get("result_writer_sha256"):
+                (self.batch_path(state) / JUDGMENTS_NAME).unlink(missing_ok=True)
             state["cleaned"] = True
             state.pop("cleanup_error", None)
         except OSError as error:

@@ -85,6 +85,17 @@ def test_web_middleware_returns_403_for_missing_csrf():
     assert response.headers["x-content-type-options"] == "nosniff"
 
 
+def test_health_endpoint_does_not_build_dashboard_runtime():
+    from app_info import app_version
+    from web_app import ROOT_DIR, app
+
+    with patch("web_app.runtime_config_snapshot", side_effect=AssertionError("heavy status called")):
+        with TestClient(app, base_url="http://localhost:8000") as client:
+            response = client.get("/api/health")
+    assert response.status_code == 200
+    assert response.json() == {"ok": True, "version": app_version(), "install_root": str(ROOT_DIR.resolve())}
+
+
 def test_run_prepare_rejects_explicit_retired_pipeline():
     from web_app import app, security
 

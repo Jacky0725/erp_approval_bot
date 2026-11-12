@@ -22,6 +22,7 @@ class FakeFormData {
   has(key) { return this.values.has(key); }
   set(key, value) { this.values.set(key, value); }
   get(key) { return this.values.get(key); }
+  delete(key) { return this.values.delete(key); }
   entries() { return this.values.entries(); }
 }
 const runContext = vm.createContext({FormData: FakeFormData});

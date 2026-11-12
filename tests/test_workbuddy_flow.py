@@ -64,6 +64,27 @@ def approval_records(number, size):
             for i in range(1, size + 1)]
 
 
+def test_unknown_identity_policy_is_in_new_batch_rule_snapshot(tmp_path):
+    from openpyxl import load_workbook
+
+    source = Path(__file__).resolve().parents[1] / "config" / "rules_structured.xlsx"
+    (tmp_path / "config").mkdir()
+    (tmp_path / "config" / "rules_structured.xlsx").write_bytes(source.read_bytes())
+    bridge = WorkBuddyBridge(tmp_path, {"workbuddy": {"batch_size": 1}})
+    record = {"试剂清单号": "SJ001", "_erp_record_id": "26", "序号": "26", "试剂名称": "绿三角"}
+    state = bridge.prepare([record], scope={"SJ001"})
+    assert state is not None
+    workbook = load_workbook(bridge.batch_path(state) / "rules.xlsx", read_only=True, data_only=True)
+    try:
+        row = next(row for row in workbook["rules"].values if row[0] == "BUS-UNK-IDENTITY-COMPOSITION-001")
+        assert "品牌、系列名、内部称谓" in row[7]
+        assert "不能唯一确认" in row[7]
+        assert "可靠CAS" in row[7]
+        assert "不得凭相似商品名称推断组成" in row[7]
+    finally:
+        workbook.close()
+
+
 def test_legacy_review_only_batch_unblocks_remaining_rows_without_resending(tmp_path, monkeypatch):
     from openpyxl import load_workbook
     from reagent_memory import ReagentMemory
@@ -227,14 +248,62 @@ def test_loop_test_mode_stops_after_one_batch_without_writes(tmp_path, monkeypat
     path = tmp_path / "data" / "workbuddy" / "abc"
     path.mkdir(parents=True)
     (path / "result.xlsx").write_bytes(b"existing output")
-    state = {"batch_id": "abc", "rules_sha256": hashlib.sha256(b"rules").hexdigest(), "status": "waiting_result", "items": [{"input": {"试剂清单号": "SJ001"}}]}
+    state = {"batch_id": "abc", "rules_sha256": hashlib.sha256(b"rules").hexdigest(), "status": "waiting_result", "dispatch_state": "submitted", "items": [{"input": {"试剂清单号": "SJ001"}}]}
     monkeypatch.setattr(WorkBuddyBridge, "batches", lambda self: [state])
     monkeypatch.setattr(approval_flow.ErpApiClient, "fetch_reagent_detail", lambda self, number: [])
     process = Mock()
     monkeypatch.setattr(WorkBuddyBridge, "process", process)
+    monkeypatch.setattr(WorkBuddyBridge, "load_results", lambda self, state: state.update(status="imported", result_sha256="test"))
     bot.run_workbuddy_loop()
     assert process.call_count == 1
     assert process.call_args.kwargs["dry_run"] is True
+
+
+@pytest.mark.parametrize("outcome,valid,submitted,changing,accepted", [
+    ("unknown", True, True, False, True),
+    ("completed", True, True, False, True),
+    ("failed", True, True, False, False),
+    ("unknown", False, True, False, False),
+    ("unknown", True, False, False, False),
+    ("unknown", True, True, True, False),
+])
+def test_existing_result_uses_file_validation_without_ui_marker(tmp_path, monkeypatch, outcome, valid, submitted, changing, accepted):
+    from openpyxl import load_workbook
+
+    bot = bot_at(tmp_path)
+    bridge = WorkBuddyBridge(tmp_path, bot.settings)
+    state = bridge.prepare([{"试剂清单号": "SJ001", "_erp_record_id": "1", "试剂名称": "测试试剂",
+                             "CAS号": "", "序号": "1", "物化特性": "-", "_erp_parent_state": "wait"}])
+    if submitted:
+        state["dispatch_state"] = "submitted"
+    if outcome != "unknown":
+        state["workbuddy_request"] = {"session": "test", "request": "test", "transcript": "test"}
+    bridge.save(state)
+    path = bridge.batch_path(state)
+    book = load_workbook(path / "result_template.xlsx")
+    book.active.cell(2, 4, "普通类")
+    book.active.cell(2, 5, "模拟判定依据" if valid else None)
+    book.save(path / "result.xlsx")
+    book.close()
+    if changing:
+        def change_result(_):
+            with (path / "result.xlsx").open("ab") as stream:
+                stream.write(b"changed")
+        monkeypatch.setattr("time.sleep", change_result)
+
+    monkeypatch.setattr("workbuddy_recovery.dispatch_outcome", lambda *args: outcome)
+    monkeypatch.setattr(WorkBuddyDesktop, "wait_for_batch_completion",
+                        lambda *args: pytest.fail("file-based completion must not wait for UI marker"))
+    if accepted:
+        bot.run_workbuddy_loop()
+        assert bridge.batches()[0]["result_sha256"]
+    else:
+        process = Mock()
+        monkeypatch.setattr(WorkBuddyBridge, "process", process)
+        with pytest.raises((RuntimeError, ValueError)):
+            bot.run_workbuddy_loop()
+        assert process.call_count == 0
+        assert bridge.batches()[0]["status"] == "waiting_result"
 
 
 def test_dingtalk_loop_freezes_scope_across_batches(tmp_path, monkeypatch):
@@ -254,7 +323,7 @@ def test_dingtalk_loop_freezes_scope_across_batches(tmp_path, monkeypatch):
     path = tmp_path / "data/workbuddy/abc"
     path.mkdir(parents=True)
     (path / "result.xlsx").write_bytes(b"fake")
-    state = {"batch_id": "abc", "rules_sha256": hashlib.sha256(b"rules").hexdigest(), "status": "waiting_result",
+    state = {"batch_id": "abc", "rules_sha256": hashlib.sha256(b"rules").hexdigest(), "status": "waiting_result", "dispatch_state": "submitted",
         "items": [{"input": {"试剂清单号": "SJ001"}}]}
     scopes = []
     def prepare(self, records, *, compact=False, scope=None):
@@ -264,6 +333,7 @@ def test_dingtalk_loop_freezes_scope_across_batches(tmp_path, monkeypatch):
     monkeypatch.setattr(WorkBuddyBridge, "prepare", prepare)
     monkeypatch.setattr(WorkBuddyBridge, "reconcile_unsent_batch", lambda *a: False)
     monkeypatch.setattr(WorkBuddyBridge, "process", lambda *a, **kw: None)
+    monkeypatch.setattr(WorkBuddyBridge, "load_results", lambda self, state: state.update(status="imported", result_sha256="test"))
     monkeypatch.setattr(WorkBuddyDesktop, "wait_for_batch_completion", lambda *a: None)
     bot.run_workbuddy_loop()
     assert fetch.call_count == 1

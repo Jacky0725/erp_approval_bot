@@ -14,7 +14,9 @@ New-Item -ItemType Directory -Force -Path $ReleaseDir | Out-Null
 $Core = Join-Path $ReleaseDir "ReagentApprovalBot-core-$Version-windows-amd64.zip"
 
 $BrowserRoot = Join-Path $env:LOCALAPPDATA "ms-playwright"
-$Browser = Get-ChildItem $BrowserRoot -Directory -Filter "chromium_headless_shell-*" | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+$BrowserRevisions = & $Python (Join-Path $PSScriptRoot "playwright_browser_revision.py") | ConvertFrom-Json
+if ($LASTEXITCODE -ne 0 -or !$BrowserRevisions.headless) { throw "Could not read the Chromium revision required by Playwright." }
+$Browser = Get-Item (Join-Path $BrowserRoot "chromium_headless_shell-$($BrowserRevisions.headless)") -ErrorAction SilentlyContinue
 if (!$Browser) { throw "Install Playwright Chromium headless shell before building the browser package." }
 $Revision = $Browser.Name.Replace("chromium_headless_shell-", "")
 $BrowserStage = Join-Path $RepoRoot "dist\browser-stage\$Revision"

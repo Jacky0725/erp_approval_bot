@@ -403,17 +403,28 @@ class WorkBuddyDesktop:
             links = self._project_list_entry(window, project)
         if not project_tabs and len(links) == 1:
             links[0].click_input()
-            deadline = time.monotonic() + 15
-            stable = 0
-            while time.monotonic() < deadline:
-                project_tabs = [e for e in window.descendants(title=project, control_type="Tab") if e.is_visible()]
-                still_chat = any(e.is_visible() for e in window.descendants(title=project, control_type="Hyperlink"))
-                stable = stable + 1 if project_tabs and not still_chat else 0
-                if stable >= 2:
+            for attempt in range(2):
+                deadline = time.monotonic() + (15 if attempt == 0 else 8)
+                stable = 0
+                while time.monotonic() < deadline:
+                    project_tabs = [e for e in window.descendants(title=project, control_type="Tab") if e.is_visible()]
+                    links = [e for e in window.descendants(title=project, control_type="Hyperlink") if e.is_visible()]
+                    stable = stable + 1 if project_tabs and not links else 0
+                    if stable >= 2:
+                        return
+                    time.sleep(0.3)
+                if attempt:
                     break
-                time.sleep(0.3)
-            else:
-                raise RuntimeError("项目页面切换尚未完成，未输入或发送。")
+                project_tabs = [e for e in window.descendants(title=project, control_type="Tab") if e.is_visible()]
+                links = [e for e in window.descendants(title=project, control_type="Hyperlink") if e.is_visible()]
+                if not project_tabs and len(links) == 1:
+                    editors = [e for e in window.descendants(control_type="Edit")
+                               if e.is_visible() and not e.window_text().startswith(("搜索", "当前页码"))]
+                    if len(editors) != 1 or editor_value(editors[0].get_value()):
+                        break
+                    print("[workbuddy] 项目切换超时，旧会话输入框为空，重试切换一次。", flush=True)
+                    links[0].click_input()
+            raise RuntimeError("项目页面切换尚未完成，请打开目标项目页；未输入或发送。")
         if not project_tabs:
             raise RuntimeError(f"请先打开 WorkBuddy 项目“{project}”；未确认项目身份，未发送。")
 

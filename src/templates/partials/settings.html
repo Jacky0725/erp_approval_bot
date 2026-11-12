@@ -306,4 +306,23 @@
           <button type="submit" class="primary">保存设置</button>
         </div>
       </form>
+      <section class="settings-section" id="configTransfer">
+        <div class="settings-section-head">
+          <div>
+            <h3>配置导入与导出</h3>
+            <p>配置文件包含加密后的设置与凭据。迁移时使用导出时设置的口令。</p>
+          </div>
+        </div>
+        <div class="form-row">
+          <label>配置口令 <input id="configTransferPassphrase" type="password" autocomplete="new-password" minlength="12" maxlength="256"></label>
+          <label>待导入文件 <input id="configTransferFile" type="file" accept=".rabconfig"></label>
+        </div>
+        <div class="settings-actions">
+          <button id="exportConfigButton" type="button">导出加密配置</button>
+          <button id="previewConfigButton" type="button">预览导入</button>
+          <button id="applyConfigButton" type="button" class="primary" hidden>确认应用配置</button>
+        </div>
+        <p id="configTransferMessage" class="field-note" role="status"></p>
+        <ul id="configTransferChanges"></ul>
+      </section>
     </section>

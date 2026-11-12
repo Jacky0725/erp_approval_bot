@@ -348,6 +348,7 @@
       data.set("target_list_numbers", selectedNumbers.join(","));
       data.set("process_all_todos", data.has("process_all_todos") ? "true" : "false");
       data.set("auto_pass", data.has("auto_pass") ? "true" : "false");
+      if (action !== "workbuddy_loop") data.delete("workbuddy_batch_size");
       return data;
     }
 
@@ -366,6 +367,78 @@
         }
       });
     });
+
+    if (document.querySelector("#configTransfer")) {
+      const passphrase = document.querySelector("#configTransferPassphrase");
+      const profile = document.querySelector("#configTransferFile");
+      const message = document.querySelector("#configTransferMessage");
+      const changes = document.querySelector("#configTransferChanges");
+      const apply = document.querySelector("#applyConfigButton");
+      let previewTicket = "";
+      let pending = false;
+      function clearConfigPreview() {
+        previewTicket = "";
+        apply.hidden = true;
+        changes.replaceChildren();
+      }
+      passphrase.addEventListener("input", clearConfigPreview);
+      profile.addEventListener("change", clearConfigPreview);
+
+      async function transferConfig(action) {
+        if (pending) return;
+        const data = new FormData();
+        data.set("passphrase", passphrase.value);
+        if (action !== "export") {
+          if (!profile.files[0]) { message.textContent = "请先选择配置文件。"; return; }
+          data.set("profile", profile.files[0]);
+        }
+        if (action === "import") {
+          if (!previewTicket) return;
+          data.set("ticket", previewTicket);
+        }
+        clearConfigPreview();
+        pending = true;
+        message.textContent = "";
+        const endpoint = action === "preview" ? "import/preview" : action;
+        try {
+          const response = await fetch("/api/settings/" + endpoint, {method: "POST", body: data});
+          if (!response.ok) {
+            const error = await response.json();
+            throw new Error(typeof error.detail === "string" ? error.detail : "配置操作失败。");
+          }
+          if (action === "export") {
+            const url = URL.createObjectURL(await response.blob());
+            const link = document.createElement("a");
+            link.href = url;
+            link.download = "reagent-approval.rabconfig";
+            link.click();
+            setTimeout(() => URL.revokeObjectURL(url), 1000);
+            passphrase.value = "";
+            message.textContent = "加密配置已下载。";
+          } else if (action === "preview") {
+            const result = await response.json();
+            for (const row of result.changes) {
+              const item = document.createElement("li");
+              item.textContent = `${row.safety ? "运行策略 · " : ""}${row.field}：${row.before ?? "未配置"} → ${row.after ?? "未配置"}`;
+              changes.append(item);
+            }
+            previewTicket = result.ticket;
+            apply.hidden = !result.changes.length;
+            message.textContent = result.changes.length ? "请核对差异后应用。预览有效期为 60 秒。" : "配置一致，无需导入。";
+          } else {
+            passphrase.value = "";
+            window.location.reload();
+          }
+        } catch (error) {
+          message.textContent = error.message;
+        } finally {
+          pending = false;
+        }
+      }
+      on("#exportConfigButton", "click", () => transferConfig("export"));
+      on("#previewConfigButton", "click", () => transferConfig("preview"));
+      on("#applyConfigButton", "click", () => transferConfig("import"));
+    }
 
     on("#stopRunButton", "click", async () => {
       if (!confirm("紧急强制停止可能使 ERP 或 WorkBuddy 结果待核对，且不会撤销已保存结果。确定强制结束？")) return;

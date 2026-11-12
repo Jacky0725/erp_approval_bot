@@ -4,6 +4,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import pandas as pd
 
@@ -25,6 +26,25 @@ from web_runner import (  # noqa: E402
 
 
 class WebReviewConfirmationTest(unittest.TestCase):
+    def test_review_queue_cold_load_reads_workbook_once(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            queue_path = root / "data" / "review_queue.xlsx"
+            queue_path.parent.mkdir(parents=True)
+            pd.DataFrame([{
+                "timestamp": "2026-11-11T09:00:00",
+                "list_number": "SJ1",
+                "chemical_name": "样本",
+                "reason": "需要人工确认",
+                "status": "pending",
+            }]).to_excel(queue_path, index=False)
+            original = pd.read_excel
+            with patch.object(pd, "read_excel", wraps=original) as reader:
+                self.assertEqual(review_queue_summary(root)["pending"], 1)
+                self.assertEqual(review_queue_summary(root)["pending"], 1)
+                reads = [call for call in reader.call_args_list if call.args and Path(call.args[0]) == queue_path]
+                self.assertEqual(len(reads), 1)
+
     def test_review_queue_summary_includes_manual_review_evidence_fields(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

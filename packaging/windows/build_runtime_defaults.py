@@ -12,7 +12,7 @@ def write_defaults(source: Path, destination: Path) -> None:
     settings = yaml.safe_load(source.read_text(encoding="utf-8"))
     settings.setdefault("workbuddy", {}).update(
         executable="", project_name="", desktop_enabled=False, write_enabled=False,
-        batch_dir="data/workbuddy", auto_recover=False, prompt_mode="full",
+        batch_dir="data/workbuddy", auto_recover=True, prompt_mode="full",
     )
     settings["workbuddy"].pop("batch_size_canary", None)
     settings.setdefault("app", {}).update(dry_run=True)

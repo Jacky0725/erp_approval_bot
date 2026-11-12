@@ -41,15 +41,15 @@ def wait_for_exit(pid: int, timeout: int = 90) -> None:
     raise TimeoutError("The previous application did not exit in time.")
 
 
-def healthy(version: str, timeout: int = 60) -> bool:
+def healthy(version: str, install_root: Path, timeout: int = 60) -> bool:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         for port in range(8000, 8050):
             try:
-                with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/status", timeout=1) as response:
+                with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/health", timeout=1) as response:
                     payload = json.loads(response.read().decode("utf-8"))
-                runtime = payload.get("runtime") or {}
-                if runtime.get("app_version") == version:
+                if (payload.get("ok") is True and payload.get("version") == version
+                        and Path(str(payload.get("install_root") or "")).resolve() == install_root.resolve()):
                     return True
             except Exception:
                 continue
@@ -70,6 +70,9 @@ def main() -> int:
     args = parser.parse_args()
     root = Path(args.install_root).resolve()
     core = Path(args.core).resolve()
+    browser_pointer = root / "browser-current.json"
+    previous_browser = browser_pointer.read_bytes() if browser_pointer.is_file() else None
+    browser_pointer_changed = False
     try:
         UPDATE_STATE.set("verifying")
         if sha256_file(core).lower() != args.core_sha256.lower():
@@ -83,6 +86,7 @@ def main() -> int:
                 UPDATE_STATE.set("staging")
                 safe_extract_zip(browser, browser_dir)
             atomic_json(root / "browser-current.json", {"revision": args.browser_revision, "path": f"shared/browsers/{args.browser_revision}"})
+            browser_pointer_changed = True
         UPDATE_STATE.set("waiting_exit")
         wait_for_exit(args.wait_pid)
         UPDATE_STATE.set("staging")
@@ -94,16 +98,39 @@ def main() -> int:
             raise FileNotFoundError("Stable launcher was not installed.")
         subprocess.Popen([str(bootstrap)], cwd=str(root), close_fds=True)
         UPDATE_STATE.set("health_check")
-        if not healthy(args.version):
+        if not healthy(args.version, root):
             UPDATE_STATE.set("rollback", "Health check failed; restoring previous version.")
             if rollback_current(root):
+                if browser_pointer_changed:
+                    restore_browser_pointer(browser_pointer, previous_browser)
+                    browser_pointer_changed = False
                 subprocess.Popen([str(bootstrap)], cwd=str(root), close_fds=True)
             raise RuntimeError("Updated version failed its health check and was rolled back.")
         UPDATE_STATE.set("succeeded")
         return 0
     except Exception as error:  # noqa: BLE001
+        if browser_pointer_changed:
+            try:
+                restore_browser_pointer(browser_pointer, previous_browser)
+            except OSError as restore_error:
+                error = RuntimeError(f"{error}; browser rollback failed: {restore_error}")
         UPDATE_STATE.set("failed", str(error))
         return 1
+
+
+def restore_browser_pointer(path: Path, previous: bytes | None) -> None:
+    if previous is None:
+        path.unlink(missing_ok=True)
+        return
+    import tempfile
+
+    with tempfile.NamedTemporaryFile(dir=path.parent, prefix=".browser-", delete=False) as file:
+        staged = Path(file.name)
+        file.write(previous)
+    try:
+        os.replace(staged, path)
+    finally:
+        staged.unlink(missing_ok=True)
 
 
 if __name__ == "__main__":

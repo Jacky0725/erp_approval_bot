@@ -116,6 +116,13 @@
                 </div>
                 <div class="workbuddy-flow-step">
                   <span>03 · 自动循环</span>
+                  <label>每批判定条数
+                    <select name="workbuddy_batch_size">
+                      {% for size, minutes in [(20, 15), (30, 20), (50, 25)] %}
+                      <option value="{{ size }}"{% if size not in runtime.workbuddy_accepted_batch_sizes|default([20]) and size != runtime.workbuddy_batch_size_canary|default(0) %} disabled{% endif %}>{{ size }} 条 / {{ minutes }} 分钟{% if size not in runtime.workbuddy_accepted_batch_sizes|default([20]) %}（{% if size == runtime.workbuddy_batch_size_canary|default(0) %}指定清单试跑{% else %}待验收{% endif %}）{% endif %}</option>
+                      {% endfor %}
+                    </select>
+                  </label>
                   <button type="button" data-action="workbuddy_loop" {% if not runtime.workbuddy_desktop_enabled %}disabled title="请先完成 WorkBuddy 客户端适配并在配置中启用" aria-describedby="workbuddyAvailabilityNote"{% endif %}>批次循环</button>
                 </div>
               </div>

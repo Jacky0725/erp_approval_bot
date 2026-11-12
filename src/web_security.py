@@ -31,7 +31,7 @@ def normalize_run_confirmation_options(payload: Mapping[str, Any] | None = None)
     # supported execution pipeline. Endpoints reject explicit retired values.
     pipeline = "v1"
 
-    return {
+    normalized = {
         "action": text_value("action"),
         "target_list_numbers": text_value("target_list_numbers"),
         "process_all_todos": boolean_value("process_all_todos"),
@@ -43,6 +43,9 @@ def normalize_run_confirmation_options(payload: Mapping[str, Any] | None = None)
         "pipeline_version": pipeline,
         "auto_pass": boolean_value("auto_pass"),
     }
+    if normalized["action"] == "workbuddy_loop" and text_value("workbuddy_batch_size"):
+        normalized["workbuddy_batch_size"] = text_value("workbuddy_batch_size")
+    return normalized
 
 
 def canonical_hash(payload: dict[str, Any] | None) -> str:

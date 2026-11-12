@@ -174,6 +174,24 @@ def test_offline_install_checks_hash_and_repairs_original_version(tmp_path, monk
     assert exe.read_bytes() == b"MZverified"
     assert current.read_bytes() == pointer
     assert (runtime / ".env").read_text() == "keep=true"
+    browser_dir = target / "shared" / "browsers" / revision
+    assert installer.browser_install_complete(browser_dir, revision, manifest["assets"][1]["sha256"])
+    monkeypatch.setattr(installer, "download_browser_package", lambda *args: (_ for _ in ()).throw(AssertionError("browser downloaded again")))
+    installer.perform_install(progress, state)
+    assert installer.browser_install_complete(browser_dir, revision, manifest["assets"][1]["sha256"])
+
+
+def test_browser_reuse_requires_matching_verified_marker(tmp_path):
+    installer = load_installer_module()
+    browser_dir = tmp_path / "browser"
+    executable = browser_dir / "chromium_headless_shell-1254" / "win64" / "chrome-headless-shell.exe"
+    executable.parent.mkdir(parents=True)
+    executable.write_bytes(b"MZbrowser")
+    (browser_dir / ".installed.json").write_text('{"revision":"1254","sha256":"correct"}', encoding="utf-8")
+    assert installer.browser_install_complete(browser_dir, "1254", "correct")
+    assert not installer.browser_install_complete(browser_dir, "1254", "wrong")
+    executable.unlink()
+    assert not installer.browser_install_complete(browser_dir, "1254", "correct")
 
 
 def test_progress_reporter_run_without_ui_executes_worker(monkeypatch):

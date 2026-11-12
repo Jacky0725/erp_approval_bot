@@ -30,6 +30,7 @@ def test_packaged_defaults_do_not_carry_operator_state(tmp_path: Path) -> None:
     assert not actual["dingtalk_stream"]["enabled"]
     assert not actual["dingtalk_stream"]["corp_id"]
     workbuddy = actual["workbuddy"]
-    assert not any(workbuddy[key] for key in ("executable", "project_name", "desktop_enabled", "write_enabled", "auto_recover"))
+    assert not any(workbuddy[key] for key in ("executable", "project_name", "desktop_enabled", "write_enabled"))
+    assert workbuddy["auto_recover"] is True
     assert workbuddy["batch_dir"] == "data/workbuddy"
     assert workbuddy["batch_size"] == 20

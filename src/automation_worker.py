@@ -41,6 +41,11 @@ def parse_target_list_numbers(value: str) -> list[str]:
 def run_action(action: str) -> None:
     load_dotenv(ROOT_DIR / ".env")
     settings = load_settings()
+    if action == "workbuddy_loop" and os.getenv("WORKBUDDY_BATCH_SIZE"):
+        settings.setdefault("workbuddy", {}).update(
+            batch_size=int(os.environ["WORKBUDDY_BATCH_SIZE"]),
+            selected_result_timeout_seconds=int(os.environ["WORKBUDDY_RESULT_TIMEOUT_SECONDS"]),
+        )
     bot = BrowserBot(settings=settings, root_dir=ROOT_DIR)
     bot.target_list_number = os.getenv("TARGET_LIST_NUMBER", "").strip()
     bot.target_list_numbers = parse_target_list_numbers(os.getenv("TARGET_LIST_NUMBERS", ""))
@@ -82,6 +87,8 @@ def main() -> None:
     )
     args = parser.parse_args()
     try:
+        if args.action == "workbuddy_loop" and (task_id := os.getenv("AUTOMATION_TASK_ID")):
+            TaskControl(ROOT_DIR).record_details(task_id, worker_pid=os.getpid(), worker_launching=False)
         run_action(args.action)
         if os.getenv("AUTOMATION_TASK_ID", ""):
             TaskControl(ROOT_DIR).finish(os.environ["AUTOMATION_TASK_ID"], "completed")

@@ -774,13 +774,17 @@ def perform_versioned_install(
     if any(not (target / relative).resolve().is_relative_to(target.resolve())
            for relative in ("versions", "shared/browsers", f"shared/browsers/{revision}")):
         raise ValueError("安装目录中的版本或浏览器路径指向了安装目录外部。")
-    browser_path = payload / browser_name
-    if browser_path.is_file():
+    browser_ready = browser_install_complete(browser_dir, revision, str(browser.get("sha256") or ""))
+    browser_path = None if browser_ready else payload / browser_name
+    if browser_ready:
+        progress.update("2/5 获取浏览器", "复用已校验的浏览器")
+    elif browser_path.is_file():
         progress.update("2/5 获取浏览器", "使用内置浏览器文件")
     else:
         browser_path = download_browser_package(browser, runtime, version, progress)
     progress.update("3/5 校验", "核对核心包、浏览器包的大小和 SHA-256")
-    for asset, path in ((core, core_path), (browser, browser_path)):
+    packages = [(core, core_path)] + ([(browser, browser_path)] if browser_path is not None else [])
+    for asset, path in packages:
         if (asset.get("arch") != "amd64" or not path.is_file() or path.stat().st_size != asset.get("size")
                 or sha256_file(path).lower() != str(asset.get("sha256") or "").lower()):
             raise RuntimeError(f"Installer payload verification failed: {path.name}")
@@ -794,13 +798,15 @@ def perform_versioned_install(
     if not bootstrap.is_file() or not updater.is_file():
         raise RuntimeError("Secure installer is missing bootstrap or updater executable.")
     progress.update("4/5 解压安装", str(display_target or target))
-    browser_dir.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix=".b-", dir=target) as staging:
-        extracted = Path(staging)
-        safe_extract_zip(browser_path, extracted)
-        if not any(item.is_file() for item in extracted.glob(f"chromium_headless_shell-{revision}/**/chrome-headless-shell.exe")):
-            raise RuntimeError("Browser archive does not contain the expected Chromium headless executable.")
-        replace_staged_directory(extracted, browser_dir)
+    if browser_path is not None:
+        browser_dir.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix=".b-", dir=target) as staging:
+            extracted = Path(staging)
+            safe_extract_zip(browser_path, extracted)
+            if not any(item.is_file() for item in extracted.glob(f"chromium_headless_shell-{revision}/**/chrome-headless-shell.exe")):
+                raise RuntimeError("Browser archive does not contain the expected Chromium headless executable.")
+            atomic_json(extracted / ".installed.json", {"revision": revision, "sha256": browser["sha256"]})
+            replace_staged_directory(extracted, browser_dir)
     stage_version(core_path, target, version, repair=True)
     shutil.copy2(bootstrap, target / "ReagentApprovalBot.exe")
     shutil.copy2(updater, target / "ReagentApprovalBotUpdater.exe")
@@ -808,6 +814,16 @@ def perform_versioned_install(
     atomic_json(target / "install.json", {"schema": 2, "version": version, "runtime": str(runtime)})
     switch_current(target, version, revision)
     return target
+
+
+def browser_install_complete(browser_dir: Path, revision: str, checksum: str) -> bool:
+    try:
+        marker = json.loads((browser_dir / ".installed.json").read_text(encoding="utf-8"))
+        executable = next(browser_dir.glob(f"chromium_headless_shell-{revision}/**/chrome-headless-shell.exe"), None)
+        return (marker.get("revision") == revision and str(marker.get("sha256") or "").lower() == checksum.lower()
+                and executable is not None and executable.is_file() and executable.stat().st_size > 0)
+    except (OSError, ValueError, AttributeError):
+        return False
 
 
 def download_browser_package(asset: dict[str, Any], runtime: Path, version: str, progress: ProgressReporter) -> Path:

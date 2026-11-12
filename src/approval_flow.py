@@ -40,7 +40,7 @@ class ApprovalFlowMixin:
 
     def run_workbuddy_handoff(self, *, import_results: bool = False) -> None:
         """File bridge pilot; never routes through model-fallback or AUTO_PASS."""
-        from workbuddy_bridge import WorkBuddyBridge, batch_in_scope
+        from workbuddy_bridge import SUPERSEDED_FAILURE, WorkBuddyBridge, batch_in_scope
 
         bridge = WorkBuddyBridge(self.root_dir, self.settings)
         active_state = None
@@ -68,6 +68,8 @@ class ApprovalFlowMixin:
                 processed = 0
                 for state in bridge.batches():
                     if not batch_in_scope(state, scope):
+                        continue
+                    if state["status"] == SUPERSEDED_FAILURE or state.get("replacement"):
                         continue
                     if state["status"] == "completed":
                         if not dry_run and not state.get("cleaned"):
@@ -127,6 +129,7 @@ class ApprovalFlowMixin:
         import time
         from workbuddy_bridge import WorkBuddyBridge, batch_in_scope
         from workbuddy_desktop import WorkBuddyDesktop
+        from workbuddy_recovery import dispatch_outcome, identify_dispatch
 
         bridge = WorkBuddyBridge(self.root_dir, self.settings)
         active_state = None
@@ -149,6 +152,12 @@ class ApprovalFlowMixin:
             previous_session: tuple[str, str, str, int] | None = None
             compact_rules = bridge.config.get("compact_rules") is True
             reuse_chat = bridge.config.get("reuse_chat") is True
+            auto_recover = bridge.config.get("auto_recover") is True and not dry_run
+            canary = os.getenv("WORKBUDDY_CANARY_BATCH") == "true"
+            task_id = os.getenv("AUTOMATION_TASK_ID", "")
+            canary_batch_id = (TaskControl(self.root_dir).get(task_id).get("details", {}).get("canary_batch_id")
+                               if canary and task_id else None)
+            projects = Path.home() / ".workbuddy" / "projects"
             while True:
                 checkpoint("WorkBuddy 批次循环安全点")
                 numbers = list(getattr(self, "target_list_numbers", []) or [])
@@ -163,7 +172,7 @@ class ApprovalFlowMixin:
                             number for r in client.fetch_todo_tasks(all_pages=True)
                             if (number := str(r.get("清单号") or r.get("试剂清单号") or r.get("name") or "").strip())
                         ))
-                        if self._truthy(os.getenv("FREEZE_TODO_SCOPE", "false")):
+                        if auto_recover or self._truthy(os.getenv("FREEZE_TODO_SCOPE", "false")):
                             frozen_numbers = numbers
                             print(f"[workbuddy] 已固定本次待办范围：{', '.join(numbers) or '无待办'}", flush=True)
                     else:
@@ -180,11 +189,24 @@ class ApprovalFlowMixin:
                             yield {**record, "试剂清单号": number}
                 # Resume a prepared/imported batch before fetching a new one.
                 digest = hashlib.sha256(bridge.rules_path().read_bytes()).hexdigest()
-                outstanding = [s for s in bridge.batches() if (s["status"] in {"waiting_result", "imported"}
+                batches = bridge.batches()
+                outstanding = [s for s in batches if (s["status"] in {"waiting_result", "imported"}
                     or (s["status"] == "needs_attention" and s.get("generate_library"))) and s["rules_sha256"] == digest
                     and batch_in_scope(s, scope, reject_partial=True)]
+                if canary_batch_id:
+                    outstanding = [s for s in outstanding if canary_batch_id in (s["batch_id"], s.get("replaces_batch_id"))]
+                    if not outstanding:
+                        original = next((s for s in batches if s["batch_id"] == canary_batch_id), None)
+                        if original and original["status"] == "completed":
+                            return
+                        child = next((s for s in batches if s.get("replaces_batch_id") == canary_batch_id), None)
+                        if child and child["status"] == "completed":
+                            return
+                        raise RuntimeError(f"指定清单试跑批次 {canary_batch_id} 未完成，需核对原批次。")
                 if outstanding:
                     state = outstanding[0]
+                elif canary:
+                    state = bridge.prepare(records(), compact=compact_rules, scope=scope, require_full=True)
                 else:
                     state = bridge.prepare(records(), compact=compact_rules, scope=scope)
                 active_state = state
@@ -194,6 +216,18 @@ class ApprovalFlowMixin:
                     return
                 if not batch_in_scope(state, scope, reject_partial=True):
                     raise RuntimeError("未完成批次不属于本次清单范围，已停止，未投递或写入。")
+                if canary and (state.get("batch_size_limit") != bridge.config["batch_size"]
+                               or not state.get("replaces_batch_id") and len(state["items"]) != bridge.config["batch_size"]):
+                    raise RuntimeError("试跑必须从所选清单完成一个指定数量的满批，请先收尾已有批次。")
+                if canary and not canary_batch_id:
+                    canary_batch_id = state.get("replaces_batch_id") or state["batch_id"]
+                    checkpoint("已固定 WorkBuddy 试跑批次", canary_batch_id=canary_batch_id)
+                if state.get("replacement"):
+                    if not auto_recover and not os.getenv("RESUME_STOPPED_TASK_ID"):
+                        raise RuntimeError(f"批次 {state['batch_id']} 存在尚未完成的补跑，需核对后恢复。")
+                    bridge.replace_failed_dispatch(state, client, compact=compact_rules)
+                    previous_session = None
+                    continue
                 if not dry_run and bridge.reconcile_unsent_batch(state, client):
                     continue
                 path = bridge.batch_path(state)
@@ -206,7 +240,12 @@ class ApprovalFlowMixin:
                     if state.get("dispatch_state") == "sending":
                         if dry_run:
                             raise RuntimeError(f"批次 {state['batch_id']} 上次投递结果不明；请核对 WorkBuddy，禁止自动重发。")
-                        desktop.confirm_existing_submission(state["batch_id"])
+                        binding = (identify_dispatch(path.resolve(), state["dispatch_started_at"], projects)
+                                   if auto_recover and state.get("dispatch_started_at") else None)
+                        if binding:
+                            state["workbuddy_request"] = binding
+                        else:
+                            desktop.confirm_existing_submission(state["batch_id"])
                         state["dispatch_state"] = "submitted"
                         bridge.save(state)
                         print(f"[workbuddy] 批次 {state['batch_id']}：已重新确认原消息在指定项目对话中，仅恢复等待，未重发。", flush=True)
@@ -219,11 +258,12 @@ class ApprovalFlowMixin:
                         def before_submit() -> None:
                             checkpoint("WorkBuddy 投递前安全点", batch_id=state["batch_id"])
                             state["dispatch_state"] = "sending"
+                            state["dispatch_started_at"] = time.time()
                             bridge.save(state)
-                        if compact_rules or reuse_chat or state.get("compact_rules_sha256"):
+                        if compact_rules or reuse_chat or state.get("compact_rules_sha256") or state.get("result_writer_sha256"):
                             prompt, followup, rules_format = bridge.dispatch_prompts(state)
                             reuse = None
-                            if reuse_chat and previous_session is not None:
+                            if reuse_chat and previous_session is not None and not state.get("replaces_batch_id"):
                                 prior_batch, prior_digest, prior_format, prior_count = previous_session
                                 if prior_count < 3 and (prior_digest, prior_format) == (state["rules_sha256"], rules_format):
                                     reuse = (prior_batch, followup)
@@ -235,19 +275,78 @@ class ApprovalFlowMixin:
                             desktop.send((path / "prompt.txt").read_text(encoding="utf-8"), batch_id=state["batch_id"], before_submit=before_submit)
                         sent_here = True
                         state["dispatch_state"] = "submitted"
+                        state["submitted_at"] = time.time()
                         bridge.save(state)
                         print(f"[workbuddy] 批次 {state['batch_id']}：投递状态已记录。", flush=True)
-                    deadline = time.monotonic() + int(bridge.config.get("result_timeout_seconds", 900))
-                    print(f"[workbuddy progress] 批次 {state['batch_id']}：等待 WorkBuddy 结果", flush=True)
-                    while not (path / "result.xlsx").exists():
-                        checkpoint("等待 WorkBuddy 结果", batch_id=state["batch_id"])
-                        if time.monotonic() >= deadline:
-                            raise RuntimeError(f"WorkBuddy 结果等待超时：{path}；保留批次，不重发。")
-                        time.sleep(2)
                 if not state.get("result_sha256"):
-                    print(f"[workbuddy] 批次 {state['batch_id']}：结果文件已出现，核对界面完成确认。", flush=True)
-                    desktop.wait_for_batch_completion(state["batch_id"], int(bridge.config.get("result_timeout_seconds", 900)))
-                print(f"[workbuddy] 批次 {state['batch_id']}：完成确认通过，开始校验结果并同步 ERP。", flush=True)
+                    timeout = int(state.get("result_timeout_seconds", bridge.config.get("result_timeout_seconds", 900)))
+                    if not state.get("submitted_at") and state.get("dispatch_state") == "submitted":
+                        state["submitted_at"] = state.get("dispatch_started_at", time.time())
+                        bridge.save(state)
+                    remaining = timeout - max(0, time.time() - state.get("submitted_at", time.time()))
+                    deadline = time.monotonic() + max(0, remaining)
+                    grace_deadline = deadline + (30 if auto_recover else 0)
+                    result_path = path / "result.xlsx"
+                    next_observation = 0.0
+                    outcome = "unknown"
+                    replaced = False
+                    print(f"[workbuddy progress] 批次 {state['batch_id']}：等待 WorkBuddy 结果", flush=True)
+                    while True:
+                        checkpoint("等待 WorkBuddy 结果", batch_id=state["batch_id"])
+                        now = time.monotonic()
+                        if auto_recover and now >= next_observation:
+                            next_observation = now + 5
+                            if not state.get("workbuddy_request") and state.get("dispatch_started_at"):
+                                binding = identify_dispatch(path.resolve(), state["dispatch_started_at"], projects)
+                                if binding:
+                                    state["workbuddy_request"] = binding
+                                    bridge.save(state)
+                            if state.get("workbuddy_request"):
+                                outcome = dispatch_outcome(state["workbuddy_request"], projects, state["batch_id"])
+                        if result_path.exists():
+                            break
+                        if outcome == "failed":
+                            if state.get("replaces_batch_id"):
+                                raise RuntimeError(f"补跑批次 {state['batch_id']} 再次未返回有效响应，需人工核对。")
+                            if bridge.replace_failed_dispatch(
+                                state, client, compact=compact_rules,
+                                still_failed=lambda: dispatch_outcome(state["workbuddy_request"], projects, state["batch_id"]) == "failed",
+                            ):
+                                previous_session = None
+                                replaced = True
+                                break
+                        if now >= grace_deadline:
+                            reason = ""
+                            if auto_recover:
+                                reason = ("原请求的终止状态未确认；" if state.get("workbuddy_request")
+                                          else "未找到可唯一核对的 WorkBuddy 请求；")
+                            raise RuntimeError(f"WorkBuddy 结果等待超时：{path}；{reason}保留批次，不重发。")
+                        time.sleep(2)
+                    if replaced:
+                        continue
+                    if state["status"] != "waiting_result" or state.get("dispatch_state") != "submitted":
+                        raise RuntimeError(f"批次 {state['batch_id']} 未确认投递，拒绝导入已有结果文件。")
+                    binding = state.get("workbuddy_request")
+                    if not binding and state.get("dispatch_started_at"):
+                        binding = identify_dispatch(path.resolve(), state["dispatch_started_at"], projects)
+                    if binding:
+                        outcome = dispatch_outcome(binding, projects, state["batch_id"])
+                    if outcome == "failed":
+                        raise RuntimeError(f"批次 {state['batch_id']} 的原请求明确失败；保留结果文件，不写入 ERP。")
+                    if state.get("dispatch_started_at") and result_path.stat().st_mtime < state["dispatch_started_at"]:
+                        raise RuntimeError(f"批次 {state['batch_id']} 的结果文件早于投递，拒绝导入。")
+                    if not state.get("result_writer_sha256"):
+                        first_digest = hashlib.sha256(result_path.read_bytes()).digest()
+                        time.sleep(1)
+                        if first_digest != hashlib.sha256(result_path.read_bytes()).digest():
+                            raise RuntimeError(f"批次 {state['batch_id']} 的旧版结果文件仍在变化，保留文件并暂停。")
+                    bridge.load_results(state)
+                    confirmation = "同一请求完成" if outcome == "completed" else "界面不可读取，文件校验通过"
+                    bridge.audit.info(json.dumps({"event": "workbuddy_result_accepted", "batch_id": state["batch_id"],
+                                                  "confirmation": confirmation, "result_sha256": state["result_sha256"]}, ensure_ascii=False))
+                    print(f"[workbuddy] 批次 {state['batch_id']}：{confirmation}；开始同步 ERP。", flush=True)
+                else:
+                    print(f"[workbuddy] 批次 {state['batch_id']}：沿用已校验结果，继续同步 ERP。", flush=True)
                 print(f"[workbuddy progress] 批次 {state['batch_id']}：校验结果并同步 ERP", flush=True)
                 bridge.process(state, client, memory, dry_run=dry_run, generate_library=self.approval_write_mode() == "generate_library")
                 previous_session = (
@@ -260,6 +359,8 @@ class ApprovalFlowMixin:
                     print("[workbuddy] 单批测试完成：未写入 ERP、未入记忆、未删除 Excel。")
                     return
                 bridge.require_safe_continuation(state, scope)
+                if canary:
+                    return
 
         with bridge.exclusive():
             try:
