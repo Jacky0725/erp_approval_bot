@@ -48,6 +48,67 @@ def identify_dispatch(batch_path: Path, sent_at: float, projects: Path) -> dict[
     return matches[0] if len(matches) == 1 else None
 
 
+def audit_json_tool_calls(transcript: Path, batch_dir: Path, prepared_at: float) -> dict[str, Any]:
+    """Inspect observed calls only. A transcript cannot prove a policy blocked execution."""
+    batch_dir = batch_dir.resolve()
+    exact = re.compile(re.escape(batch_dir.as_posix()) + r"(?=[^\w/.-]|$)", re.I)
+    requests = []
+    for event in _events(transcript):
+        timestamp = event.get("timestamp")
+        metadata = event.get("providerData")
+        if (event.get("type") != "message" or event.get("role") != "user"
+                or event.get("sessionId") != transcript.stem or not isinstance(timestamp, (int, float))
+                or timestamp / 1000 < prepared_at or not isinstance(metadata, dict)):
+            continue
+        blocks = event.get("content")
+        if not isinstance(blocks, list):
+            continue
+        prompt = "\n".join(str(block.get("text", "")) for block in blocks if isinstance(block, dict))
+        prompt = re.sub(r"<system-reminder\b[^>]*>.*?</system-reminder>", "", prompt, flags=re.S)
+        request = metadata.get("conversationRequestId")
+        if isinstance(request, str) and request and exact.search(prompt.replace("\\", "/")):
+            requests.append(request)
+    if len(requests) != 1:
+        raise ValueError("Cannot uniquely bind the transcript to this batch.")
+
+    counts: dict[str, int] = {}
+    unexpected: dict[str, int] = {}
+    for event in _events(transcript):
+        metadata = event.get("providerData")
+        if (event.get("type") != "function_call" or event.get("sessionId") != transcript.stem
+                or not isinstance(metadata, dict) or metadata.get("conversationRequestId") != requests[0]):
+            continue
+        name = event.get("name")
+        # Do not expose tool arguments, file contents, or arbitrary transcript strings.
+        tool = name if name in ("Read", "Write", "Bash", "PowerShell", "Glob", "Grep", "Edit") else "other"
+        counts[tool] = counts.get(tool, 0) + 1
+        args = event.get("arguments")
+        if isinstance(args, str):
+            try:
+                args = json.loads(args)
+            except ValueError:
+                args = None
+        file = args.get("file_path") if isinstance(args, dict) else None
+        allowed = False
+        if tool in ("Read", "Write") and isinstance(file, str) and file:
+            try:
+                target = Path(file)
+                if not target.is_absolute():
+                    cwd = event.get("cwd")
+                    if not isinstance(cwd, str) or not Path(cwd).is_absolute():
+                        raise ValueError("Relative path without an absolute tool working directory.")
+                    target = Path(cwd) / target
+                relative = target.resolve().relative_to(batch_dir).as_posix()
+                allowed = (relative == "judgments.json" if tool == "Write" else
+                           relative in {"input.json", "rules_compact/manifest.json"}
+                           or re.fullmatch(r"rules_compact/part-[0-9]{3,}\.txt", relative) is not None)
+            except (OSError, ValueError, RuntimeError):
+                pass
+        if not allowed:
+            unexpected[tool] = unexpected.get(tool, 0) + 1
+    return {"observed_calls": counts, "unexpected_calls": unexpected, "permission_enforcement_verified": False}
+
+
 def dispatch_outcome(binding: dict[str, Any], projects: Path, batch_id: str) -> str:
     """A timeout by itself, an unfamiliar error, or a later turn cannot authorize replay."""
     try:

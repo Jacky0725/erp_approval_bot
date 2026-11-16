@@ -52,7 +52,7 @@ def desktop(monkeypatch):
         def is_visible(self): return True
         def is_enabled(self): return self.enabled
         def click_input(self): calls.append(self.name or "click")
-        def rectangle(self): return SimpleNamespace(right=700, top=100, bottom=250, mid_point=lambda: SimpleNamespace(x=680, y=270))
+        def rectangle(self): return SimpleNamespace(left=80, right=700, top=100, bottom=250, mid_point=lambda: SimpleNamespace(x=680, y=270))
     editor = Control()
     button = Control()
     class Window:
@@ -161,13 +161,49 @@ def test_dispatch_guard_is_persisted_immediately_before_submit(desktop):
     assert desktop.calls == ["click", "type", "persist", "click"]
 
 
+def test_send_stops_if_current_editor_is_replaced_after_typing(desktop):
+    original = desktop.window.descendants
+    remaining = type(desktop.editor)()
+
+    def descendants(**kwargs):
+        if kwargs.get("control_type") == "Edit" and desktop.editor.value:
+            return [remaining]
+        return original(**kwargs)
+
+    desktop.window.descendants = descendants
+    guard = Mock()
+    with pytest.raises(RuntimeError, match="点击前无法确认当前输入框内容，未发送"):
+        desktop.adapter.send("本批说明", before_submit=guard)
+    guard.assert_not_called()
+    assert desktop.calls == ["click", "type"]
+
+
 def test_send_waits_for_batch_message_and_empty_editor(desktop):
     def submitted():
-        desktop.window.messages = [SimpleNamespace(is_visible=lambda: True, window_text=lambda: "已发送 batch-123")]
+        desktop.window.links = [SimpleNamespace(is_visible=lambda: True)]
+        desktop.window.messages = [SimpleNamespace(is_visible=lambda: True, window_text=lambda: "执行批次 batch-123")]
         desktop.editor.value = ""
     desktop.button.click_action = submitted
     desktop.adapter.send("执行批次 batch-123", batch_id="batch-123")
     assert desktop.editor.value == ""
+
+
+def test_named_send_resumes_exact_batch_draft_without_retyping(desktop):
+    prompt = "执行批次 batch-123"
+    desktop.editor.value = prompt
+    blank = type(desktop.button)()
+    desktop.button.name = "发送"
+    descendants = desktop.window.descendants
+    desktop.window.descendants = lambda **kw: (
+        [blank, desktop.button] if kw["control_type"] == "Button" else descendants(**kw)
+    )
+    def submitted():
+        desktop.window.links = [SimpleNamespace(is_visible=lambda: True)]
+        desktop.window.messages = [SimpleNamespace(is_visible=lambda: True, window_text=lambda: prompt)]
+        desktop.editor.value = ""
+    desktop.button.click_action = submitted
+    desktop.adapter.send(prompt, batch_id="batch-123")
+    assert desktop.calls == ["发送"]
 
 
 def test_followup_requires_exact_previous_completion_in_configured_chat(desktop):
@@ -199,9 +235,32 @@ def test_followup_change_after_typing_never_submits(desktop):
 
 def test_send_ack_timeout_is_uncertain_and_does_not_retry(desktop):
     desktop.adapter.config["submission_timeout_seconds"] = 0
-    with pytest.raises(RuntimeError, match="发送状态不明"):
+    with pytest.raises(RuntimeError, match="本次已点击发送.*禁止自动重发"):
         desktop.adapter.send("执行批次 batch-123", batch_id="batch-123")
     assert desktop.calls.count("click") == 2  # editor focus and one submit click
+
+
+def test_batch_identifier_in_sidebar_is_not_a_submission_ack(desktop, monkeypatch):
+    import itertools
+    ticks = itertools.count(step=0.4)
+    monkeypatch.setattr("workbuddy_desktop.time.monotonic", lambda: next(ticks))
+    desktop.adapter.config["submission_timeout_seconds"] = 1
+    def submitted():
+        desktop.window.links = [SimpleNamespace(is_visible=lambda: True)]
+        desktop.window.messages = [SimpleNamespace(is_visible=lambda: True, window_text=lambda: "历史任务 batch-123")]
+        desktop.editor.value = ""
+    desktop.button.click_action = submitted
+    with pytest.raises(RuntimeError, match="本次已点击发送.*禁止自动重发"):
+        desktop.adapter.send("执行批次 batch-123", batch_id="batch-123")
+    assert desktop.calls.count("click") == 2
+
+
+def test_recovery_ack_timeout_does_not_imply_another_click(desktop):
+    desktop.adapter.config["submission_timeout_seconds"] = 0
+    desktop.window.links = [SimpleNamespace(is_visible=lambda: True)]
+    with pytest.raises(RuntimeError, match="原投递；本次未点击发送.*禁止自动重发"):
+        desktop.adapter.confirm_existing_submission("batch-123")
+    assert desktop.calls == []
 
 
 def test_guard_persistence_failure_prevents_submit(desktop):
@@ -305,7 +364,8 @@ def test_project_list_excludes_sidebar_heading():
 
 
 @pytest.mark.parametrize("button_y, expected", [(100, True), (200, False)])
-def test_sidebar_shortcut_only_uses_button_in_matching_project_row(button_y, expected, monkeypatch):
+@pytest.mark.parametrize("navigation_title", ["更多", "发现"])
+def test_sidebar_shortcut_only_uses_button_in_matching_project_row(button_y, expected, navigation_title, monkeypatch):
     monkeypatch.setattr("workbuddy_desktop.time.sleep", lambda _: None)
     clicked = []
     def rect(right, y):
@@ -313,6 +373,8 @@ def test_sidebar_shortcut_only_uses_button_in_matching_project_row(button_y, exp
     def control(bounds):
         return SimpleNamespace(is_visible=lambda: True, rectangle=lambda: bounds, click_input=lambda: clicked.append(True))
     def descendants(**kw):
+        if kw["control_type"] == "TabItem" and kw.get("title") != navigation_title:
+            return []
         return {"TabItem": [control(rect(270, 30))], "Text": [control(rect(140, 100))],
                 "Button": [control(rect(235, button_y))], "Hyperlink": [],
                 "Tab": [control(rect(500, 100))] if clicked else []}.get(kw['control_type'], [])
@@ -435,10 +497,12 @@ def test_ambiguous_taskbar_icons_are_not_clicked(desktop):
     assert not desktop.adapter._restore_taskbar_or_tray(desktop_window)
 
 
-def test_missing_client_is_started_and_window_prepared(desktop, monkeypatch):
+@pytest.mark.parametrize("listing", ['"other.exe","1"', '"WorkBuddy.exe","999","Console","2","100 K"'])
+def test_missing_client_is_started_and_window_prepared(desktop, monkeypatch, listing):
     launched = []
     monkeypatch.setattr("workbuddy_desktop.client_path", lambda _: Path("WorkBuddy.exe"))
-    monkeypatch.setattr("workbuddy_desktop.subprocess.run", lambda *a, **k: SimpleNamespace(stdout='"other.exe","1"'))
+    monkeypatch.setattr(desktop.adapter, "_session_id", lambda _: 1)
+    monkeypatch.setattr("workbuddy_desktop.subprocess.run", lambda *a, **k: SimpleNamespace(stdout=listing))
     monkeypatch.setattr("workbuddy_desktop.subprocess.Popen", lambda *a, **k: launched.append((a, k)))
     monkeypatch.setattr("workbuddy_desktop.time.sleep", lambda _: None)
     monkeypatch.setattr("workbuddy_desktop.time.monotonic", iter([0, 1, 2, 3, 4, 5, 46]).__next__)
@@ -515,15 +579,17 @@ def test_submission_confirmation_reobserves_transient_value_pattern(desktop):
 
 
 def test_reconcile_existing_submission_requires_configured_project(desktop,monkeypatch):
-    monkeypatch.setattr(desktop.adapter,'_window',lambda:desktop.window)
+    monkeypatch.setattr(desktop.adapter,'_window',lambda **kw:desktop.window)
     with pytest.raises(RuntimeError,match='未确认当前对话'):
         desktop.adapter.confirm_existing_submission('abc')
     assert not desktop.calls
 
 
 def test_reconcile_existing_submission_never_clicks_send(desktop,monkeypatch):
-    monkeypatch.setattr(desktop.adapter,'_window',lambda:desktop.window)
+    lookup = Mock(return_value=desktop.window)
+    monkeypatch.setattr(desktop.adapter,'_window',lookup)
     desktop.window.links=[type(desktop.editor)(name='试剂审批')]
     desktop.window.messages=[type(desktop.editor)(name='abc')]
     desktop.adapter.confirm_existing_submission('abc')
+    lookup.assert_called_once_with(allow_launch=False)
     assert not desktop.calls

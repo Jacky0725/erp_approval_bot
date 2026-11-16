@@ -330,11 +330,16 @@ class AutomationJobManager:
 
             task_id = uuid.uuid4().hex
             try:
+                isolatable = {}
                 if action == "workbuddy_loop":
-                    workbuddy = load_settings().get("workbuddy") or {}
+                    settings = load_settings()
+                    workbuddy = settings.get("workbuddy") or {}
                     if not workbuddy.get("desktop_enabled") or client_path(str(workbuddy.get("executable") or "")) is None:
                         raise ValueError("WorkBuddy 联动未启用或客户端路径失效，请在基础设置核对本机配置。")
-                TaskControl(self.root_dir).ensure_allowed_start(action, options, resume_task_id)
+                    from workbuddy_bridge import WorkBuddyBridge
+                    bridge = WorkBuddyBridge(self.root_dir, settings)
+                    isolatable = bridge.isolatable_pauses(bridge.batches())
+                TaskControl(self.root_dir).ensure_allowed_start(action, options, resume_task_id, isolatable=isolatable)
                 binding = task_notification_binding(load_settings(), notification_target, self.root_dir)
                 DingTalkState(self.root_dir).save_target(task_id, binding)
                 source = "scheduler" if str(options.get("SCHEDULED_RUN", "")).lower() == "true" else "web"
@@ -423,10 +428,17 @@ class AutomationJobManager:
 
     def resume_stopped_task(self, task_id: str) -> dict[str, Any]:
         task = TaskControl(self.root_dir).get(task_id)
-        if not task or task["state"] != "stopped":
+        if not task or not TaskControl.can_resume(task["action"], task["state"], task["details"]):
             return {"started": False, "message": "仅可人工恢复明确已停止的任务。"}
         options = {key: value for key, value in task["options"].items() if key not in {"AUTOMATION_TASK_ID", "RESUME_STOPPED_TASK_ID"}}
         details = task["details"]
+        if task["state"] == "needs_review":
+            from workbuddy_bridge import WorkBuddyBridge
+            bridge = WorkBuddyBridge(self.root_dir, load_settings())
+            batch = bridge.review_batch(task)
+            if not batch or not (bridge.batch_path(batch) / "result.xlsx").is_file():
+                return {"started": False, "message": "旧批次没有可导入的结果，请先处置旧批次。"}
+            details = {**details, "scope": sorted({item["input"]["试剂清单号"] for item in batch["items"]})}
         if "scope" in details:
             if not details.get("scope"):
                 return {"started": False, "message": "原任务范围为空，无待恢复清单。"}
@@ -693,7 +705,8 @@ class AutomationJobManager:
                     if existing.get("details", {}).get("automatic_recovery") and existing.get("details", {}).get("operator_force_stop"):
                         registry.finish(result_context["task_id"], "stopped")
                     elif existing.get("state") != "stopped":
-                        needs_review = existing.get("state") == "stop_requested" or (parent and not unstarted)
+                        needs_review = (existing.get("state") == "stop_requested" or (parent and not unstarted)
+                                        or existing.get("details", {}).get("workbuddy_result_expired"))
                         registry.finish(result_context["task_id"], "completed" if success else "needs_review" if needs_review else "failed")
                         if success is False and parent and unstarted:
                             registry.release_unstarted_resume(parent)

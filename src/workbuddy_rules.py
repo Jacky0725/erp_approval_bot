@@ -5,6 +5,7 @@ import hashlib
 import io
 import json
 from pathlib import Path
+import re
 
 from openpyxl import load_workbook
 
@@ -81,13 +82,19 @@ def copy_compact(cache: Path, batch: Path, source: str) -> str:
 
 
 def verify_compact(batch: Path, source: str, manifest_sha: str) -> None:
-    target = batch / "rules_compact"
-    manifest = (target / "manifest.json").read_bytes()
+    target = batch.resolve() / "rules_compact"
+    manifest_path = target / "manifest.json"
+    if manifest_path.resolve() != manifest_path:
+        raise ValueError("紧凑规则清单路径越界。")
+    manifest = manifest_path.read_bytes()
     if sha256(manifest) != manifest_sha:
         raise ValueError("紧凑规则清单摘要不匹配。")
     data = json.loads(manifest)
     if data["source_sha256"] != source:
         raise ValueError("紧凑规则与批次源版本不匹配。")
     for name, expected in data["parts"].items():
-        if sha256((target / name).read_bytes()) != expected:
+        part = target / name
+        if not re.fullmatch(r"part-[0-9]{3,}\.txt", name) or part.resolve() != part:
+            raise ValueError("紧凑规则分段路径越界。")
+        if sha256(part.read_bytes()) != expected:
             raise ValueError(f"紧凑规则分段摘要不匹配：{name}")

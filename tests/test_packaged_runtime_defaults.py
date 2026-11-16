@@ -12,7 +12,8 @@ def test_packaged_defaults_do_not_carry_operator_state(tmp_path: Path) -> None:
     original = {
         "app": {"dry_run": False},
         "workbuddy": {"executable": "D:/Dev/WorkBuddy.exe", "project_name": "Operator project",
-                      "desktop_enabled": True, "write_enabled": True, "auto_recover": True, "batch_size": 20},
+                      "desktop_enabled": True, "write_enabled": True, "auto_recover": True,
+                      "json_handoff_trial": True, "batch_size": 20},
         "approval": {"write_mode": "generate_library", "auto_pass": True},
         "scheduler": {"enabled": True, "auto_pass": True},
         "erp_api": {"enabled_for_write": True, "base_url": "https://example.invalid"},
@@ -31,6 +32,7 @@ def test_packaged_defaults_do_not_carry_operator_state(tmp_path: Path) -> None:
     assert not actual["dingtalk_stream"]["corp_id"]
     workbuddy = actual["workbuddy"]
     assert not any(workbuddy[key] for key in ("executable", "project_name", "desktop_enabled", "write_enabled"))
-    assert workbuddy["auto_recover"] is True
+    assert workbuddy["auto_recover"] is False
+    assert workbuddy["json_handoff_trial"] is False
     assert workbuddy["batch_dir"] == "data/workbuddy"
     assert workbuddy["batch_size"] == 20

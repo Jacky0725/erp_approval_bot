@@ -24,7 +24,8 @@ from excel_exports import write_excel_atomic
 from runtime_paths import source_root
 from task_control import checkpoint, TaskControl
 from workbuddy_result_writer import (
-    FIXED_WRITER_INSTRUCTIONS, JUDGMENTS_NAME, RESULT_COLUMNS, WRITER_NAME, read_judgments, valid_basis,
+    FIXED_WRITER_INSTRUCTIONS, JUDGMENTS_NAME, RESULT_COLUMNS, WRITER_NAME,
+    parse_judgments, publish_result, read_judgments, valid_basis,
 )
 from workbuddy_rules import copy_compact, publish_compact, verify_compact
 
@@ -34,7 +35,11 @@ EMPTY_PROPERTIES = {"", "-", "—"}
 MAX_BATCH_SIZE = 100
 WEB_BATCH_TIMEOUTS = {20: 900, 30: 1200, 50: 1500}
 SUPERSEDED_FAILURE = "superseded_failed"
-LIBRARY_DONE = {"created_verified", "existing_unchanged"}
+DISCARDED_FOR_REJUDGMENT = "operator_discarded_for_rejudgment"
+# An explicit overwrite prompt is terminal: the existing library record is kept.
+LIBRARY_DONE = {"created_verified", "existing_unchanged", "needs_confirmation"}
+JSON_INPUT_NAME = "input.json"
+MAX_JUDGMENTS_BYTES = 1024 * 1024
 
 
 def batch_in_scope(state: dict[str, Any], scope: set[str] | None, *, reject_partial: bool = False) -> bool:
@@ -91,6 +96,10 @@ def record_key(record: dict[str, Any]) -> str:
     return hashlib.sha256(json.dumps(record_identity(record), ensure_ascii=False, sort_keys=True).encode()).hexdigest()
 
 
+def stable_erp_identity(record: dict[str, Any]) -> tuple[str, str]:
+    return text(record.get("试剂清单号")), text(record.get("_erp_record_id"))
+
+
 class WorkBuddyBridge:
     def __init__(self, root_dir: Path, settings: dict[str, Any]):
         self.root_dir = Path(root_dir)
@@ -118,6 +127,9 @@ class WorkBuddyBridge:
         version = state["rules_sha256"]
         if hashlib.sha256((path / "rules.xlsx").read_bytes()).hexdigest() != version:
             raise ValueError("本批规则快照被修改，禁止投递。")
+        if state.get("json_handoff"):
+            self._verify_json_handoff(state)
+            return self._json_handoff_prompt(state), "", "json"
         fixed_writer = state.get("result_writer_sha256")
         if fixed_writer and hashlib.sha256((path / WRITER_NAME).read_bytes()).hexdigest() != fixed_writer:
             raise ValueError("本批固定写表脚本被修改，禁止投递。")
@@ -149,6 +161,146 @@ class WorkBuddyBridge:
                     f"若规则或版本无法确认，停止并说明。{delivery}")
         return prompt, followup, "compact" if compact_sha else "xlsx"
 
+    def _json_handoff_prompt(self, state: dict[str, Any]) -> str:
+        return (
+            f"本任务明确使用 WB-JSON-v1 隔离试验协议，不使用项目旧的 Excel 读取或写表交付步骤。"
+            f"本批目录：{self.batch_path(state)}。仅处理本批，不访问 ERP、其他批次或外部连接器。"
+            f"用普通文件工具读取 {JSON_INPUT_NAME} 和 rules_compact/manifest.json；"
+            f"核对清单的源规则 SHA-256 为 {state['rules_sha256']}，依编号逐段读取所有 part 文本。"
+            "按完整规则独立判定，保留优先级、阈值、排除条件与示例；信息不足填“需人工复核”，不要猜测。"
+            f"只在本批目录写 UTF-8 {JUDGMENTS_NAME}，JSON 数组每条只含三个字符串字段："
+            "记录ID、物化特性类别、判断依据。记录ID原样返回，不能重复、遗漏；依据写明适用规则及事实来源。"
+            "不要读取或写入 Excel，不运行终端命令或脚本，不修改输入、规则或其他文件。"
+            f"写完只回复【判定交付】{state['batch_id']}；失败则说明原因。"
+        )
+
+    def _verify_json_handoff(self, state: dict[str, Any]) -> None:
+        path = self.batch_path(state)
+        for name in (JSON_INPUT_NAME, "input.xlsx", "result_template.xlsx"):
+            file = path / name
+            if file.resolve() != file or hashlib.sha256(file.read_bytes()).hexdigest() != state["json_handoff"].get(name):
+                raise ValueError(f"本批试验输入或模板摘要不匹配：{name}。")
+        verify_compact(path, state["rules_sha256"], state["compact_rules_sha256"])
+
+    def publish_json_result(self, state: dict[str, Any]) -> bool:
+        """Publish the standard Excel result locally after a confirmed JSON dispatch."""
+        if not state.get("json_handoff"):
+            return False
+        path = self.batch_path(state)
+        judgments = path / JUDGMENTS_NAME
+        if not judgments.exists():
+            return False
+        if state["status"] != "waiting_result":
+            raise ValueError("试验批次不在等待结果阶段。")
+        if hashlib.sha256((path / "rules.xlsx").read_bytes()).hexdigest() != state["rules_sha256"]:
+            raise ValueError("本批规则快照被修改，禁止发布结果。")
+        self._verify_json_handoff(state)
+        payload = self._read_json_judgments(state, judgments)
+        parse_judgments(payload, {item["key"] for item in state["items"]})
+        digest = hashlib.sha256(payload).hexdigest()
+        if state.get("judgments_sha256", digest) != digest:
+            raise ValueError("判定文件在冻结后发生变化，保留现场并停止。")
+        # Persist before publication so a restart can retry without changing the accepted content.
+        state["judgments_sha256"] = digest
+        self.save(state)
+        publish_result(path, judgments_payload=payload)
+        return True
+
+    @staticmethod
+    def _read_json_judgments(state: dict[str, Any], judgments: Path) -> bytes:
+        started = state.get("dispatch_started_at")
+        if state.get("dispatch_state") != "submitted" or not started:
+            raise ValueError("试验批次未确认投递，拒绝处理结果。")
+        if judgments.resolve() != judgments or not judgments.is_file():
+            raise ValueError("试验判定文件路径无效，拒绝处理结果。")
+        with judgments.open("rb") as stream:
+            info = os.fstat(stream.fileno())
+            if info.st_size > MAX_JUDGMENTS_BYTES or info.st_mtime < started:
+                raise ValueError("试验判定文件大小或时间无效，拒绝处理结果。")
+            payload = stream.read(MAX_JUDGMENTS_BYTES + 1)
+            final = os.fstat(stream.fileno())
+        if len(payload) != info.st_size or final.st_size != info.st_size or final.st_mtime_ns != info.st_mtime_ns:
+            raise ValueError("试验判定文件大小或时间无效，拒绝处理结果。")
+        return payload
+
+    @staticmethod
+    def _held_identities(batches: Iterable[dict[str, Any]]) -> set[tuple[str, str]]:
+        return {
+            stable_erp_identity(item["input"])
+            for batch in batches
+            if batch["status"] == SUPERSEDED_FAILURE
+            and (batch.get("operator_disposition") or {}).get("reason") == "operator_closed_uncertain_dispatch_without_replay"
+            for item in batch["items"]
+        }
+
+    @staticmethod
+    def isolatable_pauses(batches: Iterable[dict[str, Any]]) -> dict[tuple[str, str], set[tuple[str, str]]]:
+        pauses = {}
+        for batch in batches:
+            task_id = batch.get("operator_stop_task")
+            if (not task_id or not (batch["status"] == "waiting_result"
+                                    or batch["status"] == "operator_stopped" and batch.get("resume_status") == "waiting_result")
+                    or batch.get("dispatch_state") != "submitted"
+                    or batch.get("result_sha256") or not batch["items"]):
+                continue
+            if any(item.get("status") != "pending" or item.get("attempts") != 0
+                   or item.get("write_started") or item.get("library") for item in batch["items"]):
+                continue
+            identities = {stable_erp_identity(item["input"]) for item in batch["items"]}
+            if len(identities) == len(batch["items"]) and all(number and record_id for number, record_id in identities):
+                pauses[task_id, batch["batch_id"]] = identities
+        return pauses
+
+    def review_batch(self, task: dict[str, Any]) -> dict[str, Any] | None:
+        details = task.get("details") or {}
+        owners = {task.get("task_id"), *(details.get("resume_ancestors") or [])}
+        if task.get("action") != "workbuddy_loop" or not details.get("batch_id"):
+            return None
+        return next((batch for batch in self.batches() if batch["batch_id"] == details["batch_id"]
+                     and (batch.get("operator_stop_task") in owners
+                          or (not batch.get("operator_stop_task") and batch.get("dispatch_state") == "sending"
+                              and TaskControl.failed_workbuddy_dispatch(task))
+                          or (batch.get("operator_disposition") or {}).get("task_id") == task["task_id"])), None)
+
+    def can_discard_review(self, task: dict[str, Any], batch: dict[str, Any]) -> bool:
+        if (batch.get("operator_disposition") or {}).get("reason") == DISCARDED_FOR_REJUDGMENT:
+            return batch["operator_disposition"].get("task_id") == task["task_id"]
+        if batch.get("dispatch_state") == "sending":
+            path = self.batch_path(batch)
+            return (batch["status"] in {"waiting_result", "operator_stopped"} and bool(batch["items"])
+                    and not batch.get("result_sha256") and not batch.get("replacement")
+                    and not (path / "result.xlsx").exists() and not (path / JUDGMENTS_NAME).exists()
+                    and all(item["status"] == "pending" and item.get("attempts") == 0
+                            and not item.get("write_started") and not item.get("library") for item in batch["items"]))
+        submitted = batch.get("submitted_at") or batch.get("dispatch_started_at")
+        timeout = batch.get("result_timeout_seconds", self.config.get("result_timeout_seconds", 900))
+        return (bool(self.isolatable_pauses([batch])) and isinstance(submitted, (int, float))
+                and time.time() >= submitted + int(timeout)
+                and not batch.get("replacement") and not (self.batch_path(batch) / "result.xlsx").exists())
+
+    def discard_review(self, task: dict[str, Any], batch: dict[str, Any]) -> None:
+        if not self.can_discard_review(task, batch):
+            raise ValueError("仅能作废已超时或送达不明、没有可用结果且从未开始 ERP 写入的投递。")
+        if batch["status"] != SUPERSEDED_FAILURE:
+            batch["status"] = SUPERSEDED_FAILURE
+            batch["operator_disposition"] = {"reason": DISCARDED_FOR_REJUDGMENT,
+                                             "task_id": task["task_id"], "at": datetime.now().isoformat()}
+            batch.pop("operator_stop_task", None)
+            self.save(batch)
+            self.audit.info(json.dumps({"event": "workbuddy_result_discarded", "batch_id": batch["batch_id"],
+                                        **batch["operator_disposition"]}, ensure_ascii=False))
+        TaskControl(self.root_dir).close_workbuddy_review(
+            task["task_id"], task["details"].get("resume_ancestors") or [], batch["batch_id"])
+
+    def require_no_operator_hold(self, state: dict[str, Any]) -> None:
+        batches = self.batches()
+        held = self._held_identities(batches)
+        allowed = self.authorized_pause_ids()
+        held.update(identity for (task_id, _), identities in self.isolatable_pauses(batches).items()
+                    if task_id not in allowed for identity in identities)
+        if held.intersection(stable_erp_identity(item["input"]) for item in state["items"]):
+            raise RuntimeError(f"批次 {state['batch_id']} 包含原投递待处置记录；未发送、导入或写入。")
+
     def pause_operator_batch(self, state: dict[str, Any] | None) -> None:
         if not state or state.get("status") in {"completed", "review_pending"}:
             return
@@ -164,15 +316,18 @@ class WorkBuddyBridge:
                 control.record_details(task_id, scope=sorted({item["input"]["试剂清单号"] for item in items}), scope_frozen=True)
             TaskControl(self.root_dir).record_details(task_id,
                 batch_id=state["batch_id"], count_scope="batch", saved=max(control.get(task_id)["details"].get("saved", 0), sum(item.get("status") == "saved" for item in items)),
-                pending_library=sum(item.get("status") == "saved" and state.get("generate_library", False) and (item.get("library") or {}).get("status") not in {"created_verified", "existing_unchanged"} for item in items),
+                pending_library=sum(item.get("status") == "saved" and state.get("generate_library", False) and (item.get("library") or {}).get("status") not in LIBRARY_DONE for item in items),
                 remaining=sum(item.get("status") == "pending" for item in items),
                 uncertain=sum(item.get("error_code") in {"ERP_WRITE", "ERP_ERROR"} or (item.get("library") or {}).get("status") in {"sending", "failed"} for item in items))
 
-    def restore_authorized_pause(self, scope: set[str] | None = None) -> None:
+    def restore_authorized_pause(self, scope: set[str] | None = None, *,
+                                 isolated: set[tuple[str, str]] | None = None) -> None:
         resume = os.getenv("RESUME_STOPPED_TASK_ID", "")
         allowed = self.authorized_pause_ids()
         for state in self.batches():
             if state.get("status") == "completed" or not (state.get("operator_stop_task") or state.get("status") == "operator_stopped"):
+                continue
+            if (state.get("operator_stop_task"), state["batch_id"]) in (isolated or set()):
                 continue
             if not batch_in_scope(state, scope, reject_partial=True):
                 continue
@@ -347,12 +502,15 @@ class WorkBuddyBridge:
         return problems
 
     def prepare(self, records: Iterable[dict[str, Any]], *, compact: bool = False,
-                scope: set[str] | None = None, require_full: bool = False) -> dict[str, Any] | None:
+                scope: set[str] | None = None, require_full: bool = False,
+                json_handoff: bool = False, isolated: set[tuple[str, str]] | None = None) -> dict[str, Any] | None:
         checkpoint("准备 WorkBuddy 批次")
         existing = self.batches()
         allowed_pauses = self.authorized_pause_ids()
         if any((state.get("status") == "operator_stopped" or state.get("operator_stop_task"))
-               and state.get("status") != "completed" and batch_in_scope(state, scope, reject_partial=True)
+               and state.get("status") != "completed"
+               and (state.get("operator_stop_task"), state["batch_id"]) not in (isolated or set())
+               and batch_in_scope(state, scope, reject_partial=True)
                and state.get("operator_stop_task") not in allowed_pauses for state in existing):
             raise RuntimeError("存在人工停止的 WorkBuddy 批次，必须通过 Web UI 核对后恢复。")
         mode = self.config.get("prompt_mode", "full")
@@ -361,11 +519,18 @@ class WorkBuddyBridge:
         rule_bytes = self.rules_path().read_bytes()
         rule_digest = hashlib.sha256(rule_bytes).hexdigest()
         waiting = [s for s in existing if s["status"] == "waiting_result" and s["rules_sha256"] == rule_digest
+                   and (s.get("operator_stop_task"), s["batch_id"]) not in (isolated or set())
                    and batch_in_scope(s, scope, reject_partial=True)]
         if waiting:
             return waiting[0]
         # A failed row is retried from its original batch, not silently reissued.
-        known = {item["key"] for s in existing if s["rules_sha256"] == rule_digest and s["status"] != "superseded_before_dispatch" for item in s["items"]}
+        known = {item["key"] for s in existing if s["rules_sha256"] == rule_digest
+                 and s["status"] != "superseded_before_dispatch"
+                 and (s.get("operator_disposition") or {}).get("reason") != DISCARDED_FOR_REJUDGMENT
+                 for item in s["items"]}
+        held = self._held_identities(existing)
+        held.update(identity for key, identities in self.isolatable_pauses(existing).items()
+                    if key in (isolated or set()) for identity in identities)
         pending_reviews = {(item["input"]["试剂清单号"], item["input"]["_erp_record_id"])
                            for state in existing for item in state["items"]
                            if requires_review(state, item)}
@@ -379,7 +544,7 @@ class WorkBuddyBridge:
             if record_key(record) in known or text(record.get("物化特性")) not in EMPTY_PROPERTIES:
                 continue
             stable_id = (identity["试剂清单号"], identity["_erp_record_id"])
-            if stable_id in pending_reviews:
+            if stable_id in pending_reviews or stable_id in held:
                 continue
             if stable_id in stable_ids:
                 raise ValueError("输入中同一 ERP 明细 ID 对应多条不同记录。")
@@ -392,10 +557,11 @@ class WorkBuddyBridge:
             raise RuntimeError(f"一键匹配后不足 {size} 条待判定记录，未投递试跑。")
         if not selected:
             return None
-        return self._create_batch(selected, rule_bytes, size, compact=compact)
+        return self._create_batch(selected, rule_bytes, size, compact=compact, json_handoff=json_handoff)
 
     def _create_batch(self, selected: list[dict[str, Any]], rule_bytes: bytes, size: int, *,
-                      compact: bool, batch_id: str | None = None, replacement: dict[str, Any] | None = None) -> dict[str, Any]:
+                      compact: bool, batch_id: str | None = None, replacement: dict[str, Any] | None = None,
+                      json_handoff: bool = False) -> dict[str, Any]:
         mode = (replacement or {}).get("prompt_mode", self.config.get("prompt_mode", "full"))
         rule_digest = hashlib.sha256(rule_bytes).hexdigest()
         writer = None
@@ -403,7 +569,7 @@ class WorkBuddyBridge:
             writer = (self.batch_path(replacement) / WRITER_NAME).read_bytes()
             if hashlib.sha256(writer).hexdigest() != replacement["result_writer_sha256"]:
                 raise ValueError("原批次固定写表脚本已变化。")
-        elif replacement is None and self.config.get("fixed_result_writer") is True:
+        elif replacement is None and not json_handoff and self.config.get("fixed_result_writer") is True:
             writer = (source_root() / "src" / "workbuddy_result_writer.py").read_bytes()
         batch_id = batch_id or self._new_batch_id()
         state = {"batch_id": batch_id, "status": "waiting_result", "rules_sha256": rule_digest, "batch_size_limit": size, "items": selected}
@@ -417,7 +583,10 @@ class WorkBuddyBridge:
         path = self.batch_path(state)
         path.mkdir(parents=True, exist_ok=replacement is not None)
         (path / "rules.xlsx").write_bytes(rule_bytes)
-        if compact:
+        if json_handoff:
+            self.publish_compact_rules(rule_bytes)
+            state["compact_rules_sha256"] = copy_compact(self.directory / ".rules-cache", path, rule_digest)
+        elif compact:
             try:
                 state["compact_rules_sha256"] = copy_compact(self.directory / ".rules-cache", path, rule_digest)
             except (OSError, ValueError, KeyError, TypeError) as error:
@@ -426,6 +595,11 @@ class WorkBuddyBridge:
         write_excel_atomic(pd.DataFrame(rows), path / "input.xlsx")
         result_rows = [{"批次ID": batch_id, "记录ID": i["key"], "试剂名称": i["input"]["试剂名称"], "物化特性类别": "", "判断依据": ""} for i in selected]
         write_excel_atomic(pd.DataFrame(result_rows, columns=RESULT_COLUMNS), path / "result_template.xlsx")
+        if json_handoff:
+            (path / JSON_INPUT_NAME).write_text(json.dumps({"batch_id": batch_id, "items": rows},
+                                                          ensure_ascii=False, indent=2), encoding="utf-8")
+            state["json_handoff"] = {name: hashlib.sha256((path / name).read_bytes()).hexdigest()
+                                     for name in (JSON_INPUT_NAME, "input.xlsx", "result_template.xlsx")}
         prompt = (
             f"试剂审批批次 {batch_id}，共 {len(selected)} 条。独立判定，不访问或写入 ERP，不修改规则。\n"
             f"输入：{path / 'input.xlsx'}\n规则：{path / 'rules.xlsx'}\n"
@@ -451,6 +625,8 @@ class WorkBuddyBridge:
                 "用本机 Python/openpyxl 读取 input.xlsx，分段完整读取本批 rules.xlsx 并独立判定。"
                 f"{FIXED_WRITER_INSTRUCTIONS}"
             )
+        if json_handoff:
+            prompt = self._json_handoff_prompt(state)
         state["prompt_mode"] = mode
         (path / "prompt.txt").write_text(prompt, encoding="utf-8")
         self.save(state)
@@ -464,6 +640,7 @@ class WorkBuddyBridge:
     def replace_failed_dispatch(self, state: dict[str, Any], client: Any, *, compact: bool,
                                 still_failed: Callable[[], bool] | None = None) -> bool:
         """Reserve one replacement before materializing its files under the batch lock."""
+        self.require_no_operator_hold(state)
         path = self.batch_path(state)
         if (state["status"] != "waiting_result" or state.get("dispatch_state") != "submitted"
                 or state.get("replaces_batch_id") or state.get("result_sha256")
@@ -543,13 +720,20 @@ class WorkBuddyBridge:
     def load_results(self, state: dict[str, Any]) -> None:
         if state.get("replacement") or state["status"] == SUPERSEDED_FAILURE:
             raise ValueError("批次已交由补跑流程，禁止导入原结果。")
+        self.require_no_operator_hold(state)
         rules = self.batch_path(state) / "rules.xlsx"
         if hashlib.sha256(rules.read_bytes()).hexdigest() != state["rules_sha256"]:
             raise ValueError("本批规则快照被修改，禁止导入。")
-        if state.get("compact_rules_sha256"):
+        judgments_payload = None
+        if state.get("json_handoff"):
+            self._verify_json_handoff(state)
+            judgments_payload = self._read_json_judgments(state, self.batch_path(state) / JUDGMENTS_NAME)
+            if hashlib.sha256(judgments_payload).hexdigest() != state.get("judgments_sha256"):
+                raise ValueError("判定文件未经本机冻结或已发生变化，禁止导入。")
+        elif state.get("compact_rules_sha256"):
             verify_compact(self.batch_path(state), state["rules_sha256"], state["compact_rules_sha256"])
         path = self.batch_path(state) / "result.xlsx"
-        if path.resolve().parent != self.batch_path(state):
+        if path.resolve() != path:
             raise ValueError("结果文件路径越界。")
         payload = path.read_bytes()
         digest = hashlib.sha256(payload).hexdigest()
@@ -575,9 +759,10 @@ class WorkBuddyBridge:
                 raise ValueError(f"结果表头必须为：{'、'.join(RESULT_COLUMNS)}")
             expected = {i["key"]: i for i in state["items"]}
             judgments = None
-            if state.get("result_writer_sha256"):
+            if state.get("result_writer_sha256") or state.get("json_handoff"):
                 try:
-                    judgments = read_judgments(self.batch_path(state) / JUDGMENTS_NAME, set(expected))
+                    judgments = (parse_judgments(judgments_payload, set(expected)) if judgments_payload is not None
+                                 else read_judgments(self.batch_path(state) / JUDGMENTS_NAME, set(expected)))
                 except (ValueError, OSError) as error:
                     raise self._result_rejection(state, "", f"原始判定文件校验失败。{error}") from error
             parsed = {}
@@ -615,6 +800,8 @@ class WorkBuddyBridge:
     def process(self, state: dict[str, Any], client: Any, memory: Any, *, dry_run: bool = True,
                 generate_library: bool = False, confirm_reviews: bool = False) -> dict[str, Any]:
         """Reconcile the original record before each write; no chemical reclassification."""
+        if state.get("json_handoff") and not dry_run:
+            raise RuntimeError("WB-JSON-v1 试验批次仅允许测试运行，禁止写入 ERP。")
         if state.get("status") == "operator_stopped":
             raise RuntimeError("人工停止批次禁止直接导入，请从受控恢复入口启动。")
         checkpoint("校验 WorkBuddy 结果", batch_id=state["batch_id"])
@@ -697,6 +884,8 @@ class WorkBuddyBridge:
                         continue
                     library = item.get("library") or {}
                     if library.get("status") in LIBRARY_DONE:
+                        if library["status"] == "needs_confirmation":
+                            print(f"[workbuddy library] {item['input']['试剂名称']}：保留已有试剂库记录，跳过覆盖。", flush=True)
                         continue
                     if library:
                         print(f"[workbuddy attention] {item['input']['试剂名称']} 试剂库待核对：{library.get('detail', library['status'])}")

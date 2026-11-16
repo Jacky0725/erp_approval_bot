@@ -35,6 +35,16 @@ class WorkBuddyDesktop:
         self.config = config
 
     @staticmethod
+    def _session_id(process_id: int) -> int:
+        session_id = ctypes.c_uint32()
+        query = ctypes.WinDLL("kernel32", use_last_error=True).ProcessIdToSessionId
+        query.argtypes = (ctypes.c_uint32, ctypes.POINTER(ctypes.c_uint32))
+        query.restype = ctypes.c_int
+        if not query(process_id, ctypes.byref(session_id)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        return session_id.value
+
+    @staticmethod
     def _security_context(process_id: int) -> dict[str, Any]:
         """Read identity, session, and integrity without changing permissions."""
         import win32api
@@ -50,15 +60,9 @@ class WorkBuddyDesktop:
             token = win32security.OpenProcessToken(process, win32con.TOKEN_QUERY)
             user_sid = win32security.GetTokenInformation(token, win32security.TokenUser)[0]
             integrity_sid = win32security.GetTokenInformation(token, win32security.TokenIntegrityLevel)[0]
-            session_id = ctypes.c_uint32()
-            process_id_to_session = ctypes.WinDLL("kernel32", use_last_error=True).ProcessIdToSessionId
-            process_id_to_session.argtypes = (ctypes.c_uint32, ctypes.POINTER(ctypes.c_uint32))
-            process_id_to_session.restype = ctypes.c_int
-            if not process_id_to_session(process_id, ctypes.byref(session_id)):
-                raise ctypes.WinError(ctypes.get_last_error())
             return {
                 "user_sid": win32security.ConvertSidToStringSid(user_sid),
-                "session_id": session_id.value,
+                "session_id": WorkBuddyDesktop._session_id(process_id),
                 "integrity": int(win32security.ConvertSidToStringSid(integrity_sid).rsplit("-", 1)[-1]),
             }
         finally:
@@ -177,7 +181,7 @@ class WorkBuddyDesktop:
             return False
         return False
 
-    def _window(self):
+    def _window(self, *, allow_launch: bool = True):
         try:
             from pywinauto import Desktop
             from pywinauto.application import process_module
@@ -210,7 +214,12 @@ class WorkBuddyDesktop:
                 "检测到多个匹配窗口，无法安全选择。"
             )
         if windows:
+            if not allow_launch:
+                self._require_matching_security_context(windows[0].process_id())
+                return windows[0]
             return self._activate_window(windows[0])
+        if not allow_launch:
+            raise RuntimeError("未找到可读取的 WorkBuddy 主窗口；本次未启动客户端或点击发送。")
 
         # Avoid launching a second Electron instance when it is already running
         # in the tray or has a startup dialog without the expected title.
@@ -220,11 +229,17 @@ class WorkBuddyDesktop:
                 text=True, encoding="mbcs", errors="replace", timeout=10, check=True,
             ).stdout
             running_pids = []
+            current_session = None
             for row in csv.reader(listing.splitlines()):
                 if row and row[0].casefold().startswith("workbuddy-setup-") and row[0].casefold().endswith(".exe"):
                     raise RuntimeError("检测到 WorkBuddy 更新安装程序正在运行；等待更新完成后再试，未启动重复客户端。")
                 if not row or os.path.normcase(row[0]) != os.path.normcase(os.path.basename(executable)):
                     continue
+                if len(row) > 3 and row[3].strip().isdigit():
+                    if current_session is None:
+                        current_session = self._session_id(os.getpid())
+                    if int(row[3]) != current_session:
+                        continue
                 try:
                     pid = int(row[1])
                     if os.path.normcase(os.path.abspath(process_module(pid))) == expected:
@@ -294,7 +309,9 @@ class WorkBuddyDesktop:
                 continue
         return "\n".join(texts)
 
-    def _wait_for_submitted_message(self, window, editor, batch_id: str, timeout_seconds: int = 12) -> None:
+    def _wait_for_submitted_message(self, window, editor, batch_id: str, timeout_seconds: int = 12,
+                                    *, confirming_existing: bool = False, project: str | None = None,
+                                    expected_text: str | None = None) -> None:
         deadline = time.monotonic() + timeout_seconds
         last_error = ""
         while time.monotonic() < deadline:
@@ -303,14 +320,25 @@ class WorkBuddyDesktop:
             try:
                 editors = [e for e in window.descendants(control_type="Edit") if e.is_visible()
                            and not e.window_text().startswith(("搜索", "当前页码"))]
-                if len(editors) == 1 and not editor_value(editors[0].get_value()) and batch_id in self._visible_text(window):
-                    return
+                if len(editors) == 1 and not editor_value(editors[0].get_value()):
+                    visible = self._visible_text(window)
+                    in_project = project is None or any(
+                        e.is_visible() for e in window.descendants(title=project, control_type="Hyperlink")
+                    )
+                    if in_project and batch_id in visible and (
+                        expected_text is None or "".join(expected_text.split()) in "".join(visible.split())
+                    ):
+                        return
             except Exception as error:
                 # Electron can replace the current composer between enumeration
                 # and Value access. Reobserve; do not click Send a second time.
                 last_error = type(error).__name__
             time.sleep(0.25)
-        raise RuntimeError(f"发送按钮已点击，但未确认批次 {batch_id} 出现在对话中；发送状态不明，禁止自动重发。最后控件错误：{last_error or '无'}")
+        if confirming_existing:
+            detail = f"未能在当前对话确认批次 {batch_id} 的原投递；本次未点击发送"
+        else:
+            detail = f"本次已点击发送，但未在对话中确认批次 {batch_id}"
+        raise RuntimeError(f"{detail}；发送状态不明，禁止自动重发。最后控件错误：{last_error or '无'}")
 
     def wait_for_batch_completion(self, batch_id: str, timeout_seconds: int = 900) -> None:
         """Require a positive completion message that names this unique batch."""
@@ -323,20 +351,21 @@ class WorkBuddyDesktop:
             time.sleep(0.5)
         raise RuntimeError(f"已发现批次 {batch_id} 的结果文件，但界面未出现对应的完成确认；保留文件并暂停循环。")
 
-    def confirm_existing_submission(self, batch_id: str) -> None:
+    def confirm_existing_submission(self, batch_id: str, *, expected_text: str | None = None) -> None:
         """Read-only reconciliation of a request whose Send was already clicked."""
-        window = self._window()
+        window = self._window(allow_launch=False)
         project = str(self.config.get("project_name") or "试剂审批")
         if not any(e.is_visible() for e in window.descendants(title=project, control_type="Hyperlink")):
             raise RuntimeError("未确认当前对话属于配置项目，未恢复或重发任务。")
         self._wait_for_submitted_message(window, None, batch_id,
-                                         timeout_seconds=int(self.config.get("submission_timeout_seconds", 12)))
+                                         timeout_seconds=int(self.config.get("submission_timeout_seconds", 12)),
+                                         confirming_existing=True, project=project, expected_text=expected_text)
 
     def _project_list_entry(self, window, project):
         # Sidebar project headings are labels, not navigation links.
         anchors = [e for e in window.descendants(title="新建项目", control_type="Button") if e.is_visible()]
         if not anchors:
-            more = [e for e in window.descendants(title="更多", control_type="TabItem") if e.is_visible()]
+            more = self._project_navigation_tabs(window)
             if len(more) != 1:
                 return []
             more[0].click_input()
@@ -365,8 +394,13 @@ class WorkBuddyDesktop:
             time.sleep(0.3)
         return []
 
+    @staticmethod
+    def _project_navigation_tabs(window):
+        return [control for title in ("发现", "更多")
+                for control in window.descendants(title=title, control_type="TabItem") if control.is_visible()]
+
     def _try_sidebar_project(self, window, project) -> bool:
-        sidebar = [e for e in window.descendants(title="更多", control_type="TabItem") if e.is_visible()]
+        sidebar = self._project_navigation_tabs(window)
         if len(sidebar) != 1:
             return False
         headings = [e for e in window.descendants(title=project, control_type="Text")
@@ -470,7 +504,9 @@ class WorkBuddyDesktop:
              before_submit: Callable[[], None] | None = None,
              reuse: tuple[str, str] | None = None) -> bool:
         """Return whether the follow-up was sent in the verified previous chat."""
+        window_started = time.monotonic()
         window = self._window()
+        print(f"[workbuddy timing] window_ready={time.monotonic() - window_started:.2f}s", flush=True)
         from pywinauto.keyboard import send_keys
         from win32gui import GetForegroundWindow
         def require_focus():
@@ -494,16 +530,19 @@ class WorkBuddyDesktop:
                 print("[workbuddy] 未能确认原会话可续聊，新开任务并完整读取规则。", flush=True)
             self._open_project(window)
             editor = self._wait_for_project_editor(window)
-        if editor_value(editor.get_value()):
-            raise RuntimeError("WorkBuddy 输入框已有草稿，未覆盖或发送。")
-        editor.click_input()
         # UIA set_value changes visible text without updating the rich editor's
         # application state. Real keyboard input was verified in the desktop pilot.
         # Enter may submit the rich editor. Type one paragraph, then click Send.
         prompt = " ".join(prompt.splitlines())
-        for offset in range(0, len(prompt), 20):
-            require_focus()
-            send_keys(literal_keys(prompt[offset:offset + 20]), with_spaces=True, pause=0.001)
+        draft = editor_value(editor.get_value())
+        if draft:
+            if not batch_id or batch_id not in draft or "".join(draft.split()) != "".join(prompt.split()):
+                raise RuntimeError("WorkBuddy 输入框已有草稿，未覆盖或发送。")
+        else:
+            editor.click_input()
+            for offset in range(0, len(prompt), 20):
+                require_focus()
+                send_keys(literal_keys(prompt[offset:offset + 20]), with_spaces=True, pause=0.001)
         deadline = time.monotonic() + int(self.config.get("input_settle_timeout_seconds", 15))
         while True:
             current = editor_value(editor.get_value())
@@ -515,30 +554,48 @@ class WorkBuddyDesktop:
         if not current:
             raise RuntimeError("输入内容核对失败，保留草稿，未点击发送。")
         rect = editor.rectangle()
-        buttons = [b for b in window.descendants(control_type="Button") if not b.window_text() and b.is_visible() and b.is_enabled()]
-        candidates = []
+        buttons = [b for b in window.descendants(control_type="Button") if b.is_visible()]
+        named = []
+        unnamed = []
         for button in buttons:
             center = button.rectangle().mid_point()
             if rect.right - 90 <= center.x <= rect.right + 50 and rect.top <= center.y <= rect.bottom + 90:
-                candidates.append(button)
-        if len(candidates) != 1:
+                label = button.window_text().strip()
+                if label == "发送":
+                    named.append(button)
+                elif not label and button.is_enabled():
+                    unnamed.append(button)
+        candidates = named or unnamed
+        if len(candidates) != 1 or not candidates[0].is_enabled():
             raise RuntimeError("发送按钮不唯一或不可用，保留草稿，未发送。")
         require_focus()
         if reused and not self._is_completed_chat(window, reuse[0]):
             raise RuntimeError("续聊会话在输入后发生变化，保留草稿，未发送。")
+        current_editors = [e for e in window.descendants(control_type="Edit") if e.is_visible()
+                           and not e.window_text().startswith(("搜索", "当前页码"))]
+        current_text = editor_value(current_editors[0].get_value()) if len(current_editors) == 1 else ""
+        current_rect = current_editors[0].rectangle() if len(current_editors) == 1 else None
+        if (current_rect is None or any(getattr(current_rect, edge) != getattr(rect, edge)
+                                        for edge in ("left", "top", "right", "bottom"))
+                or "".join(current_text.split()) != "".join(prompt.split())):
+            raise RuntimeError(f"点击前无法确认当前输入框内容，未发送。输入框 {len(current_editors)} 个，"
+                               f"读回 {len(current_text)} 字，预期 {len(prompt)} 字。")
         # Persist the uncertain-send guard only once all pre-send checks pass.
         # Failure to persist it must prevent the submit click.
         if before_submit is not None:
             before_submit()
         require_focus()
-        print(f"[workbuddy] 已核对项目“{project}”及输入内容，准备提交任务。", flush=True)
+        print("[workbuddy] 已核对目标项目及输入内容，准备提交任务。", flush=True)
+        clicked_at = time.monotonic()
         candidates[0].click_input()
-        print("[workbuddy] 已点击发送，等待本批结果文件。", flush=True)
+        print("[workbuddy] 已点击发送，等待确认送达。", flush=True)
         if batch_id:
             self._wait_for_submitted_message(
                 window, editor, batch_id,
-                timeout_seconds=int(self.config.get("submission_timeout_seconds", 12)),
+                timeout_seconds=int(self.config.get("submission_timeout_seconds", 25)),
+                project=project, expected_text=prompt,
             )
+            print(f"[workbuddy timing] batch={batch_id} submission_ack={time.monotonic() - clicked_at:.2f}s", flush=True)
             print(f"[workbuddy] 批次 {batch_id} 已出现在当前对话，发送确认通过。", flush=True)
         # A failed click can be uncertain; the caller must never auto-resend it.
         return reused

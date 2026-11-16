@@ -33,7 +33,7 @@ from rule_maintainer import RuleMaintainer
 from stage_logger import StageLogger
 from ui_waits import wait_until_row_value, wait_until_spinner_hidden
 from write_failure_diagnostics import build_write_failure_debug_payload
-from task_control import checkpoint, SafeStop, TaskControl
+from task_control import checkpoint, SafeStop, TaskControl, isolates_paused_workbuddy
 
 
 class ApprovalFlowMixin:
@@ -136,6 +136,9 @@ class ApprovalFlowMixin:
         if not bridge.config.get("desktop_enabled", False):
             raise RuntimeError("WorkBuddy 自动投递尚未启用；请先完成客户端适配验证，或使用准备/导入入口。")
         dry_run = self.dry_run_enabled() or self.approval_write_mode() == "disabled"
+        json_handoff = bridge.config.get("json_handoff_trial") is True
+        if json_handoff and not dry_run:
+            raise RuntimeError("WB-JSON-v1 仅允许测试运行，禁止与正式写入同时启用。")
         if not dry_run and not bridge.config.get("write_enabled", False):
             raise RuntimeError("WorkBuddy 正式写入尚未启用；请先完成单批验证。")
         if not dry_run and self.erp_write_backend() != "api_write_with_web_verify":
@@ -155,6 +158,9 @@ class ApprovalFlowMixin:
             auto_recover = bridge.config.get("auto_recover") is True and not dry_run
             canary = os.getenv("WORKBUDDY_CANARY_BATCH") == "true"
             task_id = os.getenv("AUTOMATION_TASK_ID", "")
+            resume_task = os.getenv("RESUME_STOPPED_TASK_ID", "")
+            isolate_pauses = isolates_paused_workbuddy("workbuddy_loop", os.environ, resume_task)
+            reported_holds: dict[str, int] = {}
             canary_batch_id = (TaskControl(self.root_dir).get(task_id).get("details", {}).get("canary_batch_id")
                                if canary and task_id else None)
             projects = Path.home() / ".workbuddy" / "projects"
@@ -172,7 +178,7 @@ class ApprovalFlowMixin:
                             number for r in client.fetch_todo_tasks(all_pages=True)
                             if (number := str(r.get("清单号") or r.get("试剂清单号") or r.get("name") or "").strip())
                         ))
-                        if auto_recover or self._truthy(os.getenv("FREEZE_TODO_SCOPE", "false")):
+                        if isolate_pauses or auto_recover or self._truthy(os.getenv("FREEZE_TODO_SCOPE", "false")):
                             frozen_numbers = numbers
                             print(f"[workbuddy] 已固定本次待办范围：{', '.join(numbers) or '无待办'}", flush=True)
                     else:
@@ -182,16 +188,30 @@ class ApprovalFlowMixin:
                     return
                 checkpoint("WorkBuddy 范围已固定", scope=numbers, scope_frozen=True)
                 scope = set(numbers)
-                bridge.restore_authorized_pause(scope)
+                batches = bridge.batches()
+                pauses = bridge.isolatable_pauses(batches) if isolate_pauses else {}
+                if isolate_pauses:
+                    TaskControl(self.root_dir).ensure_allowed_start(
+                        "workbuddy_loop", os.environ, isolatable=pauses)
+                held = {identity for identities in pauses.values() for identity in identities}
+                held_counts = {number: sum(owner == number for owner, _ in held)
+                               for number in sorted({owner for owner, _ in held} & scope)}
+                if held_counts != reported_holds:
+                    checkpoint("旧投递明细隔离", workbuddy_held_counts=held_counts)
+                    for number, count in held_counts.items():
+                        print(f"[workbuddy] {number}：隔离旧投递 {count} 条；跳过整单一键匹配及旧批次导入。", flush=True)
+                    reported_holds = held_counts
+                bridge.restore_authorized_pause(scope, isolated=set(pauses))
                 def records():
                     for number in numbers:
-                        for record in bridge.matched_records(client, number, dry_run=dry_run):
+                        for record in bridge.matched_records(client, number, dry_run=dry_run or number in held_counts):
                             yield {**record, "试剂清单号": number}
                 # Resume a prepared/imported batch before fetching a new one.
                 digest = hashlib.sha256(bridge.rules_path().read_bytes()).hexdigest()
                 batches = bridge.batches()
                 outstanding = [s for s in batches if (s["status"] in {"waiting_result", "imported"}
                     or (s["status"] == "needs_attention" and s.get("generate_library"))) and s["rules_sha256"] == digest
+                    and (s.get("operator_stop_task"), s["batch_id"]) not in pauses
                     and batch_in_scope(s, scope, reject_partial=True)]
                 if canary_batch_id:
                     outstanding = [s for s in outstanding if canary_batch_id in (s["batch_id"], s.get("replaces_batch_id"))]
@@ -203,12 +223,15 @@ class ApprovalFlowMixin:
                         if child and child["status"] == "completed":
                             return
                         raise RuntimeError(f"指定清单试跑批次 {canary_batch_id} 未完成，需核对原批次。")
+                trial_options = {"json_handoff": True} if json_handoff else {}
                 if outstanding:
                     state = outstanding[0]
                 elif canary:
-                    state = bridge.prepare(records(), compact=compact_rules, scope=scope, require_full=True)
+                    state = bridge.prepare(records(), compact=compact_rules, scope=scope, require_full=True, **trial_options)
                 else:
-                    state = bridge.prepare(records(), compact=compact_rules, scope=scope)
+                    if pauses:
+                        trial_options["isolated"] = set(pauses)
+                    state = bridge.prepare(records(), compact=compact_rules, scope=scope, **trial_options)
                 active_state = state
                 if state is None:
                     bridge.report_pending_reviews(scope)
@@ -216,6 +239,14 @@ class ApprovalFlowMixin:
                     return
                 if not batch_in_scope(state, scope, reject_partial=True):
                     raise RuntimeError("未完成批次不属于本次清单范围，已停止，未投递或写入。")
+                if isolate_pauses and self.approval_write_mode() == "multi_page" and state.get("generate_library"):
+                    raise RuntimeError("本次仅保存分类，不接管已固定为生成试剂库的旧批次。")
+                bridge.require_no_operator_hold(state)
+                json_batch = bool(state.get("json_handoff"))
+                if json_batch and (not json_handoff or not dry_run):
+                    raise RuntimeError("本批为 WB-JSON-v1 试验批次，请在原隔离环境以试验模式核对，未投递或写入。")
+                if json_handoff and not json_batch:
+                    raise RuntimeError(f"存在旧协议批次 {state['batch_id']}；试验模式不接管或绕过原批次。")
                 if canary and (state.get("batch_size_limit") != bridge.config["batch_size"]
                                or not state.get("replaces_batch_id") and len(state["items"]) != bridge.config["batch_size"]):
                     raise RuntimeError("试跑必须从所选清单完成一个指定数量的满批，请先收尾已有批次。")
@@ -236,19 +267,19 @@ class ApprovalFlowMixin:
                 session_batches = 1
                 print("[workbuddy scope] " + ", ".join(dict.fromkeys(i["input"]["试剂清单号"] for i in state["items"])), flush=True)
                 print(f"[workbuddy progress] 批次 {state['batch_id']}：准备处理", flush=True)
+                if state.get("dispatch_state") == "sending":
+                    if dry_run:
+                        raise RuntimeError(f"批次 {state['batch_id']} 上次投递结果不明；本次未点击发送，禁止自动重发。")
+                    binding = (identify_dispatch(path.resolve(), state["dispatch_started_at"], projects)
+                               if state.get("dispatch_started_at") else None)
+                    if binding:
+                        state["workbuddy_request"] = binding
+                    else:
+                        desktop.confirm_existing_submission(state["batch_id"], expected_text=str(path))
+                    state["dispatch_state"] = "submitted"
+                    bridge.save(state)
+                    print(f"[workbuddy] 批次 {state['batch_id']}：已重新确认原投递，仅恢复等待，未重发。", flush=True)
                 if not (path / "result.xlsx").exists():
-                    if state.get("dispatch_state") == "sending":
-                        if dry_run:
-                            raise RuntimeError(f"批次 {state['batch_id']} 上次投递结果不明；请核对 WorkBuddy，禁止自动重发。")
-                        binding = (identify_dispatch(path.resolve(), state["dispatch_started_at"], projects)
-                                   if auto_recover and state.get("dispatch_started_at") else None)
-                        if binding:
-                            state["workbuddy_request"] = binding
-                        else:
-                            desktop.confirm_existing_submission(state["batch_id"])
-                        state["dispatch_state"] = "submitted"
-                        bridge.save(state)
-                        print(f"[workbuddy] 批次 {state['batch_id']}：已重新确认原消息在指定项目对话中，仅恢复等待，未重发。", flush=True)
                     if not state.get("dispatch_state"):
                         problems = bridge.check_before_dispatch(state, client)
                         if problems:
@@ -260,10 +291,10 @@ class ApprovalFlowMixin:
                             state["dispatch_state"] = "sending"
                             state["dispatch_started_at"] = time.time()
                             bridge.save(state)
-                        if compact_rules or reuse_chat or state.get("compact_rules_sha256") or state.get("result_writer_sha256"):
+                        if json_batch or compact_rules or reuse_chat or state.get("compact_rules_sha256") or state.get("result_writer_sha256"):
                             prompt, followup, rules_format = bridge.dispatch_prompts(state)
                             reuse = None
-                            if reuse_chat and previous_session is not None and not state.get("replaces_batch_id"):
+                            if not json_batch and reuse_chat and previous_session is not None and not state.get("replaces_batch_id"):
                                 prior_batch, prior_digest, prior_format, prior_count = previous_session
                                 if prior_count < 3 and (prior_digest, prior_format) == (state["rules_sha256"], rules_format):
                                     reuse = (prior_batch, followup)
@@ -303,9 +334,9 @@ class ApprovalFlowMixin:
                                     bridge.save(state)
                             if state.get("workbuddy_request"):
                                 outcome = dispatch_outcome(state["workbuddy_request"], projects, state["batch_id"])
-                        if result_path.exists():
-                            break
                         if outcome == "failed":
+                            if result_path.exists():
+                                raise RuntimeError(f"批次 {state['batch_id']} 的原请求明确失败；保留结果，不导入。")
                             if state.get("replaces_batch_id"):
                                 raise RuntimeError(f"补跑批次 {state['batch_id']} 再次未返回有效响应，需人工核对。")
                             if bridge.replace_failed_dispatch(
@@ -315,7 +346,15 @@ class ApprovalFlowMixin:
                                 previous_session = None
                                 replaced = True
                                 break
+                        if result_path.exists():
+                            break
+                        if json_batch and bridge.publish_json_result(state):
+                            print(f"[workbuddy] 批次 {state['batch_id']}：判定 JSON 通过格式检查，已由本机发布 Excel。", flush=True)
+                            break
                         if now >= grace_deadline:
+                            if not dry_run and task_id and state.get("dispatch_state") == "submitted":
+                                bridge.pause_operator_batch(state)
+                                TaskControl(self.root_dir).record_details(task_id, workbuddy_result_expired=True)
                             reason = ""
                             if auto_recover:
                                 reason = ("原请求的终止状态未确认；" if state.get("workbuddy_request")
@@ -333,17 +372,23 @@ class ApprovalFlowMixin:
                         outcome = dispatch_outcome(binding, projects, state["batch_id"])
                     if outcome == "failed":
                         raise RuntimeError(f"批次 {state['batch_id']} 的原请求明确失败；保留结果文件，不写入 ERP。")
-                    if state.get("dispatch_started_at") and result_path.stat().st_mtime < state["dispatch_started_at"]:
+                    result_mtime = result_path.stat().st_mtime
+                    if state.get("dispatch_started_at") and result_mtime < state["dispatch_started_at"]:
                         raise RuntimeError(f"批次 {state['batch_id']} 的结果文件早于投递，拒绝导入。")
-                    if not state.get("result_writer_sha256"):
+                    if not json_batch and not state.get("result_writer_sha256"):
                         first_digest = hashlib.sha256(result_path.read_bytes()).digest()
                         time.sleep(1)
                         if first_digest != hashlib.sha256(result_path.read_bytes()).digest():
                             raise RuntimeError(f"批次 {state['batch_id']} 的旧版结果文件仍在变化，保留文件并暂停。")
+                    validation_started = time.monotonic()
                     bridge.load_results(state)
                     confirmation = "同一请求完成" if outcome == "completed" else "界面不可读取，文件校验通过"
                     bridge.audit.info(json.dumps({"event": "workbuddy_result_accepted", "batch_id": state["batch_id"],
-                                                  "confirmation": confirmation, "result_sha256": state["result_sha256"]}, ensure_ascii=False))
+                                                  "confirmation": confirmation, "result_sha256": state["result_sha256"],
+                                                  "validation_seconds": round(time.monotonic() - validation_started, 3),
+                                                  "seconds_to_result": round(max(0, result_mtime
+                                                      - state["dispatch_started_at"]), 3)
+                                                  if state.get("dispatch_started_at") else None}, ensure_ascii=False))
                     print(f"[workbuddy] 批次 {state['batch_id']}：{confirmation}；开始同步 ERP。", flush=True)
                 else:
                     print(f"[workbuddy] 批次 {state['batch_id']}：沿用已校验结果，继续同步 ERP。", flush=True)
@@ -351,7 +396,7 @@ class ApprovalFlowMixin:
                 bridge.process(state, client, memory, dry_run=dry_run, generate_library=self.approval_write_mode() == "generate_library")
                 previous_session = (
                     (state["batch_id"], state["rules_sha256"], rules_format, session_batches)
-                    if reuse_chat and sent_here and state.get("result_sha256")
+                    if not json_batch and reuse_chat and sent_here and state.get("result_sha256")
                     else None
                 )
                 print(f"[workbuddy] 批次 {state['batch_id']}：结果导入阶段结束。", flush=True)

@@ -1,6 +1,8 @@
 from pathlib import Path
 import hashlib
+import json
 import sys
+import time
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -29,6 +31,22 @@ def test_handoff_import_respects_extra_write_gate(tmp_path):
     bot.approval_write_mode = lambda: "multi_page"
     with pytest.raises(RuntimeError, match="正式写入尚未启用"):
         bot.run_workbuddy_handoff(import_results=True)
+
+
+@pytest.mark.parametrize("entrypoint", ["loop", "import"])
+def test_workbuddy_formal_entry_reaches_login_with_write_settings(tmp_path, entrypoint):
+    bot = bot_at(tmp_path)
+    bot.settings["workbuddy"]["write_enabled"] = True
+    bot.dry_run_enabled = lambda: False
+    bot.approval_write_mode = lambda: "multi_page"
+    bot.erp_write_backend = lambda: "api_write_with_web_verify"
+    login = Mock()
+    bot.run_after_login_capture = login
+    if entrypoint == "loop":
+        bot.run_workbuddy_loop()
+    else:
+        bot.run_workbuddy_handoff(import_results=True)
+    login.assert_called_once()
 
 
 def test_import_requires_explicit_list_scope(tmp_path, monkeypatch):
@@ -62,6 +80,153 @@ def approval_records(number, size):
     return [{"试剂清单号": number, "_erp_record_id": str(i), "序号": str(i),
              "试剂名称": f"虚拟试剂 {i}", "物化特性": "-", "_erp_parent_state": "wait"}
             for i in range(1, size + 1)]
+
+
+def test_json_trial_loop_publishes_and_validates_without_erp_writes(tmp_path, monkeypatch):
+    from openpyxl import Workbook
+
+    bot = bot_at(tmp_path)
+    bot.settings["workbuddy"].update(json_handoff_trial=True, batch_size=2, reuse_chat=True)
+    book = Workbook()
+    book.active.append(["规则", "说明"])
+    book.active.append(["SMOKE", "两条虚构记录测试"])
+    book.save(tmp_path / "config/rules_structured.xlsx")
+    book.close()
+    rows = approval_records("SJ001", 2)
+    client = SimpleNamespace(fetch_reagent_detail=lambda _: rows)
+    monkeypatch.setattr(approval_flow, "ErpApiClient", lambda *_: client)
+    bridge = WorkBuddyBridge(tmp_path, bot.settings)
+    sent = []
+
+    def send(self, prompt, *, batch_id, before_submit, reuse):
+        assert reuse is None and "WB-JSON-v1" in prompt and "不运行终端命令" in prompt
+        state, = bridge.batches()
+        path = bridge.batch_path(state)
+        data = json.loads((path / "input.json").read_text(encoding="utf-8"))
+        assert data["batch_id"] == batch_id
+        assert not (path / "write_result.py").exists()
+        before_submit()
+        assert bridge.batches()[0]["dispatch_state"] == "sending"
+        (path / "judgments.json").write_text(json.dumps([
+            {"记录ID": i["记录ID"], "物化特性类别": "普通类", "判断依据": "隔离规则 SMOKE"}
+            for i in data["items"]
+        ], ensure_ascii=False), encoding="utf-8")
+        sent.append(batch_id)
+        return False
+
+    monkeypatch.setattr(WorkBuddyDesktop, "send", send)
+    bot.run_workbuddy_loop()
+    state, = bridge.batches()
+    assert sent == [state["batch_id"]]
+    assert state["status"] == "imported" and state["result_sha256"]
+    assert (bridge.batch_path(state) / "result.xlsx").is_file()
+    with pytest.raises(RuntimeError, match="禁止写入 ERP"):
+        bridge.process(state, None, None, dry_run=False)
+    bot.dry_run_enabled = lambda: False
+    bot.approval_write_mode = lambda: "multi_page"
+    with pytest.raises(RuntimeError, match="禁止与正式写入同时启用"):
+        bot.run_workbuddy_loop()
+
+
+def test_json_trial_does_not_take_over_an_old_batch(tmp_path, monkeypatch):
+    bot = bot_at(tmp_path)
+    bot.settings["workbuddy"]["json_handoff_trial"] = True
+    bridge = WorkBuddyBridge(tmp_path, bot.settings)
+    state = bridge.prepare(approval_records("SJ001", 1))
+    path = bridge.batch_path(state) / "state.json"
+    state["dispatch_state"] = "sending"
+    bridge.save(state)
+    before = path.read_bytes()
+    send = Mock()
+    monkeypatch.setattr(WorkBuddyDesktop, "send", send)
+    with pytest.raises(RuntimeError, match="试验模式不接管或绕过原批次"):
+        bot.run_workbuddy_loop()
+    send.assert_not_called()
+    assert path.read_bytes() == before
+
+
+def test_operator_closed_records_remain_held_after_rules_and_identity_details_change(tmp_path):
+    bot = bot_at(tmp_path)
+    bridge = WorkBuddyBridge(tmp_path, bot.settings)
+    source = approval_records("SJ001", 2)
+    old = bridge.prepare(source[:1])
+    old.update(status="superseded_failed", dispatch_state="sending", operator_disposition={
+        "reason": "operator_closed_uncertain_dispatch_without_replay",
+    })
+    bridge.save(old)
+    (bridge.batch_path(old) / "result.xlsx").write_bytes(b"late result")
+    bridge.rules_path().write_bytes(b"changed rules")
+    source[0]["试剂名称"] = "updated name"
+    new = bridge.prepare(source)
+    assert [i["input"]["_erp_record_id"] for i in new["items"]] == ["2"]
+    with pytest.raises(ValueError, match="禁止导入原结果"):
+        bridge.load_results(old)
+    new["items"].append(old["items"][0])
+    with pytest.raises(RuntimeError, match="待处置记录"):
+        bridge.load_results(new)
+    assert (bridge.batch_path(old) / "result.xlsx").read_bytes() == b"late result"
+
+
+def test_json_publication_uses_frozen_bytes_and_rejects_later_edits(tmp_path, monkeypatch):
+    from openpyxl import Workbook
+    import workbuddy_bridge
+    from workbuddy_result_writer import publish_result
+
+    book = Workbook()
+    book.active.append(["rule"])
+    book.save(tmp_path / "rules.xlsx")
+    book.close()
+    bridge = WorkBuddyBridge(tmp_path, {"paths": {"structured_rules_excel": "rules.xlsx"}})
+    state = bridge.prepare(approval_records("SJ001", 1), json_handoff=True)
+    path = bridge.batch_path(state)
+    state.update(dispatch_state="submitted", dispatch_started_at=time.time() - 60)
+    row = {"记录ID": state["items"][0]["key"], "物化特性类别": "普通类", "判断依据": "原始判定"}
+    source = path / "judgments.json"
+    original = json.dumps([row], ensure_ascii=False).encode()
+    source.write_bytes(original)
+
+    def tamper_and_publish(directory, *, judgments_payload):
+        assert judgments_payload == original
+        assert bridge.batches()[0]["judgments_sha256"] == hashlib.sha256(original).hexdigest()
+        source.write_text(json.dumps([{**row, "判断依据": "被替换的判定"}]), encoding="utf-8")
+        publish_result(directory, judgments_payload=judgments_payload)
+
+    monkeypatch.setattr(workbuddy_bridge, "publish_result", tamper_and_publish)
+    assert bridge.publish_json_result(state)
+    with pytest.raises(ValueError, match="未经本机冻结或已发生变化"):
+        bridge.load_results(state)
+    source.write_bytes(original)
+    bridge.load_results(state)
+    assert state["items"][0]["result"]["判断依据"] == "原始判定"
+
+
+@pytest.mark.parametrize("problem,match", [
+    ("unknown", "未确认投递"), ("stale", "大小或时间"), ("modified", "摘要不匹配"),
+    ("incomplete", "缺少记录ID"), ("duplicate_fields", "不允许重复字段"),
+])
+def test_json_trial_rejects_unsafe_judgments(tmp_path, problem, match):
+    from openpyxl import Workbook
+
+    book = Workbook()
+    book.active.append(["rule", "description"])
+    rule_path = tmp_path / "rules.xlsx"
+    book.save(rule_path)
+    book.close()
+    bridge = WorkBuddyBridge(tmp_path, {"paths": {"structured_rules_excel": str(rule_path)}})
+    state = bridge.prepare(approval_records("SJ001", 1), json_handoff=True)
+    path = bridge.batch_path(state)
+    judgments = [{"记录ID": state["items"][0]["key"], "物化特性类别": "普通类", "判断依据": "隔离试验"}]
+    state["dispatch_started_at"] = time.time() + (60 if problem == "stale" else -60)
+    state["dispatch_state"] = "sending" if problem == "unknown" else "submitted"
+    (path / "judgments.json").write_text(json.dumps([] if problem == "incomplete" else judgments), encoding="utf-8")
+    if problem == "duplicate_fields":
+        raw = json.dumps(judgments, ensure_ascii=False).replace('"判断依据":', '"判断依据": "重复字段", "判断依据":')
+        (path / "judgments.json").write_text(raw, encoding="utf-8")
+    if problem == "modified":
+        (path / "input.json").write_text("{}", encoding="utf-8")
+    with pytest.raises(ValueError, match=match):
+        bridge.publish_json_result(state)
+    assert not (path / "result.xlsx").exists()
 
 
 def test_unknown_identity_policy_is_in_new_batch_rule_snapshot(tmp_path):

@@ -178,3 +178,115 @@ def test_reviewed_prepared_batch_can_be_used_without_submitting_on_resume(workfl
     monkeypatch.delenv("RESUME_STOPPED_TASK_ID")
     assert h.bridge.prepare([])["batch_id"] == state["batch_id"]
     assert not h.bridge.batches()[0].get("dispatch_state")
+
+
+@pytest.mark.parametrize("write_mode", ["multi_page", "generate_library"])
+def test_full_save_loop_isolates_only_verified_paused_rows(workflow, monkeypatch, write_mode):
+    import approval_flow
+    from browser_bot import BrowserBot
+
+    h = workflow
+    h.state.update(status="waiting_result", dispatch_state="submitted")
+    h.state["items"] = h.state["items"][:1]
+    h.state["items"][0].pop("result")
+    h.bridge.pause_operator_batch(h.state)
+    h.control.record_details("task-1", scope=["SJ001", "SJ002"], scope_frozen=True)
+    h.control.finish("task-1", "stopped")
+    options = {"PROCESS_ALL_TODOS": "true", "APPROVAL_WRITE_MODE": write_mode, "AUTO_PASS": "false"}
+    pauses = h.bridge.isolatable_pauses(h.bridge.batches())
+    assert pauses == {("task-1", "abc"): {("SJ001", "1")}}
+    h.control.ensure_allowed_start("workbuddy_loop", options, isolatable=pauses)
+    for changed in ({"APPROVAL_WRITE_MODE": "disabled"}, {"AUTO_PASS": "true"}, {"WORKBUDDY_CANARY_BATCH": "true"}):
+        with pytest.raises(ValueError, match="人工停止"):
+            h.control.ensure_allowed_start("workbuddy_loop", {**options, **changed}, isolatable=pauses)
+    with pytest.raises(ValueError, match="人工停止"):
+        h.control.ensure_allowed_start("workbuddy_loop", options)
+    h.control.register("task-2", "workbuddy_loop", options, {"source": "web"}, h.settings)
+    for key, value in {**options, "AUTOMATION_TASK_ID": "task-2", "TARGET_LIST_NUMBERS": "", "TARGET_LIST_NUMBER": ""}.items():
+        monkeypatch.setenv(key, value)
+    bot = BrowserBot(settings=h.settings, root_dir=h.root)
+    bot.run_after_login_capture = lambda screenshot, html, callback: callback(object())
+    match = Mock(side_effect=lambda number: {"changes": [], "records": [third]})
+    third = {**h.records[1], "试剂清单号": "SJ002"}
+    h.settings["app"]["dry_run"] = False
+    h.settings["workbuddy"]["write_enabled"] = True
+    monkeypatch.setattr(bot, "dry_run_enabled", lambda: False)
+    monkeypatch.setattr(bot, "erp_write_backend", lambda: "api_write_with_web_verify")
+    client = SimpleNamespace(
+        write_enabled=lambda: True, fetch_todo_tasks=Mock(return_value=[{"name": "SJ001"}, {"name": "SJ002"}]),
+        fetch_reagent_detail=lambda number: h.records if number == "SJ001" else [third], match_reagent_list=match,
+    )
+    monkeypatch.setattr(approval_flow, "ErpApiClient", lambda *args: client)
+    monkeypatch.setattr(approval_flow.ReagentMemory, "from_settings", Mock())
+    process = Mock()
+    monkeypatch.setattr(WorkBuddyBridge, "process", process)
+    create = Mock(return_value=None)
+    monkeypatch.setattr(WorkBuddyBridge, "_create_batch", create)
+    before = (h.path / "state.json").read_bytes()
+    bot.run_workbuddy_loop()
+    client.fetch_todo_tasks.assert_called_once_with(all_pages=True)
+    match.assert_called_once_with("SJ002")
+    assert [(item["input"]["试剂清单号"], item["input"]["_erp_record_id"])
+            for item in create.call_args.args[0]] == [("SJ001", "2"), ("SJ002", "2")]
+    process.assert_not_called()
+    assert (h.path / "state.json").read_bytes() == before
+    assert (h.path / "result.xlsx").exists()
+    assert h.control.get("task-2")["details"]["workbuddy_held_counts"] == {"SJ001": 1}
+
+
+def test_failed_resume_only_holds_its_batch_and_discard_allows_fresh_blank_rows(workflow, monkeypatch):
+    h = workflow
+    h.path.joinpath("result.xlsx").unlink()
+    h.state.update(status="waiting_result", dispatch_state="submitted", submitted_at=1)
+    h.bridge.pause_operator_batch(h.state)
+    h.control.record_details("task-1", scope=["SJ001", "SJ002"], scope_frozen=True)
+    h.control.finish("task-1", "stopped")
+    options = {"TARGET_LIST_NUMBERS": "SJ001,SJ002", "APPROVAL_WRITE_MODE": "generate_library", "AUTO_PASS": "false"}
+    h.control.register("task-2", "workbuddy_loop", options, {"source": "web"}, h.settings, resume="task-1")
+    monkeypatch.setenv("AUTOMATION_TASK_ID", "task-2")
+    monkeypatch.setenv("RESUME_STOPPED_TASK_ID", "task-1")
+    h.bridge.restore_authorized_pause()
+    h.control.finish("task-2", "needs_review")
+    monkeypatch.delenv("RESUME_STOPPED_TASK_ID")
+    task, = h.control.stopped()
+    assert task["task_id"] == "task-2"
+    pauses = h.bridge.isolatable_pauses(h.bridge.batches())
+    h.control.ensure_allowed_start("workbuddy_loop", options, isolatable=pauses)
+    outside = {**h.records[0], "试剂清单号": "SJ002"}
+    next_batch = h.bridge.prepare([*h.records, outside], scope={"SJ001", "SJ002"}, isolated=set(pauses))
+    assert [item["input"]["试剂清单号"] for item in next_batch["items"]] == ["SJ002"]
+    batch = h.bridge.review_batch(task)
+    batch["items"][0]["write_started"] = True
+    assert not h.bridge.can_discard_review(task, batch)
+    batch["items"][0].pop("write_started")
+    h.path.joinpath("result.xlsx").write_bytes(b"arrived before discard")
+    assert not h.bridge.can_discard_review(task, batch)
+    h.path.joinpath("result.xlsx").unlink()
+    h.bridge.discard_review(task, batch)
+    assert h.control.get("task-1")["state"] == h.control.get("task-2")["state"] == "closed"
+    h.control.ensure_allowed_start("workbuddy_loop", options)
+    h.path.joinpath("result.xlsx").write_bytes(b"late result")
+    with pytest.raises(ValueError, match="禁止导入"):
+        WorkBuddyBridge(h.root, h.settings).load_results(batch)
+    records = [{**h.records[0], "物化特性": "普通类"}, h.records[1]]
+    new_batch = h.bridge.prepare(records, scope={"SJ001"})
+    assert [item["input"]["_erp_record_id"] for item in new_batch["items"]] == ["2"]
+
+
+def test_uncertain_send_can_be_discarded_without_accepting_late_result(workflow):
+    h = workflow
+    h.path.joinpath("result.xlsx").unlink()
+    h.state.update(status="waiting_result", dispatch_state="sending")
+    h.bridge.save(h.state)
+    h.control.checkpoint("task-1", "WorkBuddy 投递前安全点", batch_id="abc")
+    h.control.finish("task-1", "failed")
+    task, = h.control.stopped()
+    batch = h.bridge.review_batch(task)
+    h.path.joinpath("judgments.json").write_bytes(b"late judgments")
+    assert not h.bridge.can_discard_review(task, batch)
+    h.path.joinpath("judgments.json").unlink()
+    h.bridge.discard_review(task, batch)
+    assert h.control.get("task-1")["state"] == "closed"
+    h.path.joinpath("result.xlsx").write_bytes(b"late result")
+    with pytest.raises(ValueError, match="禁止导入"):
+        WorkBuddyBridge(h.root, h.settings).load_results(batch)

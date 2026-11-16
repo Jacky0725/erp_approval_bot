@@ -484,6 +484,9 @@
           row.innerHTML = `<td>${escapeHtml(task.task_id.slice(0, 12))}</td><td>${escapeHtml(task.action)}</td><td>${escapeHtml(task.phase)}</td><td>${escapeHtml(String(details.saved ?? "-"))} / ${escapeHtml(String(details.pending_library ?? "-"))}</td><td><label class="check"><input type="checkbox" aria-label="已人工核对 ERP、投递与结果文件">已核对</label></td><td><button type="button">核对恢复</button></td>`;
           const check = row.querySelector("input");
           const button = row.querySelector("button");
+          if (task.state === "needs_review") row.cells[2].textContent = `待核对 · ${task.phase}`;
+          if (task.lists?.length) row.cells[2].append(` · ${task.lists.join("、")}`);
+          if (task.can_discard) button.textContent = "作废旧结果";
           check.checked = reviewedStoppedTasks.has(task.task_id);
           button.disabled = controlRunning || !check.checked;
           check.addEventListener("change", () => {
@@ -491,20 +494,24 @@
             button.disabled = controlRunning || !check.checked;
           });
           button.addEventListener("click", async () => {
-            if (!check.checked || !confirm(`已人工核对任务 ${task.task_id.slice(0, 12)} 的 ERP、投递状态与结果文件，并确认只恢复核对过的剩余步骤？结果不明的操作不会自动重发。`)) return;
+            const message = task.can_discard
+              ? "作废这批旧结果？下一次批次循环会回读 ERP，只重新判定仍为空的明细。"
+              : `已人工核对任务 ${task.task_id.slice(0, 12)} 的 ERP、投递状态与结果文件，并确认只恢复核对过的剩余步骤？结果不明的操作不会自动重发。`;
+            if (!check.checked || !confirm(message)) return;
             button.disabled = true;
             try {
-              const payload = {task_id: task.task_id, verified: true};
+              const payload = {task_id: task.task_id, verified: true, discard: Boolean(task.can_discard)};
               const ticket = await controlRequest("/api/resume/prepare", payload);
               const result = await controlRequest("/api/resume", {...payload, ticket: ticket.ticket});
-              if (!result.started) alert(result.message || "任务未恢复");
+              if (result.discarded) alert("旧批次已作废。请刷新待办后启动批次循环。");
+              else if (!result.started) alert(result.message || "任务未恢复");
               reviewedStoppedTasks.delete(task.task_id);
               await refreshStatus();
             } catch (error) { alert(error.message || String(error)); }
           });
           body.appendChild(row);
         }
-        if (!body.children.length) body.innerHTML = '<tr><td colspan="6">暂无人工停止任务</td></tr>';
+        if (!body.children.length) body.innerHTML = '<tr><td colspan="6">暂无停止或待核对任务</td></tr>';
       } catch (error) { body.innerHTML = `<tr><td colspan="6">${escapeHtml(error.message || String(error))}</td></tr>`; }
       finally { stoppedTasksLoading = false; }
     }

@@ -22,6 +22,16 @@ def selected_lists(options: dict[str, Any]) -> set[str]:
     return {part for part in re.split(r"[,，;；\s]+", str(value)) if part}
 
 
+def isolates_paused_workbuddy(action: str, options: Any, resume: str = "") -> bool:
+    return (
+        action == "workbuddy_loop" and not resume
+        and (str(options.get("PROCESS_ALL_TODOS", "")).lower() == "true" or selected_lists(options))
+        and options.get("APPROVAL_WRITE_MODE") in {"multi_page", "generate_library"}
+        and str(options.get("AUTO_PASS", "")).lower() == "false"
+        and str(options.get("WORKBUDDY_CANARY_BATCH", "")).lower() != "true"
+    )
+
+
 class SafeStop(BaseException):
     """Not caught by ERP retry handlers: a checkpoint is not an ERP failure."""
 
@@ -63,7 +73,7 @@ class TaskControl:
             details = {}
             if resume:
                 row = db.execute("SELECT state, details, rule_hash FROM task_control WHERE id=?", (resume,)).fetchone()
-                if not row or row[0] != "stopped":
+                if not row or not self.can_resume(action, row[0], json.loads(row[1])):
                     raise ValueError("原任务并非可恢复的人工停止状态。")
                 if row[2] != rules_digest(self.root, settings):
                     raise ValueError("规则、执行配置或 ERP 环境已变化，禁止直接恢复旧任务；请先人工核对。")
@@ -71,6 +81,7 @@ class TaskControl:
                 if details.get("erp_recovery_digest") and details["erp_recovery_digest"] != erp_recovery_digest(settings):
                     raise ValueError("ERP 账号或接口配置已变化，禁止直接恢复旧任务；请先人工核对。")
                 details.pop("automatic_recovery_blocked", None)
+                details.pop("workbuddy_result_expired", None)
                 details["resume_ancestors"] = list(dict.fromkeys([*(details.get("resume_ancestors") or []), resume]))
                 db.execute("UPDATE task_control SET state='resuming' WHERE id=?", (resume,))
             if action == "workbuddy_loop" and (settings.get("workbuddy") or {}).get("auto_recover") is True:
@@ -133,23 +144,32 @@ class TaskControl:
                               "AND state IN ('running','stop_requested','stopped','needs_review')").fetchall()
         return any(json.loads(row[0]).get("automatic_recovery") for row in rows)
 
-    def ensure_allowed_start(self, action: str, options: dict[str, Any], resume: str = "") -> None:
+    def ensure_allowed_start(self, action: str, options: dict[str, Any], resume: str = "",
+                             *, isolatable: dict[tuple[str, str], set[tuple[str, str]]] | None = None) -> None:
         if action not in STOPPABLE_ACTIONS:
             return
         with self.connect() as db:
             self.schema(db)
-            rows = db.execute("""SELECT id,options,details,state,requested_by FROM task_control
+            rows = db.execute("""SELECT id,options,details,state,requested_by,action FROM task_control
                                  WHERE action IN (?,?,?,?) AND state IN ('stopped','stop_requested','needs_review')""",
                               STOPPABLE_ACTIONS).fetchall()
         selected = selected_lists(options)
-        for task_id, old_options, details, state, requested_by in rows:
+        for task_id, old_options, details, state, requested_by, old_action in rows:
             if task_id == resume:
                 continue
             details, old_options = json.loads(details), json.loads(old_options)
-            if state == "needs_review" and not (requested_by or details.get("resume_ancestors")):
+            if state == "needs_review" and not (requested_by or self.can_resume(old_action, state, details)):
                 continue
             scope = set(details.get("scope") or []) or selected_lists(old_options)
+            batch_id = details.get("batch_id")
+            keys = [(owner, batch_id) for owner in [task_id, *(details.get("resume_ancestors") or [])]]
+            pause = next((key for key in keys if key in (isolatable or ())), None)
+            if pause and old_action == "workbuddy_loop" and state != "stop_requested":
+                scope = {number for number, _ in isolatable[pause]}
             if not selected or not scope or selected & scope:
+                if (isolates_paused_workbuddy(action, options, resume) and state in {"stopped", "needs_review"}
+                        and old_action == "workbuddy_loop" and pause):
+                    continue
                 raise ValueError("该范围存在人工停止或停止结果待核对的任务，禁止自动接续。请先在 Web UI 核对。")
 
     def get(self, task_id: str) -> dict[str, Any]:
@@ -164,11 +184,39 @@ class TaskControl:
             data[key] = json.loads(data[key]) if data[key] else {}
         return data
 
+    @staticmethod
+    def can_resume(action: str, state: str, details: dict[str, Any]) -> bool:
+        return state == "stopped" or (
+            action == "workbuddy_loop" and state == "needs_review"
+            and bool(details.get("resume_ancestors") or details.get("workbuddy_result_expired"))
+        )
+
+    @staticmethod
+    def failed_workbuddy_dispatch(task: dict[str, Any]) -> bool:
+        return (task.get("action") == "workbuddy_loop" and task.get("state") == "failed"
+                and task.get("phase") == "WorkBuddy 投递前安全点"
+                and bool(task.get("details", {}).get("batch_id")))
+
     def stopped(self) -> list[dict[str, Any]]:
         with self.connect() as db:
             self.schema(db)
-            ids = db.execute("SELECT id FROM task_control WHERE state='stopped' ORDER BY created DESC LIMIT 50").fetchall()
-        return [self.get(row[0]) for row in ids]
+            rows = db.execute("SELECT id, action, state, phase, details FROM task_control WHERE state IN ('stopped','needs_review') "
+                              "OR (state='failed' AND action='workbuddy_loop' AND phase='WorkBuddy 投递前安全点') "
+                              "ORDER BY created DESC").fetchall()
+        ids = [task_id for task_id, action, state, phase, details in rows
+               if self.can_resume(action, state, json.loads(details)) or self.failed_workbuddy_dispatch(
+                   {"action": action, "state": state, "phase": phase, "details": json.loads(details)})]
+        return [self.get(task_id) for task_id in ids[:50]]
+
+    def close_workbuddy_review(self, task_id: str, ancestors: list[str], batch_id: str) -> None:
+        with self.connect() as db:
+            self.schema(db)
+            db.execute("BEGIN IMMEDIATE")
+            db.execute("UPDATE task_control SET state='closed', phase=? WHERE id=? AND state IN ('stopped','needs_review','failed')",
+                       ("旧批次已作废", task_id))
+            db.executemany("UPDATE task_control SET state='closed', phase=? WHERE id=? AND action='workbuddy_loop' "
+                           "AND state='resuming' AND json_extract(details, '$.batch_id')=?",
+                           [("旧批次已作废", ancestor, batch_id) for ancestor in ancestors])
 
     def request(self, task_id: str, actor: dict[str, str]) -> bool:
         with self.connect() as db:

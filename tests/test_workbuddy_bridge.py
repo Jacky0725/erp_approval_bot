@@ -358,11 +358,29 @@ def test_library_state_is_separate_and_never_repeated(bridge,library_status):
     bridge.process(state,client,memory,dry_run=False,generate_library=True)
     assert state['items'][0]['status']=='saved'
     assert state['items'][0]['library']['status']==library_status
-    complete=library_status in {'created_verified','existing_unchanged'}
+    complete=library_status in {'created_verified','existing_unchanged','needs_confirmation'}
     assert (state['status']=='completed')==complete
     assert (bridge.batch_path(state)/'result.xlsx').exists()!=complete
     bridge.process(bridge.batches()[0],client,memory,dry_run=False,generate_library=False)
     assert calls==['1'] and client.writes==['1']
+    if complete:
+        bridge.require_safe_continuation(state, {"SJ001"})
+    else:
+        with pytest.raises(RuntimeError, match="待核对"):
+            bridge.require_safe_continuation(state, {"SJ001"})
+
+
+def test_saved_overwrite_prompt_from_old_run_can_continue_without_erp_calls(bridge):
+    state = bridge.prepare(records(1))
+    results(bridge, state)
+    bridge.load_results(state)
+    state.update(status="needs_attention", generate_library=True, pending_verification_count=1)
+    state["items"][0].update(status="saved", library={"status": "needs_confirmation", "library_id": 8})
+    bridge.save(state)
+    bridge.process(state, object(), object(), dry_run=False, generate_library=True)
+    bridge.require_safe_continuation(state, {"SJ001"})
+    assert state["status"] == "completed"
+    assert state["items"][0]["library"]["library_id"] == 8
 
 
 def test_library_is_not_generated_when_category_save_fails(bridge):

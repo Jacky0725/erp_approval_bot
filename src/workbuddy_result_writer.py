@@ -28,7 +28,17 @@ def valid_basis(value: str) -> bool:
 
 
 def read_judgments(path: Path, expected_ids: set[str]) -> dict[str, tuple[str, str]]:
-    rows = json.loads(path.read_text(encoding="utf-8-sig"))
+    return parse_judgments(path.read_bytes(), expected_ids)
+
+
+def parse_judgments(payload: bytes, expected_ids: set[str]) -> dict[str, tuple[str, str]]:
+    def unique_fields(pairs):
+        row = dict(pairs)
+        if len(row) != len(pairs):
+            raise ValueError("判定 JSON 不允许重复字段。")
+        return row
+
+    rows = json.loads(payload.decode("utf-8-sig"), object_pairs_hook=unique_fields)
     if not isinstance(rows, list):
         raise ValueError("judgments.json 必须是 JSON 数组。")
     results = {}
@@ -70,12 +80,13 @@ def _input_identities(path: Path, batch_id: str) -> dict[str, tuple[str, str, st
         workbook.close()
 
 
-def publish_result(directory: Path) -> None:
+def publish_result(directory: Path, *, judgments_payload: bytes | None = None) -> None:
     result_path = directory / "result.xlsx"
     if result_path.exists():
         raise FileExistsError("result.xlsx 已存在，保留原文件。")
     identities = _input_identities(directory / "input.xlsx", directory.name)
-    judgments = read_judgments(directory / JUDGMENTS_NAME, set(identities))
+    judgments = (read_judgments(directory / JUDGMENTS_NAME, set(identities)) if judgments_payload is None
+                 else parse_judgments(judgments_payload, set(identities)))
     expected = [(batch, key, name, *judgments[key]) for batch, key, name in identities.values()]
     workbook = load_workbook(directory / "result_template.xlsx", data_only=False)
     temporary = None

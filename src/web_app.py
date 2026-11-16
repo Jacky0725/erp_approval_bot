@@ -905,8 +905,21 @@ async def api_safe_stop(request: Request) -> JSONResponse:
 
 @app.get("/api/stopped-tasks")
 def api_stopped_tasks() -> JSONResponse:
+    from workbuddy_bridge import WorkBuddyBridge
+
     tasks = TaskControl(ROOT_DIR).stopped()
-    return JSONResponse({"tasks": [{key: task[key] for key in ("task_id", "action", "phase", "details")} for task in tasks]})
+    bridge = WorkBuddyBridge(ROOT_DIR, load_settings())
+    items = []
+    for task in tasks:
+        item = {key: task[key] for key in ("task_id", "action", "phase", "details", "state")}
+        batch = bridge.review_batch(task)
+        if TaskControl.failed_workbuddy_dispatch(task) and not (batch and bridge.can_discard_review(task, batch)):
+            continue
+        if batch:
+            item["can_discard"] = bridge.can_discard_review(task, batch)
+            item["lists"] = sorted({entry["input"]["试剂清单号"] for entry in batch["items"]})
+        items.append(item)
+    return JSONResponse({"tasks": items})
 
 
 @app.post("/api/resume/prepare")
@@ -916,8 +929,12 @@ async def api_resume_prepare(request: Request) -> JSONResponse:
         raise HTTPException(status_code=400, detail="必须先人工核对 ERP、投递状态和结果文件。")
     task_id = str(payload.get("task_id") or "")
     task = TaskControl(ROOT_DIR).get(task_id)
-    if task.get("state") != "stopped":
+    discard = payload.get("discard") is True
+    if not task or not (TaskControl.can_resume(task["action"], task["state"], task["details"])
+                        or discard and TaskControl.failed_workbuddy_dispatch(task)):
         raise HTTPException(status_code=409, detail="原任务不是已人工停止状态。")
+    if discard:
+        return JSONResponse(security.issue_ticket("discard_workbuddy", {"task_id": task_id}))
     return JSONResponse(security.issue_ticket("resume", {"task_id": task_id, "verified": True}))
 
 
@@ -927,6 +944,27 @@ async def api_resume(request: Request) -> JSONResponse:
     if not isinstance(payload, dict) or payload.get("verified") is not True:
         raise HTTPException(status_code=400, detail="请先完成手工核对。")
     task_id = str(payload.get("task_id") or "")
+    if payload.get("discard") is True:
+        from web_runner import worker_may_be_alive
+        from workbuddy_bridge import WorkBuddyBridge
+
+        security.consume_ticket(str(payload.get("ticket") or ""), "discard_workbuddy", {"task_id": task_id})
+        with manager._lock:
+            if manager.running or manager._unsettled_workbuddy_startup():
+                raise HTTPException(status_code=409, detail="请等待当前任务结束后再处置旧批次。")
+            bridge = WorkBuddyBridge(ROOT_DIR, load_settings())
+            with bridge.exclusive():
+                task = TaskControl(ROOT_DIR).get(task_id)
+                batch = bridge.review_batch(task)
+                if (not batch or not (TaskControl.can_resume(task["action"], task["state"], task["details"])
+                                      or TaskControl.failed_workbuddy_dispatch(task))
+                        or worker_may_be_alive(task["details"].get("worker_pid"))):
+                    raise HTTPException(status_code=409, detail="旧任务状态无法确认，当前不能作废。")
+                try:
+                    bridge.discard_review(task, batch)
+                except ValueError as error:
+                    raise HTTPException(status_code=409, detail=str(error)) from error
+        return JSONResponse({"discarded": True, "batch_id": batch["batch_id"]})
     security.consume_ticket(str(payload.get("ticket") or ""), "resume", {"task_id": task_id, "verified": True})
     result = manager.resume_stopped_task(task_id)
     AuditLogger.from_settings(load_settings(), ROOT_DIR).info(json.dumps({"event": "manual_task_resume", "task_id": task_id, "started": bool(result.get("started"))}, ensure_ascii=False))
