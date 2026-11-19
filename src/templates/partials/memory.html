@@ -1,52 +1,64 @@
     <section class="panel memory-section" id="memory">
       <div class="panel-title memory-header">
-        <div>
-          <h2>试剂记忆库</h2>
-          <p id="memoryMeta">读取 data/reagent_memory.sqlite，可搜索并维护高可信历史判定。</p>
+        <div class="memory-heading">
+          <div class="memory-heading-label">
+            <h2>记忆记录</h2>
+            <p id="memoryMeta" role="status">正在加载…</p>
+          </div>
+          <details class="memory-maintenance">
+            <summary>维护操作</summary>
+            <div class="memory-maintenance-menu">
+              <button type="button" id="importMemoryButton">从审批建议导入</button>
+              <button type="button" id="saveReusableMemoryButton">保存本页可复用项</button>
+              <button type="button" id="deleteConflictMemoryButton" class="danger-button">删除全部冲突项</button>
+              <button type="button" id="deleteNonReusableMemoryButton" class="danger-button">删除全部不可复用项</button>
+            </div>
+          </details>
         </div>
-        <div class="memory-tools">
-          <input id="memorySearch" placeholder="搜索 CAS / 试剂名称 / 标准名">
-          <select id="memoryCategoryFilter">
+        <div class="memory-tools" role="group" aria-label="查找与筛选记录">
+          <label class="memory-search-field">搜索记录
+            <input id="memorySearch" type="search" placeholder="CAS、试剂名称或标准名">
+          </label>
+          <label>物化特性<select id="memoryCategoryFilter">
             <option value="">全部类别</option>
-          </select>
-          <select id="memoryReusableFilter">
-            <option value="">全部复用状态</option>
+          </select></label>
+          <label>复用状态<select id="memoryReusableFilter">
+            <option value="">全部状态</option>
             <option value="1">可复用</option>
             <option value="0">不可复用</option>
-          </select>
-          <select id="memoryConflictFilter">
-            <option value="">全部冲突状态</option>
+          </select></label>
+          <label>冲突状态<select id="memoryConflictFilter">
+            <option value="">全部状态</option>
             <option value="1">有冲突</option>
             <option value="0">无冲突</option>
-          </select>
-          <button type="button" id="importMemoryButton" class="primary">从审批建议导入</button>
-          <button type="button" id="saveReusableMemoryButton">保存可复用项</button>
-          <button type="button" id="deleteConflictMemoryButton" class="danger-button">删除冲突项</button>
-          <button type="button" id="refreshMemoryButton">刷新</button>
+          </select></label>
+          <div class="memory-tools-actions">
+            <button type="button" id="clearMemoryFilters" disabled>清空筛选</button>
+            <button type="button" id="refreshMemoryButton">刷新</button>
+          </div>
         </div>
       </div>
-      <div id="memoryDetailPanel" class="memory-detail-panel" aria-live="polite">
-        <div class="memory-detail-empty">
-          <strong>当前记录</strong>
-          <span>选择表格中的一条记录后，在这里编辑 ERP 原始名、清洗名、标准名和备注。</span>
+      <p id="memoryFeedback" class="memory-feedback" role="status" hidden></p>
+      <dialog id="memoryRecordDialog" aria-labelledby="memoryRecordTitle">
+        <div class="detail-dialog-header">
+          <h2 id="memoryRecordTitle">编辑记忆记录</h2>
+          <button type="button" id="closeMemoryRecord" aria-label="关闭记录详情">关闭</button>
         </div>
-      </div>
-      <div class="table-wrap memory-table-wrap">
-        <table class="memory-table">
+        <div id="memoryDetailPanel" class="memory-detail-panel"></div>
+      </dialog>
+      <div class="table-wrap memory-table-wrap" tabindex="-1">
+        <table class="memory-table" role="table" aria-label="试剂记忆记录">
           <thead>
             <tr>
-              <th>ID</th>
-              <th>CAS</th>
-              <th>试剂 / 标准名</th>
-              <th>物化特性</th>
-              <th>置信度</th>
-              <th>状态</th>
-              <th>操作</th>
+              <th scope="col">试剂信息</th>
+              <th scope="col">物化特性</th>
+              <th scope="col">记录状态</th>
+              <th scope="col">操作</th>
             </tr>
           </thead>
           <tbody id="memoryTable">
             <tr class="table-empty-row">
-              <td colspan="7">
+              <td colspan="4">
                 <div class="table-empty-state">
                   <strong>暂无记忆库记录</strong>
                   <span>导入审批建议后，可在这里维护可复用的历史判定。</span>
@@ -57,8 +69,17 @@
         </table>
       </div>
       <div class="memory-pagination">
-        <button type="button" id="memoryPrevPage">上一页</button>
-        <span id="memoryPageInfo">第 1 / 1 页，每页 10 条</span>
-        <button type="button" id="memoryNextPage">下一页</button>
+        <span id="memoryPageInfo">正在加载…</span>
+        <div class="memory-page-controls">
+          <label>每页
+            <select id="memoryPageSize">
+              <option value="10">10 条</option>
+              <option value="20">20 条</option>
+              <option value="50">50 条</option>
+            </select>
+          </label>
+          <button type="button" id="memoryPrevPage" disabled>上一页</button>
+          <button type="button" id="memoryNextPage" disabled>下一页</button>
+        </div>
       </div>
     </section>

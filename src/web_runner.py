@@ -311,6 +311,7 @@ class AutomationJobManager:
     _last_options: dict[str, str] = field(default_factory=dict)
     _run_log_path: str = ""
     _task_id: str = ""
+    _shutting_down: bool = False
     _lock: threading.RLock = field(default_factory=threading.RLock)
     _completion_callbacks: list[Callable[..., None]] = field(default_factory=list)
 
@@ -321,6 +322,8 @@ class AutomationJobManager:
         with self._lock:
             from config_transfer import import_pending
 
+            if self._shutting_down:
+                return {"started": False, "message": "控制台正在退出或重启，不能启动新任务。"}
             if import_pending(self.root_dir):
                 return {"started": False, "message": "配置恢复尚未完成，请先重启控制台以恢复本机配置。"}
             if self.running:
@@ -389,6 +392,18 @@ class AutomationJobManager:
                     self.error += " 本地状态写入失败，请人工核对。"
                 return {"started": False, "message": self.error}
             return {"started": True, "task_id": task_id, "message": f"已启动任务：{action}"}
+
+    def begin_shutdown(self) -> bool:
+        with self._lock:
+            if (self._shutting_down or self.running or self._unsettled_workbuddy_startup()
+                    or self._thread is not None and self._thread.is_alive()):
+                return False
+            self._shutting_down = True
+            return True
+
+    def cancel_shutdown(self) -> None:
+        with self._lock:
+            self._shutting_down = False
 
     def request_safe_stop(self, task_id: str, actor: dict[str, str]) -> dict[str, Any]:
         with self._lock:
@@ -631,6 +646,8 @@ class AutomationJobManager:
         memory_signature_before = memory_file_signature(self.root_dir) if action == "suggestions" else None
 
         try:
+            if options.get("SCHEDULED_FALLBACK_REASON"):
+                writer.write(f"[scheduler fallback] WorkBuddy unavailable before dispatch: {options['SCHEDULED_FALLBACK_REASON']}; running V1, AUTO_PASS=false.\n")
             replayed = bool((task_context or {}).get("recovered"))
             if action == "todo_export":
                 clear_todo_task_cache(self.root_dir)
@@ -2665,21 +2682,24 @@ def update_memory_record(record_id: int, payload: dict[str, Any], root_dir: Path
         payload["conflict"] = False
         payload["need_manual_review"] = False
         payload["manual_verified"] = True
-    final_category = str(payload.get("final_category") or "").strip()
+    memory = ReagentMemory.from_settings(settings, root_dir)
+    current = memory.find_by_id(record_id) if truthy_value(payload.get("reusable")) and "final_category" not in payload else {}
+    final_category = str(payload.get("final_category") or (current or {}).get("final_category") or "").strip()
     if final_category:
         options = erp_property_options(settings)
         rule_category = to_rule_category(final_category, settings, root_dir)
         if is_non_writable_rule_category(rule_category, settings, root_dir):
             payload = dict(payload)
-            payload["final_category"] = rule_category
+            if "final_category" in payload:
+                payload["final_category"] = rule_category
             payload["reusable"] = False
         elif final_category not in options:
             mapped_category = to_erp_property(final_category, settings)
             if not mapped_category:
                 raise ValueError(f"物化特性类别未映射到 ERP 下拉选项：{final_category}")
             payload = dict(payload)
-            payload["final_category"] = mapped_category
-    memory = ReagentMemory.from_settings(settings, root_dir)
+            if "final_category" in payload:
+                payload["final_category"] = mapped_category
     updated = memory.update_record(record_id, payload)
     return {"updated": True, "record": updated}
 
@@ -2708,6 +2728,15 @@ def delete_conflicting_memory(root_dir: Path = ROOT_DIR) -> dict[str, Any]:
         "candidate_count": delete_count,
         "backup": backup_path,
     }
+
+
+def delete_non_reusable_memory(root_dir: Path = ROOT_DIR) -> dict[str, Any]:
+    memory = ReagentMemory.from_settings(load_settings(), root_dir)
+    if not memory.path.exists():
+        return {"deleted": 0, "backup": ""}
+    backup = root_dir / "data" / "logs" / f"reagent_memory_backup_before_delete_non_reusable_{datetime.now():%Y%m%d_%H%M%S_%f}.sqlite"
+    deleted = memory.delete_non_reusable_records(backup)
+    return {"deleted": deleted, "backup": str(backup) if deleted else ""}
 
 
 def memory_sync_service(root_dir: Path = ROOT_DIR) -> MemorySyncService:
@@ -3001,6 +3030,7 @@ def runtime_config_snapshot() -> dict[str, Any]:
             str(approval.get("parallel_workers", 3)),
         ),
         "scheduler_enabled": "true" if schedule.get("enabled") else "false",
+        "scheduler_pipeline": schedule.get("pipeline", "workbuddy"),
         "scheduler_mode": schedule.get("mode", "interval"),
         "scheduler_interval_hours": str(schedule.get("interval_hours", 6)),
         "scheduler_daily_time": schedule.get("daily_time", "16:00"),
@@ -3179,6 +3209,10 @@ def _save_runtime_config(form: dict[str, str]) -> dict[str, Any]:
 
     scheduler = settings.setdefault("scheduler", {})
     scheduler["enabled"] = form.get("scheduler_enabled", "false").strip().lower() == "true"
+    requested_scheduler_pipeline = form.get("scheduler_pipeline", "workbuddy").strip().lower()
+    if requested_scheduler_pipeline not in {"workbuddy", "v1"}:
+        raise ValueError("定时审批链路只能是 WorkBuddy 或 V1。")
+    scheduler["pipeline"] = requested_scheduler_pipeline
     scheduler["mode"] = form.get("scheduler_mode", "interval").strip() or "interval"
     scheduler["interval_hours"] = coerce_int(
         form.get("scheduler_interval_hours", ""),
@@ -3225,7 +3259,7 @@ def _save_runtime_config(form: dict[str, str]) -> dict[str, Any]:
         form.get("scheduler_approval_write_min_confidence", "").strip()
         or scheduler.get("approval_write_min_confidence", "0.8")
     )
-    scheduler["auto_pass"] = form.get("scheduler_auto_pass", "false").strip().lower() == "true"
+    scheduler["auto_pass"] = False
     scheduler["skip_manual_review_lists"] = (
         form.get("scheduler_skip_manual_review_lists", "false").strip().lower() == "true"
     )

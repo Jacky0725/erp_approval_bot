@@ -13,6 +13,7 @@ RULE_COLUMNS = ["category", "explanation", "examples"]
 CRITICAL_PRIORITY = ["不建议接收类", "拒收类", "剧毒品"]
 UNKNOWN_CATEGORY = "未知类"
 NORMAL_CATEGORY = "普通类"
+NAMED_ORDINARY_RULES = {"BUS-NOR-ORTHOVANADATE-001", "BUS-NOR-SELECTED-ACIDS-001", "BUS-NOR-AMINO-ACID-001"}
 FLAMMABLE_CATEGORY = "易燃液体"
 IRRITANT_CATEGORY = "刺激性"
 
@@ -462,7 +463,9 @@ class RuleEngine:
         # clearly named reagent an unknown product.  Only the ERP name (or an
         # explicit name-rule flag) can establish this business category.
         identity_label = str(reagent_info.get("reagent_name") or reagent_info.get("name") or "")
-        if self._looks_unknown(self._normalize_text(identity_label)) or reagent_info.get("unknown_name_rule"):
+        ordinary_match = matches.get(NORMAL_CATEGORY)
+        amino_acid_hit = ordinary_match and "BUS-NOR-AMINO-ACID-001" in ordinary_match.rule_ids
+        if (self._looks_unknown(self._normalize_text(identity_label)) or reagent_info.get("unknown_name_rule")) and not amino_acid_hit:
             # A broad biological/medicine family regex must not turn an
             # explicitly unknown sample into an identified Ordinary product.
             matches.pop(NORMAL_CATEGORY, None)
@@ -479,7 +482,9 @@ class RuleEngine:
         # A normal-class keyword in a page snippet cannot prove that all
         # applicable hazards were checked.  Explicit name-only business rules
         # still work for callers without the evidence-completeness flag.
-        if not self._ordinary_auto_allowed(reagent_info):
+        ordinary_match = matches.get(NORMAL_CATEGORY)
+        named_ordinary_fallback = ordinary_match and NAMED_ORDINARY_RULES.intersection(ordinary_match.rule_ids)
+        if not self._ordinary_auto_allowed(reagent_info) and not named_ordinary_fallback:
             matches.pop(NORMAL_CATEGORY, None)
 
         # H317 (skin sensitisation) and H335 (respiratory irritation) remain in
@@ -528,6 +533,18 @@ class RuleEngine:
             }
 
         if not matches:
+            if reagent_info.get("allow_verified_identity_normal_fallback") and any(
+                rule.rule_id == "BUS-NOR-KNOWN-NOMATCH-001" for rule in self.rules
+            ):
+                return {
+                    "final_category": NORMAL_CATEGORY,
+                    "matched_categories": [NORMAL_CATEGORY],
+                    "matched_rule_ids": ["BUS-NOR-KNOWN-NOMATCH-001"],
+                    "rule_version": self.rule_version,
+                    "reason": "物质身份已可靠确认，现有证据未命中其他类别，按普通类业务规则处理。",
+                    "confidence": 0.8,
+                    "need_manual_review": False,
+                }
             if reagent_info.get("allow_default_normal") and self._ordinary_auto_allowed(reagent_info):
                 return {
                     "final_category": NORMAL_CATEGORY,
@@ -638,7 +655,7 @@ class RuleEngine:
             "盐", "氧化", "硫化", "氯化", "硝酸", "硫酸", "磷酸", "氢氧化",
             "络合", "合金", "溶液", "分散", "乳液", "悬浊", "制剂", "化合物",
         )
-        element_tokens = ("汞", "镉", "铬", "砷", "铅", "镍", "铍", "银", "钒", "硒", "钴", "锡")
+        element_tokens = ("汞", "镉", "铬", "砷", "铅", "镍", "铍", "银", "硒", "钴", "锡")
         form = r"(?:粉|粒|片|丝|箔|块|棒|球|线|锭|屑|颗粒)?"
         quality = r"(?:(?:\d+(?:\.\d+)?目)|(?:ar|gr|cp|分析纯|优级纯|化学纯)|(?:≥?\d+(?:\.\d+)?%))*"
         for text in names:
@@ -815,6 +832,15 @@ class RuleEngine:
         return hits
 
     def _structured_rule_hits(self, rule: Rule, reagent_info: dict[str, Any]) -> list[str]:
+        if rule.rule_id in NAMED_ORDINARY_RULES:
+            raw_name = next((reagent_info[key] for key in ("reagent_name", "name", "chemical_name")
+                             if reagent_info.get(key)), "")
+            if reagent_info.get("is_mixture") and rule.rule_id != "BUS-NOR-AMINO-ACID-001":
+                return []
+            return [f"{rule.rule_id}:名称"] if any(
+                re.fullmatch(pattern, self._normalize_text(str(raw_name)), flags=re.I)
+                for pattern in rule.explanation_keywords
+            ) else []
         # Cross-field business policies are executed by dedicated code paths.
         # Treating their descriptive pattern as a keyword would create false
         # category hits (for example, the CAS routing policy is not a "normal"
@@ -1375,7 +1401,7 @@ class RuleEngine:
         if "常规无机盐" in name_text:
             return []
         hits = []
-        allowed_chinese_tokens = ("汞", "镉", "铬", "砷", "铅", "镍", "铍", "银", "钒", "硒", "钴", "锡")
+        allowed_chinese_tokens = ("汞", "镉", "铬", "砷", "铅", "镍", "铍", "银", "硒", "钴", "锡")
         for token in allowed_chinese_tokens:
             if token == "锡" and not RuleEngine._identified_tin_name(reagent_info):
                 continue
@@ -1394,7 +1420,6 @@ class RuleEngine:
             ("nickel", "nickel"),
             ("beryllium", "beryllium"),
             ("silver", "silver"),
-            ("vanadium", "vanadium"),
             ("selenium", "selenium"),
             ("cobalt", "cobalt"),
             ("tin", "tin"),

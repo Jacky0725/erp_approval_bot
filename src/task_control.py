@@ -6,7 +6,7 @@ import os
 import re
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from dingtalk_state import DingTalkState
 
@@ -197,16 +197,31 @@ class TaskControl:
                 and task.get("phase") == "WorkBuddy 投递前安全点"
                 and bool(task.get("details", {}).get("batch_id")))
 
-    def stopped(self) -> list[dict[str, Any]]:
+    def stopped(self, *, limit: int | None = 50) -> list[dict[str, Any]]:
         with self.connect() as db:
             self.schema(db)
             rows = db.execute("SELECT id, action, state, phase, details FROM task_control WHERE state IN ('stopped','needs_review') "
                               "OR (state='failed' AND action='workbuddy_loop' AND phase='WorkBuddy 投递前安全点') "
                               "ORDER BY created DESC").fetchall()
         ids = [task_id for task_id, action, state, phase, details in rows
-               if self.can_resume(action, state, json.loads(details)) or self.failed_workbuddy_dispatch(
-                   {"action": action, "state": state, "phase": phase, "details": json.loads(details)})]
-        return [self.get(task_id) for task_id in ids[:50]]
+               if self.can_resume(action, state, json.loads(details))
+               or (state == "failed" and action == "workbuddy_loop" and phase == "WorkBuddy 投递前安全点")]
+        return [self.get(task_id) for task_id in ids[:limit]]
+
+    def has_unresolved_workbuddy(self, failed_requires_review: Callable[[dict[str, Any]], bool] | None = None) -> bool:
+        with self.connect() as db:
+            self.schema(db)
+            row = db.execute(
+                "SELECT 1 FROM task_control WHERE action IN ('workbuddy_loop','workbuddy_import','workbuddy_prepare') "
+                "AND state IN ('needs_review', 'stop_requested') LIMIT 1"
+            ).fetchone()
+            if row:
+                return True
+            failed = db.execute(
+                "SELECT id FROM task_control WHERE action='workbuddy_loop' AND state='failed' "
+                "AND phase='WorkBuddy 投递前安全点' ORDER BY created DESC"
+            ).fetchall()
+        return any(failed_requires_review(self.get(task_id)) for task_id, in failed) if failed_requires_review else bool(failed)
 
     def close_workbuddy_review(self, task_id: str, ancestors: list[str], batch_id: str) -> None:
         with self.connect() as db:

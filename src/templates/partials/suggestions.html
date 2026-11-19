@@ -1,8 +1,9 @@
+    <div class="suggestions-workspace">
     <section class="panel suggestions-panel" id="suggestions">
       <div class="panel-title">
         <div>
           <h2>审批建议结果</h2>
-          <p id="suggestionMeta">读取 data/logs/approval_suggestions.xlsx</p>
+          <p id="suggestionMeta">正在加载建议结果…</p>
         </div>
         <div id="categoryTags" class="tag-row"></div>
       </div>
@@ -34,17 +35,16 @@
       </div>
     </section>
 
-    <section class="workspace-grid">
-<section class="panel inspector" id="evidence">
+      <section class="panel inspector" id="evidence" hidden>
         <div class="panel-title">
           <div>
-            <h2>判定证据</h2>
-            <p>点击审批建议表中的任意记录，在这里查看网站、LLM 与规则判定摘要。</p>
+            <h2 id="evidenceTitle" tabindex="-1">判定证据</h2>
           </div>
+          <button type="button" id="closeEvidence">返回结果</button>
         </div>
         <div id="evidenceBox" class="evidence-box">
           <p>暂无建议结果。</p>
         </div>
       </section>
 
-</section>
+    </div>

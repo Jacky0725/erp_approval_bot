@@ -4,10 +4,14 @@
           <h2>配置项</h2>
           <p>保存后写入 `.env` 和 `config/settings.yaml`。密码和 API Key 留空时会保留原值。</p>
         </div>
-        <span id="settingsSaveState" class="save-state">未保存</span>
+      </div>
+      <div class="settings-jump" role="navigation" aria-label="设置分类">
+        <a href="#settingsConnection">连接与集成</a>
+        <a href="#settingsSchedule">运行策略</a>
+        <a href="#settingsMaintenance">维护</a>
       </div>
       <form id="settingsForm" class="settings-form">
-        <section class="settings-section" data-default-open="true">
+        <section class="settings-section" id="settingsConnection" data-default-open="true">
           <div class="settings-section-head">
             <div>
               <h3>基础连接</h3>
@@ -126,7 +130,7 @@
           </div>
         </section>
 
-        <section class="settings-section">
+        <section class="settings-section" id="settingsSchedule">
           <div class="settings-section-head">
             <div>
               <h3>定时审批</h3>
@@ -135,6 +139,12 @@
           </div>
           <div class="settings-grid settings-grid-scheduler">
             <label class="check settings-check-field"><input type="checkbox" name="scheduler_enabled" value="true"> 启用定时审批</label>
+            <label>审批链路
+              <select name="scheduler_pipeline">
+                <option value="workbuddy">WorkBuddy（默认）</option>
+                <option value="v1">V1（显式选择）</option>
+              </select>
+            </label>
             <label>
               规则类型
               <select name="scheduler_mode" id="schedulerMode">
@@ -144,8 +154,9 @@
             </label>
             <label>间隔小时 <input name="scheduler_interval_hours" value="{{ runtime.scheduler_interval_hours }}"></label>
             <label>每天时间 <input name="scheduler_daily_time" type="time" value="{{ runtime.scheduler_daily_time }}"></label>
-            <label class="check settings-check-field"><input type="checkbox" name="scheduler_use_default_run_policy" value="true"> 沿用手动运行安全策略</label>
+            <label class="check settings-check-field"><input type="checkbox" name="scheduler_use_default_run_policy" value="true"> 沿用基础写入设置</label>
           </div>
+          <p class="muted">已有定时任务也默认切换为 WorkBuddy。投递前不可用时回退 V1；回退允许按写入设置保存，但不会自动点击最终“通过”。</p>
           <div class="switches settings-policy-strip">
             <label class="check"><input type="checkbox" name="scheduler_skip_manual_review_lists" value="true"> 跳过人工复核未完成清单</label>
           </div>
@@ -153,7 +164,7 @@
             <div class="settings-section-head compact-head">
               <div>
                 <h3>定时任务单独执行策略</h3>
-                <p>关闭“沿用手动运行安全策略”后生效。</p>
+                <p>关闭“沿用基础写入设置”后生效；WorkBuddy 不使用 V1 置信度门槛。</p>
               </div>
             </div>
             <div class="settings-grid settings-grid-scheduler-policy">
@@ -167,13 +178,13 @@
               </select>
             </label>
             <label>定时最低置信度 <input name="scheduler_approval_write_min_confidence" value="{{ runtime.scheduler_approval_write_min_confidence }}"></label>
-            <label class="check danger-check"><input type="checkbox" name="scheduler_auto_pass" value="true"> 定时任务允许 AUTO_PASS</label>
             </div>
           </div>
           <div class="scheduler-status">
             <span>下次执行 <strong id="schedulerNextRun">-</strong></span>
             <span>上次执行 <strong id="schedulerLastRun">-</strong></span>
             <span>上次结果 <strong id="schedulerLastResult">-</strong></span>
+            <span>上次说明 <strong id="schedulerLastMessage">-</strong></span>
           </div>
         </section>
 
@@ -240,7 +251,7 @@
           </div>
         </section>
 
-        <section class="settings-section memory-sync-section">
+        <section class="settings-section memory-sync-section" id="settingsMaintenance">
           <div class="settings-section-head">
             <div>
               <h3>试剂库同步（坚果云 WebDAV）</h3>
@@ -303,6 +314,7 @@
         </section>
 
         <div class="settings-actions">
+          <span id="settingsSaveState" class="save-state" role="status">无未保存更改</span>
           <button type="submit" class="primary">保存设置</button>
         </div>
       </form>

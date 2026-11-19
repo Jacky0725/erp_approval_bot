@@ -7,6 +7,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from category_mapper import to_erp_property
 from reagent_name_rules import UNKNOWN_CATEGORY, unknown_reagent_name_reason
 
 
@@ -132,35 +133,71 @@ class ReagentMemory:
         self, batch_id: str, item_key: str, identity: dict[str, Any],
         result: dict[str, Any], *, synced: bool = False,
     ) -> None:
-        """Retain independent model results without overwriting verified memory.
-
-        ERP transport success is not manual verification or permission to reuse
-        the conclusion for a different product/concentration.
-        """
+        """Retain the batch result and reuse it only after confirmed ERP sync."""
         self._ensure_schema()
         source = f"workbuddy:{batch_id}:{item_key}"
         now = self._now()
         name = str(identity.get("试剂名称") or "").strip()
         cas = str(identity.get("CAS号") or "").strip()
         category = str(result.get("物化特性类别") or "").strip()
-        unresolved = category in {"", "需人工复核", "无法判定", "证据不足"}
+        unresolved = not to_erp_property(category, self.settings)
         reason = (
             f"{result.get('判断依据') or ''}\n"
             f"WorkBuddy 独立判定；ERP同步={'成功' if synced else '待同步'}；未经人工核实。"
         )
         with closing(self._connect()) as conn:
             with conn:
-                existing = conn.execute("SELECT id FROM reagent_memory WHERE source = ? LIMIT 1", (source,)).fetchone()
+                existing = conn.execute("SELECT * FROM reagent_memory WHERE source = ? LIMIT 1", (source,)).fetchone()
                 if existing:
-                    conn.execute("UPDATE reagent_memory SET updated_at=?, reason=? WHERE id=?", (now, reason, existing["id"]))
+                    if not synced and "ERP同步=成功" in str(existing["reason"] or ""):
+                        return
+                    conn.execute(
+                        "UPDATE reagent_memory SET updated_at=?, reason=?, need_manual_review=? WHERE id=?",
+                        (now, reason, int(unresolved), existing["id"]),
+                    )
+                    record_id = int(existing["id"])
+                else:
+                    cursor = conn.execute(
+                        """INSERT INTO reagent_memory
+                        (created_at, updated_at, raw_name, raw_name_key, cas, cas_key,
+                         final_category, reason, source, need_manual_review, manual_verified, reusable, confidence)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0)""",
+                        (now, now, name, self._norm(name), cas, self._norm_cas(cas), category, reason, source, int(unresolved)),
+                    )
+                    record_id = int(cursor.lastrowid)
+                if not synced or unresolved or (existing and existing["conflict"]):
+                    return
+                row = conn.execute("SELECT * FROM reagent_memory WHERE id=?", (record_id,)).fetchone()
+                conflicting_ids = self._identity_conflict_ids(conn, row)
+                if conflicting_ids:
+                    ids = [record_id, *conflicting_ids]
+                    conn.executemany(
+                        "UPDATE reagent_memory SET conflict=1, reusable=0, updated_at=? WHERE id=?",
+                        [(now, candidate_id) for candidate_id in ids],
+                    )
                     return
                 conn.execute(
-                    """INSERT INTO reagent_memory
-                    (created_at, updated_at, raw_name, raw_name_key, cas, cas_key,
-                     final_category, reason, source, need_manual_review, manual_verified, reusable, confidence)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0)""",
-                    (now, now, name, self._norm(name), cas, self._norm_cas(cas), category, reason, source, int(unresolved)),
+                    "UPDATE reagent_memory SET reusable=1, need_manual_review=0, updated_at=? WHERE id=?",
+                    (now, record_id),
                 )
+
+    def _identity_conflict_ids(self, conn: sqlite3.Connection, row: sqlite3.Row) -> list[int]:
+        category = to_erp_property(str(row["final_category"] or ""), self.settings)
+        if not category:
+            return []
+        conflicting: set[int] = set()
+        for column in ("raw_name_key", "cleaned_name_key", "standard_name_key", "cas_key"):
+            value = str(row[column] or "")
+            if not value:
+                continue
+            for other in conn.execute(
+                f"SELECT id, final_category, conflict FROM reagent_memory WHERE {column}=? AND id!=?",
+                (value, row["id"]),
+            ):
+                other_category = to_erp_property(str(other["final_category"] or ""), self.settings)
+                if int(other["conflict"] or 0) or (other_category and other_category != category):
+                    conflicting.add(int(other["id"]))
+        return sorted(conflicting)
 
     @staticmethod
     def _lookup_candidates_have_category_conflict(
@@ -517,7 +554,7 @@ class ReagentMemory:
             previous_reason = str(cleaned.get("reason") or current.get("reason") or "").strip()
             cleaned["final_category"] = UNKNOWN_CATEGORY
             cleaned["confidence"] = 1.0
-            cleaned["reusable"] = int(self._truthy(cleaned.get("reusable", True)))
+            cleaned["reusable"] = int(self._truthy(cleaned.get("reusable", current.get("reusable", True))))
             cleaned["conflict"] = 0
             cleaned["need_manual_review"] = 0
             cleaned["manual_verified"] = 1
@@ -555,6 +592,20 @@ class ReagentMemory:
                     """
                 )
                 return int(cursor.rowcount or 0)
+
+    def delete_non_reusable_records(self, backup_path: Path) -> int:
+        self._ensure_schema()
+        with closing(self._connect()) as conn, conn:
+            conn.execute("BEGIN IMMEDIATE")
+            count = conn.execute("SELECT COUNT(*) FROM reagent_memory WHERE reusable = 0").fetchone()[0]
+            if not count:
+                return 0
+            backup_path.parent.mkdir(parents=True, exist_ok=True)
+            # A separate read connection snapshots committed WAL data while the writer lock holds.
+            with closing(sqlite3.connect(self.path)) as source, closing(sqlite3.connect(backup_path)) as backup:
+                source.backup(backup)
+            conn.execute("DELETE FROM reagent_memory WHERE reusable = 0")
+            return int(count)
 
     def deduplicate_conflicting_records(self) -> dict[str, int]:
         self._ensure_schema()

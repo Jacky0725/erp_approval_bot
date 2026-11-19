@@ -60,6 +60,9 @@ def desktop(monkeypatch):
         tabs = [Control("试剂审批")]
         links = []
         def process_id(self): return 123
+        def window_text(self): return "WorkBuddy"
+        def is_visible(self): return True
+        def is_minimized(self): return False
         def rectangle(self): return SimpleNamespace(left=0, top=0, right=800, bottom=600)
         def set_focus(self): pass
         def descendants(self, **kwargs):
@@ -73,6 +76,11 @@ def desktop(monkeypatch):
         if button.click_action:
             button.click_action()
     button.click_input = click_button
+    def invoke_button():
+        calls.append("invoke")
+        if button.click_action:
+            button.click_action()
+    button.invoke = invoke_button
     original_descendants = window.descendants
     def descendants(**kwargs):
         if kwargs.get("control_type") == "Text":
@@ -203,7 +211,18 @@ def test_named_send_resumes_exact_batch_draft_without_retyping(desktop):
         desktop.editor.value = ""
     desktop.button.click_action = submitted
     desktop.adapter.send(prompt, batch_id="batch-123")
-    assert desktop.calls == ["发送"]
+    assert desktop.calls == ["invoke"]
+
+
+def test_named_send_invocation_error_does_not_fall_back_or_retry(desktop):
+    desktop.button.name = "发送"
+    desktop.button.invoke = Mock(side_effect=RuntimeError("invoke outcome unknown"))
+    guard = Mock()
+    with pytest.raises(RuntimeError, match="invoke outcome unknown"):
+        desktop.adapter.send("执行批次 batch-123", batch_id="batch-123", before_submit=guard)
+    guard.assert_called_once()
+    desktop.button.invoke.assert_called_once()
+    assert desktop.calls == ["click", "type"]
 
 
 def test_followup_requires_exact_previous_completion_in_configured_chat(desktop):
@@ -497,6 +516,48 @@ def test_ambiguous_taskbar_icons_are_not_clicked(desktop):
     assert not desktop.adapter._restore_taskbar_or_tray(desktop_window)
 
 
+@pytest.mark.parametrize("minimized", [False, True])
+def test_changed_title_window_is_restored_by_executable_path(desktop, monkeypatch, minimized):
+    desktop.window.window_text = lambda: "WorkBuddy - 项目"
+    desktop.window.is_minimized = lambda: minimized
+    actions = []
+    desktop.window.restore = lambda: actions.append("restore")
+    desktop.window.maximize = lambda: actions.append("maximize")
+    monkeypatch.setattr(sys.modules["pywinauto"], "Desktop", lambda **kwargs: SimpleNamespace(
+        windows=lambda **kwargs: [] if "title" in kwargs else [desktop.window]
+    ))
+    monkeypatch.setattr("workbuddy_desktop.subprocess.run", lambda *args, **kwargs: pytest.fail("unexpected tasklist"))
+    assert desktop.adapter._window() is desktop.window
+    assert actions == (["restore"] if minimized else []) + ["maximize"]
+
+
+def test_changed_title_window_is_found_after_taskbar_restore(desktop, monkeypatch):
+    restored = []
+    desktop.window.window_text = lambda: "WorkBuddy - 项目"
+    desktop.window.maximize = lambda: restored.append("maximize")
+    desktop.adapter._restore_taskbar_or_tray = lambda _: restored.append("taskbar") or True
+    monkeypatch.setattr("workbuddy_desktop.subprocess.run", lambda *args, **kwargs: SimpleNamespace(stdout='"WorkBuddy.exe","123"'))
+    monkeypatch.setattr("workbuddy_desktop.subprocess.Popen", lambda *args, **kwargs: pytest.fail("duplicate client"))
+    monkeypatch.setattr(sys.modules["pywinauto"], "Desktop", lambda **kwargs: SimpleNamespace(
+        windows=lambda **kwargs: [] if "title" in kwargs or not restored else [desktop.window]
+    ))
+    assert desktop.adapter._window() is desktop.window
+    assert restored == ["taskbar", "maximize"]
+
+
+def test_multiple_path_matching_windows_are_not_selected(desktop, monkeypatch):
+    other = SimpleNamespace(
+        process_id=lambda: 123, handle=456, window_text=lambda: "WorkBuddy - 其他窗口",
+        is_visible=lambda: True, is_minimized=lambda: False,
+    )
+    monkeypatch.setattr(sys.modules["pywinauto"], "Desktop", lambda **kwargs: SimpleNamespace(
+        windows=lambda **kwargs: [] if "title" in kwargs else [desktop.window, other]
+    ))
+    monkeypatch.setattr("workbuddy_desktop.subprocess.run", lambda *args, **kwargs: pytest.fail("unexpected tasklist"))
+    with pytest.raises(RuntimeError, match="无法唯一定位 WorkBuddy 主窗口.*未输入或发送"):
+        desktop.adapter._window()
+
+
 @pytest.mark.parametrize("listing", ['"other.exe","1"', '"WorkBuddy.exe","999","Console","2","100 K"'])
 def test_missing_client_is_started_and_window_prepared(desktop, monkeypatch, listing):
     launched = []
@@ -506,21 +567,62 @@ def test_missing_client_is_started_and_window_prepared(desktop, monkeypatch, lis
     monkeypatch.setattr("workbuddy_desktop.subprocess.Popen", lambda *a, **k: launched.append((a, k)))
     monkeypatch.setattr("workbuddy_desktop.time.sleep", lambda _: None)
     monkeypatch.setattr("workbuddy_desktop.time.monotonic", iter([0, 1, 2, 3, 4, 5, 46]).__next__)
-    window_states = iter([[], [desktop.window]])
+    window_states = iter([[], [], [desktop.window]])
     monkeypatch.setattr(sys.modules["pywinauto"], "Desktop", lambda **kwargs: SimpleNamespace(windows=lambda **kw: next(window_states)))
     window = desktop.adapter._window()
     assert window is desktop.window
     assert launched
 
 
-def test_running_tray_process_is_not_launched_again(desktop, monkeypatch):
+def test_running_tray_process_is_woken_once_through_verified_executable(desktop, monkeypatch):
     monkeypatch.setattr("workbuddy_desktop.subprocess.run", lambda *a, **k: SimpleNamespace(stdout='"WorkBuddy.exe","123"'))
     launched = []
     monkeypatch.setattr("workbuddy_desktop.subprocess.Popen", lambda *a, **k: launched.append(a))
+    monkeypatch.setattr("workbuddy_desktop.client_path", lambda _: Path("WorkBuddy.exe"))
+    monkeypatch.setattr(sys.modules["pywinauto"], "Desktop", lambda **kwargs: SimpleNamespace(
+        windows=lambda **kwargs: [desktop.window] if launched else []
+    ))
+    checked = []
+    desktop.adapter._require_matching_security_context = checked.append
+    assert desktop.adapter._window() is desktop.window
+    assert launched == [(["WorkBuddy.exe"],)]
+    assert checked == [123, 123]
+    assert "type" not in desktop.calls
+
+
+def test_tray_wake_failure_stops_after_one_launch(desktop, monkeypatch):
+    import itertools
+    ticks = itertools.count(step=10)
+    monkeypatch.setattr("workbuddy_desktop.time.monotonic", lambda: next(ticks))
+    monkeypatch.setattr("workbuddy_desktop.subprocess.run", lambda *a, **k: SimpleNamespace(stdout='"WorkBuddy.exe","123"'))
+    launched = []
+    monkeypatch.setattr("workbuddy_desktop.subprocess.Popen", lambda *a, **k: launched.append(a) or SimpleNamespace(pid=456, poll=lambda: 0))
+    monkeypatch.setattr("workbuddy_desktop.client_path", lambda _: Path("WorkBuddy.exe"))
     monkeypatch.setattr(sys.modules["pywinauto"], "Desktop", lambda **kwargs: SimpleNamespace(windows=lambda **kwargs: []))
-    with pytest.raises(RuntimeError, match="仍在运行"):
+    with pytest.raises(RuntimeError, match="启动未就绪"):
         desktop.adapter._window()
-    assert not launched
+    assert len(launched) == 1
+    assert not desktop.calls
+
+
+def test_tray_wake_checks_privileges_before_launch(desktop, monkeypatch):
+    monkeypatch.setattr("workbuddy_desktop.subprocess.run", lambda *a, **k: SimpleNamespace(stdout='"WorkBuddy.exe","123"'))
+    monkeypatch.setattr(sys.modules["pywinauto"], "Desktop", lambda **kwargs: SimpleNamespace(windows=lambda **kwargs: []))
+    monkeypatch.setattr("workbuddy_desktop.subprocess.Popen", lambda *a, **k: pytest.fail("privilege mismatch must stop launch"))
+    def mismatch(process_id):
+        raise RuntimeError("权限级别不一致")
+    desktop.adapter._require_matching_security_context = mismatch
+    with pytest.raises(RuntimeError, match="权限级别不一致"):
+        desktop.adapter._window()
+
+
+def test_unreadable_tray_process_blocks_wake(desktop, monkeypatch):
+    monkeypatch.setattr("workbuddy_desktop.subprocess.run", lambda *a, **k: SimpleNamespace(stdout='"WorkBuddy.exe","123"'))
+    monkeypatch.setattr(sys.modules["pywinauto"], "Desktop", lambda **kwargs: SimpleNamespace(windows=lambda **kwargs: []))
+    monkeypatch.setattr(sys.modules["pywinauto.application"], "process_module", lambda pid: (_ for _ in ()).throw(OSError("denied")))
+    monkeypatch.setattr("workbuddy_desktop.subprocess.Popen", lambda *a, **k: pytest.fail("unverified process must stop launch"))
+    with pytest.raises(RuntimeError, match="无法读取其程序路径"):
+        desktop.adapter._window()
 
 
 def test_update_installer_blocks_duplicate_start(desktop, monkeypatch):

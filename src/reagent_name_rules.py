@@ -5,6 +5,11 @@ from typing import Any
 
 
 UNKNOWN_CATEGORY = "未知类"
+AMINO_ACID_FAMILY_LABEL = r"(?:(?:未知|不明|混合|复合)?氨基酸(?:类)?(?:混合物|混合液|溶液|标准品|标准溶液)?(?:[（(]?(?:种类|品种|具体品种)?(?:不明|未知)[）)]?)?|(?:unknown)?aminoacids?(?:mixture|solution|standard)?)"
+
+
+def is_amino_acid_family_label(raw_name: str) -> bool:
+    return bool(re.fullmatch(AMINO_ACID_FAMILY_LABEL, re.sub(r"\s+", "", str(raw_name or "")), re.I))
 
 UNKNOWN_REAGENT_NAME_PATTERNS = (
     "\u672a\u77e5",
@@ -94,6 +99,8 @@ def low_priority_business_normal_name_reason(raw_name: str, *extra_values: Any) 
 
 
 def unknown_reagent_name_reason(raw_name: str, *extra_values: Any) -> str:
+    if is_amino_acid_family_label(raw_name):
+        return ""
     text = " ".join(str(value or "") for value in (raw_name, *extra_values))
     normalized = re.sub(r"\s+", "", text).lower()
     for pattern in UNKNOWN_REAGENT_NAME_PATTERNS:

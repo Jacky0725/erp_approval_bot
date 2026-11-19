@@ -1,15 +1,19 @@
     <section class="workspace-grid">
       <section class="panel run-panel" id="run">
-        <div class="panel-title">
-          <div>
-            <h2>运行控制</h2>
-            <p>启动任务会打开 Playwright 浏览器；保存模式会写入网页，但不会点击顶部“通过”，除非 AUTO_PASS 安全门全部满足。</p>
-          </div>
-        </div>
         <form id="runForm">
           <input type="hidden" name="target_list_numbers" value="">
           <div class="run-step">
             <div class="run-step-index">1</div>
+            <h3>选择审批模式</h3>
+          </div>
+          <div class="approval-mode-switch" role="group" aria-label="选择审批模式">
+            <button type="button" id="approvalModeV1" data-approval-mode-switch="v1" aria-pressed="false" aria-controls="approvalModePanelV1">V1 审批</button>
+            <button type="button" id="approvalModeWorkbuddy" data-approval-mode-switch="workbuddy" aria-pressed="true" aria-controls="approvalModePanelWorkbuddy">
+              WorkBuddy 审批 <span class="mode-beta-badge">自动批次</span>
+            </button>
+          </div>
+          <div class="run-step">
+            <div class="run-step-index">2</div>
             <div>
               <h3>选择待办清单</h3>
               <p>先读取 ERP 待办，再选择本次要处理的清单。</p>
@@ -32,10 +36,9 @@
             </div>
           </div>
           <div class="run-step">
-            <div class="run-step-index">2</div>
+            <div class="run-step-index">3</div>
             <div>
               <h3>设置执行参数</h3>
-            <p>此处控制写入范围、置信度门槛和安全开关；审批模式在下一步选择。</p>
             </div>
           </div>
           <div class="run-options">
@@ -59,11 +62,11 @@
                   <option value="api_write_with_web_verify">接口写入 + 接口/页面校验</option>
                 </select>
               </label>
-              <label>
+              <label class="v1-only-option">
                 最低置信度
                 <input name="approval_write_min_confidence" value="{{ runtime.approval_write_min_confidence }}">
               </label>
-              <label>
+              <label class="v1-only-option">
                 每批写入条数
                 <input name="approval_write_batch_size" value="{{ runtime.approval_write_batch_size }}">
               </label>
@@ -71,23 +74,21 @@
             <div class="switches">
               <label class="check"><input type="checkbox" name="process_all_todos" value="true"> 未勾选清单时处理全部待办</label>
               <label class="inline-field">最多处理 <input class="small-input" name="process_all_todos_max" value="50"></label>
-              <label class="check danger-check"><input type="checkbox" name="auto_pass" value="true"> AUTO_PASS</label>
+              <label class="check danger-check v1-only-option"><input type="checkbox" name="auto_pass" value="true"> 自动通过（需通过安全校验）</label>
             </div>
           </div>
           <div class="run-step">
-            <div class="run-step-index">3</div>
+            <div class="run-step-index">4</div>
             <div>
-              <h3>选择审批模式</h3>
-              <p>V1 与 WorkBuddy 是两种独立链路；运行控制和调试采集为共用工具。</p>
+              <h3>确认本次执行</h3>
             </div>
           </div>
-          <div class="approval-mode-switch" role="group" aria-label="选择审批模式">
-            <button type="button" id="approvalModeV1" data-approval-mode-switch="v1" aria-pressed="true" aria-controls="approvalModePanelV1">V1 审批</button>
-            <button type="button" id="approvalModeWorkbuddy" data-approval-mode-switch="workbuddy" aria-pressed="false" aria-controls="approvalModePanelWorkbuddy">
-              WorkBuddy 审批 <span class="mode-beta-badge">自动批次</span>
-            </button>
-          </div>
-          <section class="run-mode-panel" id="approvalModePanelV1" data-approval-mode-panel="v1" aria-labelledby="approvalModeV1">
+          <dl class="run-execution-summary" aria-live="polite">
+            <div><dt>审批模式</dt><dd id="executionMode">WorkBuddy</dd></div>
+            <div><dt>本次处理范围</dt><dd id="executionScope">—</dd></div>
+            <div><dt>本次写入影响</dt><dd id="executionImpact">—</dd></div>
+          </dl>
+          <section class="run-mode-panel" id="approvalModePanelV1" data-approval-mode-panel="v1" aria-labelledby="approvalModeV1" hidden>
             <div class="run-action-group run-action-primary">
               <div class="run-mode-panel-heading">
                 <h4>V1 审批</h4>
@@ -98,7 +99,7 @@
               </div>
             </div>
           </section>
-          <section class="run-mode-panel" id="approvalModePanelWorkbuddy" data-approval-mode-panel="workbuddy" aria-labelledby="approvalModeWorkbuddy" hidden>
+          <section class="run-mode-panel" id="approvalModePanelWorkbuddy" data-approval-mode-panel="workbuddy" aria-labelledby="approvalModeWorkbuddy">
             <div class="run-action-group run-action-workbuddy">
               <div class="run-mode-panel-heading">
                 <h4>WorkBuddy 审批</h4>
@@ -107,15 +108,7 @@
               <p class="workbuddy-mode-summary">批次循环先执行 ERP 一键匹配，再判定剩余空项。选择“保存并生成试剂库”时，保存核对成功后自动入库；异常保留文件和原因。</p>
               <div class="workbuddy-flow">
                 <div class="workbuddy-flow-step">
-                  <span>01 · 准备</span>
-                  <button type="button" data-action="workbuddy_prepare">准备下一批（最多{{ runtime.workbuddy_batch_size|default(20) }}条）</button>
-                </div>
-                <div class="workbuddy-flow-step">
-                  <span>02 · 导入</span>
-                  <button type="button" data-action="workbuddy_import">导入 WorkBuddy 结果</button>
-                </div>
-                <div class="workbuddy-flow-step">
-                  <span>03 · 自动循环</span>
+                  <span>自动循环</span>
                   <label>每批判定条数
                     <select name="workbuddy_batch_size">
                       {% for size, minutes in [(20, 15), (30, 20), (50, 25)] %}
@@ -123,9 +116,16 @@
                       {% endfor %}
                     </select>
                   </label>
-                  <button type="button" data-action="workbuddy_loop" {% if not runtime.workbuddy_desktop_enabled %}disabled title="请先完成 WorkBuddy 客户端适配并在配置中启用" aria-describedby="workbuddyAvailabilityNote"{% endif %}>批次循环</button>
+                  <button type="button" class="primary" data-action="workbuddy_loop" {% if not runtime.workbuddy_desktop_enabled %}disabled aria-describedby="workbuddyAvailabilityNote"{% endif %}>启动批次循环</button>
                 </div>
               </div>
+              <details class="run-advanced-ops">
+                <summary>手动准备/导入（恢复操作）</summary>
+                <div class="button-row">
+                  <button type="button" data-action="workbuddy_prepare">准备下一批（最多{{ runtime.workbuddy_batch_size|default(20) }}条）</button>
+                  <button type="button" data-action="workbuddy_import">导入 WorkBuddy 结果</button>
+                </div>
+              </details>
               <p class="workbuddy-availability" id="workbuddyAvailabilityNote" {% if runtime.workbuddy_desktop_enabled %}hidden{% endif %}>批次循环当前不可用：需完成客户端适配并在配置中启用；准备与导入仍可手动使用。</p>
               <details class="workbuddy-safety-note">
                 <summary>执行与写入说明</summary>
@@ -133,23 +133,30 @@
               </details>
             </div>
           </section>
+          <p id="runLaunchFeedback" role="status" hidden></p>
           <div class="run-actions run-actions-common">
             <div class="run-action-group">
               <span>共用运行控制</span>
               <div class="button-row">
                 <button type="button" id="safeStopRunButton">安全停止</button>
                 <button type="button" id="stopRunButton" class="danger-button">紧急强制停止</button>
-                <button type="button" id="restartRunButton">重启程序</button>
               </div>
             </div>
             <div class="run-action-group">
-              <span>共用调试采集</span>
+              <span>程序操作</span>
               <div class="button-row">
+                <button type="button" id="restartRunButton">重启程序</button>
+                <button type="button" id="exitProgramButton" class="danger-button">退出程序</button>
+              </div>
+            </div>
+            <details class="run-advanced-ops">
+              <summary>调试采集</summary>
+              <div class="button-row compact">
                 <button type="button" data-action="judgement_capture">采集试剂判定页</button>
                 <button type="button" data-action="api_discovery">接口只读探测</button>
                 <button type="button" data-action="debug_capture">采集首页</button>
               </div>
-            </div>
+            </details>
           </div>
         </form>
         <p>任务：<span id="controlTaskId">-</span>；控制状态：<span id="controlTaskState">-</span>；当前操作：<span id="controlTaskPhase">-</span></p>

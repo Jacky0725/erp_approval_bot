@@ -6,6 +6,12 @@
             <p id="artifactMeta">截图、HTML、Excel 与运行日志。</p>
           </div>
           <div class="artifact-tools">
+            <select id="artifactTypeFilter" aria-label="按产物类型筛选">
+              <option value="">全部类型</option>
+              {% for label in ['Excel / 数据', '截图', 'HTML 页面', '运行日志', '其他'] %}
+              <option>{{ label }}</option>
+              {% endfor %}
+            </select>
             <button type="button" id="refreshArtifactButton">刷新产物</button>
             <a class="utility-link" href="/logs">查看日志</a>
             <span id="artifactRefreshState" aria-live="polite"></span>

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import sqlite3
 import tempfile
 import unittest
 from contextlib import closing
@@ -53,6 +54,40 @@ class ReagentMemoryTest(unittest.TestCase):
             with closing(memory._connect()) as conn:  # noqa: SLF001 - verifies connection-level safety settings.
                 self.assertEqual(conn.execute("PRAGMA busy_timeout").fetchone()[0], 15000)
                 self.assertEqual(conn.execute("PRAGMA journal_mode").fetchone()[0].lower(), "wal")
+
+    def test_delete_non_reusable_backs_up_all_records_and_keeps_reusable_rows(self) -> None:
+        tmp, memory = self.make_memory()
+        with tmp:
+            memory._ensure_schema()
+            with closing(memory._connect()) as conn, conn:
+                conn.executemany(
+                    "INSERT INTO reagent_memory (created_at, updated_at, raw_name, reusable, manual_verified, conflict) "
+                    "VALUES (CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, ?, ?, ?, ?)",
+                    [("keep", 1, 1, 0), ("remove verified", 0, 1, 0), ("remove conflict", 0, 0, 1)],
+                )
+            backup = Path(tmp.name) / "backups" / "memory.sqlite"
+            self.assertEqual(memory.delete_non_reusable_records(backup), 2)
+            with closing(sqlite3.connect(backup)) as restored:
+                self.assertEqual(restored.execute("SELECT COUNT(*) FROM reagent_memory").fetchone()[0], 3)
+            with closing(memory._connect()) as conn:
+                self.assertEqual([row[0] for row in conn.execute("SELECT raw_name FROM reagent_memory")], ["keep"])
+            empty_backup = backup.with_name("empty.sqlite")
+            self.assertEqual(memory.delete_non_reusable_records(empty_backup), 0)
+            self.assertFalse(empty_backup.exists())
+
+    def test_delete_non_reusable_does_not_delete_if_backup_fails(self) -> None:
+        tmp, memory = self.make_memory()
+        with tmp:
+            memory._ensure_schema()
+            with closing(memory._connect()) as conn, conn:
+                conn.execute(
+                    "INSERT INTO reagent_memory (created_at, updated_at, raw_name, reusable) "
+                    "VALUES (CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 'keep on failure', 0)"
+                )
+            with self.assertRaises(sqlite3.OperationalError):
+                memory.delete_non_reusable_records(Path(tmp.name))
+            with closing(memory._connect()) as conn:
+                self.assertEqual(conn.execute("SELECT COUNT(*) FROM reagent_memory").fetchone()[0], 1)
 
     def test_low_confidence_manual_review_and_conflict_are_not_reused(self) -> None:
         tmp, memory = self.make_memory()

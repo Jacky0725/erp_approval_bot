@@ -290,3 +290,34 @@ def test_uncertain_send_can_be_discarded_without_accepting_late_result(workflow)
     h.path.joinpath("result.xlsx").write_bytes(b"late result")
     with pytest.raises(ValueError, match="禁止导入"):
         WorkBuddyBridge(h.root, h.settings).load_results(batch)
+
+
+@pytest.mark.parametrize(
+    ("state_changes", "result_file", "blocked"),
+    [
+        ({}, None, False),
+        ({"dispatch_state": "sending"}, None, True),
+        ({"dispatch_started_at": 1}, None, True),
+        ({"dispatch_state": "submitted"}, None, True),
+        ({}, "result.xlsx", True),
+        ({}, "judgments.json", True),
+        ({"items": [{"status": "pending", "attempts": 0, "write_started": True}]}, None, True),
+        ({"status": "superseded_failed", "dispatch_state": "sending",
+          "operator_disposition": {"reason": "operator_closed_uncertain_dispatch_without_replay"}}, None, False),
+    ],
+)
+def test_failed_dispatch_shutdown_uses_batch_evidence(workflow, state_changes, result_file, blocked):
+    h = workflow
+    h.path.joinpath("result.xlsx").unlink(missing_ok=True)
+    batch = {**h.state, "status": "waiting_result"}
+    for key in ("dispatch_state", "dispatch_started_at", "submitted_at", "result_sha256", "operator_stop_task"):
+        batch.pop(key, None)
+    batch.update(state_changes)
+    h.bridge.save(batch)
+    if result_file:
+        h.path.joinpath(result_file).touch()
+    h.control.checkpoint("task-1", "WorkBuddy 投递前安全点", batch_id="abc")
+    h.control.finish("task-1", "failed")
+    assert h.control.has_unresolved_workbuddy(h.bridge.failed_dispatch_requires_review) is blocked
+    h.path.joinpath("state.json").unlink()
+    assert h.control.has_unresolved_workbuddy(h.bridge.failed_dispatch_requires_review)

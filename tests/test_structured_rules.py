@@ -9,9 +9,22 @@ ROOT_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT_DIR / "src"))
 
 from rule_engine import RuleEngine  # noqa: E402
+from reagent_name_rules import unknown_reagent_name_reason  # noqa: E402
 
 
 class StructuredRulesTest(unittest.TestCase):
+    def test_selected_acids_and_amino_acid_family_are_ordinary(self) -> None:
+        for name in ("对甲苯磺酸", "对甲苯磺酸一水合物", "乳酸", "L-赖氨酸", "未知氨基酸", "氨基酸类混合物"):
+            with self.subTest(name=name):
+                result = self.engine.classify({"reagent_name": name, "ordinary_evidence_complete": False})
+                self.assertEqual(result["final_category"], "普通类")
+        self.assertFalse(unknown_reagent_name_reason("未知氨基酸"))
+        self.assertTrue(unknown_reagent_name_reason("未知样品（疑似氨基酸）"))
+        self.assertEqual(self.engine.classify({"reagent_name": "三氟甲磺酸"})["final_category"], "特殊酸")
+        self.assertEqual(self.engine.classify({
+            "reagent_name": "未知氨基酸", "evidence": "oral LD50 25 mg/kg",
+        })["final_category"], "高毒类")
+
     @classmethod
     def setUpClass(cls) -> None:
         cls.engine = RuleEngine.from_settings(
@@ -35,6 +48,17 @@ class StructuredRulesTest(unittest.TestCase):
 
         self.assertEqual(result["final_category"], "\u6613\u7206\u7c7b")
         self.assertFalse(result["need_manual_review"])
+
+    def test_orthovanadate_falls_back_to_ordinary_without_suppressing_toxicity(self) -> None:
+        for name in ("原钒酸钠12水", "原钒酸钠十二水合物", "Sodium orthovanadate (V) dodecahydrate"):
+            with self.subTest(name=name):
+                result = self.engine.classify({"reagent_name": name, "ordinary_evidence_complete": False})
+                self.assertEqual(result["final_category"], "普通类")
+                self.assertIn("BUS-NOR-ORTHOVANADATE-001", result["matched_rule_ids"])
+        result = self.engine.classify({"reagent_name": "原钒酸钠12水", "evidence": "oral LD50 25 mg/kg"})
+        self.assertEqual(result["final_category"], "高毒类")
+        self.assertEqual(self.engine.classify({"reagent_name": "五氧化二钒"})["final_category"], "高毒类")
+        self.assertIsNone(self.engine.explicit_heavy_metal_element_rule({"reagent_name": "钒粉"}))
 
     def test_unrelated_azide_in_web_text_does_not_classify_other_substance(self) -> None:
         result = self.engine.classify({"reagent_name": "氯化钠", "evidence": "相关推荐：叠氮化钠", "allow_default_normal": True})
@@ -301,7 +325,6 @@ class StructuredRulesTest(unittest.TestCase):
             "\u5341\u4e8c\u6c34\u5408\u786b\u9178\u94ec\u94be",
             "\u6c2f\u5316\u954d",
             "\u785d\u9178\u94f6",
-            "\u504f\u9492\u9178\u94f5",
             "\u4e8c\u6c27\u5316\u7852",
             "\u6c2f\u5316\u94b4",
             "\u4e09\u6c1f\u7532\u78fa\u9178\u9521",
@@ -320,6 +343,7 @@ class StructuredRulesTest(unittest.TestCase):
                 self.assertIn("\u91cd\u91d1\u5c5e\u7c7b", result["matched_categories"])
 
         non_heavy_metal_cases = [
+            "\u504f\u9492\u9178\u94f5",
             "\u786b\u9178\u94dc",
             "\u785d\u9178\u9541",
             "\u6c2f\u5316\u950c",

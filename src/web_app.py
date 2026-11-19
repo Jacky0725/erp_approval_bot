@@ -42,6 +42,7 @@ from web_runner import (
     artifact_summary,
     confirm_review_item,
     delete_conflicting_memory,
+    delete_non_reusable_memory,
     delete_memory_record,
     delete_review_item,
     generate_review_llm_advice,
@@ -292,13 +293,30 @@ def logs_page(request: Request) -> HTMLResponse:
 
 @app.get("/api/status")
 def api_status() -> JSONResponse:
+    status = manager.status(light=True)
+    if status.get("running"):
+        options = manager._last_options
+        action = status.get("action", "")
+        status["effective_policy"] = {
+            "pipeline": "workbuddy" if action.startswith("workbuddy_") else "v1" if action == "suggestions" else "none",
+            "write_mode": options.get("APPROVAL_WRITE_MODE", "disabled"),
+            "write_backend": options.get("ERP_WRITE_BACKEND", "web_ui"),
+            "process_all_todos": options.get("PROCESS_ALL_TODOS", "false"),
+            "target_list_numbers": options.get("TARGET_LIST_NUMBERS", ""),
+            "auto_pass": options.get("AUTO_PASS", "false"),
+            "fallback_reason": options.get("SCHEDULED_FALLBACK_REASON", ""),
+        }
     return JSONResponse(
         {
             "runtime": runtime_config_snapshot(),
-            "status": manager.status(light=True),
+            "status": status,
             "todo_tasks": todo_tasks_summary(),
             "scheduler": scheduler.status(),
             "dingtalk_stream": dingtalk_stream_bot.status(),
+            "program_control": {
+                "available": callable(getattr(app.state, "request_server_shutdown", None)),
+                "pending_workbuddy": _pending_workbuddy_shutdown(),
+            },
         }
     )
 
@@ -307,7 +325,7 @@ def api_status() -> JSONResponse:
 def api_health() -> JSONResponse:
     executable = Path(sys.executable).resolve()
     install_root = executable.parent.parent.parent if getattr(sys, "frozen", False) else ROOT_DIR.resolve()
-    return JSONResponse({"ok": True, "version": app_version(), "install_root": str(install_root)})
+    return JSONResponse({"ok": True, "version": app_version(), "install_root": str(install_root), "process_id": os.getpid()})
 
 
 @app.get("/api/approval_summary")
@@ -520,6 +538,13 @@ def api_memory_delete_conflicting_unverified() -> JSONResponse:
     return api_memory_delete_conflicting()
 
 
+@app.post("/api/memory/delete_non_reusable")
+def api_memory_delete_non_reusable() -> JSONResponse:
+    if manager.status().get("running"):
+        raise HTTPException(status_code=409, detail="当前自动化任务正在运行，结束后再批量删除试剂记忆库记录。")
+    return JSONResponse(delete_non_reusable_memory())
+
+
 @app.post("/api/memory/{record_id}")
 async def api_memory_update(record_id: int, request: Request) -> JSONResponse:
     if manager.status().get("running"):
@@ -529,6 +554,26 @@ async def api_memory_update(record_id: int, request: Request) -> JSONResponse:
         return JSONResponse(update_memory_record(record_id, payload))
     except ValueError as error:
         raise HTTPException(status_code=404, detail=str(error)) from error
+
+
+@app.patch("/api/memory/{record_id}/flags")
+async def api_memory_update_flags(record_id: int, request: Request) -> JSONResponse:
+    if manager.status().get("running"):
+        raise HTTPException(status_code=409, detail="当前自动化任务正在运行，结束后再修改试剂记忆库。")
+    payload = await request.json()
+    fields = {"reusable", "manual_verified", "conflict"}
+    if not isinstance(payload, dict) or not fields <= payload.keys() or payload.keys() - fields - {"final_category"} or any(
+        not isinstance(payload[field], bool) for field in fields
+    ):
+        raise HTTPException(status_code=422, detail="请提供三项有效的记录状态。")
+    if "final_category" in payload and (
+        not isinstance(payload["final_category"], str) or not payload["final_category"].strip()
+    ):
+        raise HTTPException(status_code=422, detail="请选择有效的物化特性。")
+    try:
+        return JSONResponse(update_memory_record(record_id, payload))
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
 
 
 @app.delete("/api/memory/{record_id}")
@@ -591,6 +636,7 @@ def api_settings(
     identity_enrichment_max_calls_per_day: Annotated[str, Form()] = "",
     auto_pass: Annotated[str, Form()] = "",
     scheduler_enabled: Annotated[str, Form()] = "",
+    scheduler_pipeline: Annotated[str, Form()] = "workbuddy",
     scheduler_mode: Annotated[str, Form()] = "interval",
     scheduler_interval_hours: Annotated[str, Form()] = "6",
     scheduler_daily_time: Annotated[str, Form()] = "16:00",
@@ -598,7 +644,6 @@ def api_settings(
     scheduler_process_all_todos_max: Annotated[str, Form()] = "50",
     scheduler_approval_write_mode: Annotated[str, Form()] = "disabled",
     scheduler_approval_write_min_confidence: Annotated[str, Form()] = "0.8",
-    scheduler_auto_pass: Annotated[str, Form()] = "",
     scheduler_skip_manual_review_lists: Annotated[str, Form()] = "",
     dingtalk_notification_enabled: Annotated[str, Form()] = "",
     dingtalk_at_all: Annotated[str, Form()] = "",
@@ -669,6 +714,7 @@ def api_settings(
             "identity_enrichment_max_calls_per_day": identity_enrichment_max_calls_per_day,
             "auto_pass": normalize_checkbox(auto_pass),
             "scheduler_enabled": normalize_checkbox(scheduler_enabled),
+            "scheduler_pipeline": scheduler_pipeline,
             "scheduler_mode": scheduler_mode,
             "scheduler_interval_hours": scheduler_interval_hours,
             "scheduler_daily_time": scheduler_daily_time,
@@ -676,7 +722,6 @@ def api_settings(
             "scheduler_process_all_todos_max": scheduler_process_all_todos_max,
             "scheduler_approval_write_mode": scheduler_approval_write_mode,
             "scheduler_approval_write_min_confidence": scheduler_approval_write_min_confidence,
-            "scheduler_auto_pass": normalize_checkbox(scheduler_auto_pass),
             "scheduler_skip_manual_review_lists": normalize_checkbox(scheduler_skip_manual_review_lists),
             "dingtalk_notification_enabled": normalize_checkbox(dingtalk_notification_enabled),
             "dingtalk_at_all": normalize_checkbox(dingtalk_at_all),
@@ -907,18 +952,27 @@ async def api_safe_stop(request: Request) -> JSONResponse:
 def api_stopped_tasks() -> JSONResponse:
     from workbuddy_bridge import WorkBuddyBridge
 
-    tasks = TaskControl(ROOT_DIR).stopped()
+    tasks = TaskControl(ROOT_DIR).stopped(limit=None)
     bridge = WorkBuddyBridge(ROOT_DIR, load_settings())
     items = []
     for task in tasks:
         item = {key: task[key] for key in ("task_id", "action", "phase", "details", "state")}
-        batch = bridge.review_batch(task)
-        if TaskControl.failed_workbuddy_dispatch(task) and not (batch and bridge.can_discard_review(task, batch)):
+        failed_dispatch = task["state"] == "failed"
+        if failed_dispatch and not bridge.failed_dispatch_requires_review(task):
             continue
+        try:
+            batch = bridge.review_batch(task)
+            can_discard = bool(batch and bridge.can_discard_review(task, batch))
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            batch, can_discard = None, False
+        if failed_dispatch and not can_discard:
+            item["review_issue"] = "无法确认旧批次状态，或已存在结果、写入痕迹；请查看运行日志，不可直接恢复或作废。"
         if batch:
-            item["can_discard"] = bridge.can_discard_review(task, batch)
+            item["can_discard"] = can_discard
             item["lists"] = sorted({entry["input"]["试剂清单号"] for entry in batch["items"]})
         items.append(item)
+        if len(items) >= 50:
+            break
     return JSONResponse({"tasks": items})
 
 
@@ -973,15 +1027,24 @@ async def api_resume(request: Request) -> JSONResponse:
 
 @app.post("/api/restart")
 def api_restart() -> JSONResponse:
-    stop_result = manager.stop() if manager.status().get("running") else {"stopped": False}
-    schedule_web_ui_restart()
-    return JSONResponse(
-        {
-            "restarting": True,
-            "message": "Web UI is restarting. Please refresh the page in a few seconds.",
-            "stopped_task": stop_result,
-        }
-    )
+    _begin_program_shutdown(restart=True)
+    return JSONResponse({"restarting": True, "old_process_id": os.getpid(), "message": "旧服务退出后将启动新服务；如未恢复请检查 web_ui_restart.log。"})
+
+
+@app.post("/api/exit/prepare")
+def api_exit_prepare() -> JSONResponse:
+    _check_program_shutdown_ready()
+    return JSONResponse(security.issue_ticket("exit_program", {}))
+
+
+@app.post("/api/exit")
+async def api_exit(request: Request) -> JSONResponse:
+    payload = await request.json()
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="操作参数格式无效。")
+    security.consume_ticket(str(payload.get("ticket") or ""), "exit_program", {})
+    _begin_program_shutdown(restart=False)
+    return JSONResponse({"exiting": True, "message": "Web UI 正在正常退出。"})
 
 
 @app.post("/api/review/confirm")
@@ -1114,46 +1177,65 @@ def web_ui_restart_command(*, frozen: bool | None = None) -> tuple[list[str], st
     return (
         [
             sys.executable,
-            "-m",
-            "uvicorn",
-            "web_app:app",
-            "--host",
-            host,
-            "--port",
-            port,
+            "-m", "web_server_control",
+            "--host", host,
+            "--port", port,
         ],
         str(SOURCE_ROOT / "src"),
     )
 
 
-def schedule_web_ui_restart() -> None:
-    def restart_process() -> None:
-        time.sleep(1.0)
-        stdout = LOG_DIR / "web_ui_stdout.log"
-        stderr = LOG_DIR / "web_ui_stderr.log"
-        command, cwd = web_ui_restart_command()
-        creationflags = 0
-        startupinfo = None
-        if os.name == "nt":
-            creationflags = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
-            startupinfo = subprocess.STARTUPINFO()
-            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-            startupinfo.wShowWindow = 0
-        with stdout.open("a", encoding="utf-8") as out, stderr.open("a", encoding="utf-8") as err:
-            subprocess.Popen(
-                command,
-                cwd=cwd,
-                stdout=out,
-                stderr=err,
-                stdin=subprocess.DEVNULL,
-                creationflags=creationflags,
-                startupinfo=startupinfo,
-                close_fds=True,
-            )
-        time.sleep(0.2)
-        os._exit(0)
+def _check_program_shutdown_ready() -> None:
+    if not callable(getattr(app.state, "request_server_shutdown", None)):
+        raise HTTPException(status_code=409, detail="当前为开发热重载模式，请在启动终端停止程序。")
+    if manager.status(light=True).get("running") or _pending_workbuddy_shutdown():
+        raise HTTPException(status_code=409, detail="任务仍在运行或 WorkBuddy 结果待核对，请先安全停止并核对。")
 
-    threading.Thread(target=restart_process, name="web-ui-restart", daemon=True).start()
+
+def _pending_workbuddy_shutdown() -> bool:
+    from workbuddy_bridge import WorkBuddyBridge
+
+    bridge = None
+
+    def failed_requires_review(task: dict[str, Any]) -> bool:
+        nonlocal bridge
+        if bridge is None:
+            bridge = WorkBuddyBridge(ROOT_DIR, load_settings())
+        return bridge.failed_dispatch_requires_review(task)
+
+    return manager._unsettled_workbuddy_startup() or TaskControl(ROOT_DIR).has_unresolved_workbuddy(failed_requires_review)
+
+
+def _begin_program_shutdown(*, restart: bool) -> None:
+    _check_program_shutdown_ready()
+    if not manager.begin_shutdown():
+        raise HTTPException(status_code=409, detail="任务状态已变化或程序正在退出，请刷新后重试。")
+    try:
+        if restart:
+            schedule_web_ui_restart()
+        shutdown = app.state.request_server_shutdown
+        threading.Timer(0.5, shutdown).start()
+    except (OSError, RuntimeError) as error:
+        manager.cancel_shutdown()
+        raise HTTPException(status_code=500, detail=f"程序操作未启动：{error}") from error
+
+
+def schedule_web_ui_restart() -> None:
+    command, cwd = web_ui_restart_command()
+    host = os.getenv("WEB_UI_HOST", "127.0.0.1")
+    port = os.getenv("WEB_UI_PORT", "8000")
+    log_path = LOG_DIR / "web_ui_restart.log"
+    helper = [sys.executable]
+    if not getattr(sys, "frozen", False):
+        helper += ["-m", "web_server_control"]
+    helper += ["--restart-after", "--host", host, "--port", port,
+               "--command", json.dumps(command), "--cwd", cwd, "--log", str(log_path)]
+    flags = 0
+    if os.name == "nt":
+        flags = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS | subprocess.CREATE_NO_WINDOW
+    with log_path.open("a", encoding="utf-8") as output:
+        subprocess.Popen(helper, cwd=cwd, stdin=subprocess.DEVNULL, stdout=output, stderr=output,
+                         creationflags=flags, close_fds=True)
 
 
 def delayed_exit() -> None:

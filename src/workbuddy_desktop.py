@@ -194,32 +194,46 @@ class WorkBuddyDesktop:
         # by path may select a renderer with no top-level window.
         expected = os.path.normcase(os.path.abspath(executable))
         desktop = Desktop(backend="uia")
-        candidates = desktop.windows(title="WorkBuddy", visible_only=False)
-        windows = []
-        diagnostics = []
-        for candidate in candidates:
-            try:
-                process_id = candidate.process_id()
-                actual_path = process_module(process_id)
-                actual = os.path.normcase(os.path.abspath(actual_path))
-                diagnostics.append(f"pid={process_id}, path={actual_path!r}, handle={candidate.handle}")
-                if actual == expected:
-                    windows.append(candidate)
-            except Exception as error:
-                diagnostics.append(f"pid=?, path lookup failed: {type(error).__name__}: {error}")
-        if len(windows) > 1:
-            raise RuntimeError(
-                f"无法唯一定位 WorkBuddy 主窗口（标题候选 {len(candidates)} 个，路径匹配 {len(windows)} 个；"
-                f"配置路径={executable!r}；候选：{' | '.join(diagnostics) or '无'}）。"
-                "检测到多个匹配窗口，无法安全选择。"
-            )
-        if windows:
+        def locate_window():
+            candidate_counts = []
+            for title_only in (True, False):
+                candidates = (desktop.windows(title="WorkBuddy", visible_only=False) if title_only
+                              else desktop.windows(visible_only=False))
+                candidate_counts.append(len(candidates))
+                matches = []
+                details = []
+                for candidate in candidates:
+                    try:
+                        process_id = candidate.process_id()
+                        actual_path = process_module(process_id)
+                        if os.path.normcase(os.path.abspath(actual_path)) != expected:
+                            continue
+                        title = candidate.window_text()
+                        visible = candidate.is_visible()
+                        minimized = candidate.is_minimized()
+                        details.append(f"pid={process_id}, handle={candidate.handle}, title={title!r}, visible={visible}, minimized={minimized}")
+                        matches.append(candidate)
+                    except Exception:
+                        continue
+                if len(matches) > 1:
+                    raise RuntimeError(
+                        f"无法唯一定位 WorkBuddy 主窗口（阶段={'精确标题' if title_only else '程序路径'}，"
+                        f"候选={len(candidates)}，路径匹配={len(matches)}；{' | '.join(details)}）。未输入或发送。"
+                    )
+                if matches:
+                    return matches[0], f"阶段={'精确标题' if title_only else '程序路径'}；{' | '.join(details)}"
+            return None, ("精确标题候选=%d，全部顶层候选=%d，程序路径未匹配；"
+                          "可能窗口隐藏、登录中或正在更新" % tuple(candidate_counts))
+
+        window, window_diagnostic = locate_window()
+        if window:
             if not allow_launch:
-                self._require_matching_security_context(windows[0].process_id())
-                return windows[0]
-            return self._activate_window(windows[0])
+                self._require_matching_security_context(window.process_id())
+                return window
+            if window.is_visible() or window.is_minimized():
+                return self._activate_window(window)
         if not allow_launch:
-            raise RuntimeError("未找到可读取的 WorkBuddy 主窗口；本次未启动客户端或点击发送。")
+            raise RuntimeError(f"未找到可读取的 WorkBuddy 主窗口；{window_diagnostic}；本次未启动客户端或点击发送。")
 
         # Avoid launching a second Electron instance when it is already running
         # in the tray or has a startup dialog without the expected title.
@@ -252,26 +266,27 @@ class WorkBuddyDesktop:
         except Exception as error:
             raise RuntimeError(f"无法确认 WorkBuddy 是否已在后台运行，停止自动启动以避免重复实例：{error}") from error
         if running_pids:
-            if self._restore_taskbar_or_tray(desktop):
+            restored = self._restore_taskbar_or_tray(desktop)
+            if restored:
                 deadline = time.monotonic() + 12
                 while time.monotonic() < deadline:
                     time.sleep(0.4)
-                    for candidate in desktop.windows(title="WorkBuddy", visible_only=False):
-                        try:
-                            if os.path.normcase(os.path.abspath(process_module(candidate.process_id()))) == expected:
-                                print("[workbuddy] 已从任务栏/通知区域恢复现有客户端。", flush=True)
-                                return self._activate_window(candidate)
-                        except RuntimeError:
-                            raise
-                        except Exception:
-                            continue
+                    window, window_diagnostic = locate_window()
+                    if window and (window.is_visible() or window.is_minimized()):
+                        print("[workbuddy] 已从任务栏/通知区域恢复现有客户端。", flush=True)
+                        return self._activate_window(window)
             if -1 in running_pids:
                 raise RuntimeError("检测到同名 WorkBuddy 进程，但无法读取其程序路径；为避免启动重复客户端，已暂停。")
-            raise RuntimeError("WorkBuddy 进程仍在运行，但任务栏/通知区域未能恢复可操作主窗口；请检查登录或弹窗。")
+            for process_id in running_pids:
+                self._require_matching_security_context(process_id)
+            print(
+                "[workbuddy] 后台进程存在，任务栏/托盘未恢复主窗口；"
+                f"{window_diagnostic}。通过同一程序入口唤醒一次。", flush=True,
+            )
         path = client_path(executable)
         if path is None:
             raise RuntimeError("已配置的 WorkBuddy 客户端路径无效；请在基础设置重新检测或手动填写。")
-        print(f"[workbuddy] 客户端未启动，按当前项目用户权限启动：{path}", flush=True)
+        print(f"[workbuddy] {'唤醒现有客户端' if running_pids else '客户端未启动，按当前项目用户权限启动'}：{path}", flush=True)
         try:
             launched = subprocess.Popen([str(path)], cwd=str(path.parent),
                              stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
@@ -281,19 +296,14 @@ class WorkBuddyDesktop:
         deadline = time.monotonic() + max(5, int(self.config.get("startup_timeout_seconds", 45)))
         while time.monotonic() < deadline:
             time.sleep(1)
-            candidates = desktop.windows(title="WorkBuddy", visible_only=False)
-            for candidate in candidates:
+            window, window_diagnostic = locate_window()
+            if window and (window.is_visible() or window.is_minimized()):
                 try:
-                    matches = os.path.normcase(os.path.abspath(process_module(candidate.process_id()))) == expected
-                except Exception:
-                    continue
-                if matches:
-                    try:
-                        self._activate_window(candidate)
-                    except RuntimeError as error:
-                        raise RuntimeError(f"{error} 启动进程 pid={launched.pid}, exit_code={launched.poll()}。") from error
-                    print("[workbuddy] 客户端已启动，窗口可见且输入界面持续就绪。", flush=True)
-                    return candidate
+                    self._activate_window(window)
+                except RuntimeError as error:
+                    raise RuntimeError(f"{error} 启动进程 pid={launched.pid}, exit_code={launched.poll()}。") from error
+                print("[workbuddy] 客户端已启动，窗口可见且输入界面持续就绪。", flush=True)
+                return window
         raise RuntimeError(
             f"WorkBuddy 启动未就绪：pid={launched.pid}, exit_code={launched.poll()}；"
             "等待时间内未找到可操作主窗口，可能正在更新或已退出；未发送任务。"
@@ -587,8 +597,12 @@ class WorkBuddyDesktop:
         require_focus()
         print("[workbuddy] 已核对目标项目及输入内容，准备提交任务。", flush=True)
         clicked_at = time.monotonic()
-        candidates[0].click_input()
-        print("[workbuddy] 已点击发送，等待确认送达。", flush=True)
+        if named:
+            print(f"[workbuddy] 调用已命名发送按钮，rect={candidates[0].rectangle()}。", flush=True)
+            candidates[0].invoke()
+        else:
+            candidates[0].click_input()
+        print("[workbuddy] 已触发发送，等待确认送达。", flush=True)
         if batch_id:
             self._wait_for_submitted_message(
                 window, editor, batch_id,

@@ -107,10 +107,10 @@
       lines: [],
       filter: "all",
     };
-    let approvalStateLoaded = activePage === "suggestions" || activePage === "overview";
-    let reviewStateLoaded = activePage === "review" || activePage === "overview";
-    let artifactStateLoaded = activePage === "artifacts";
-    let logStateLoaded = activePage === "logs";
+    let approvalStateLoaded = false;
+    let reviewStateLoaded = false;
+    let artifactStateLoaded = false;
+    let logStateLoaded = false;
     let lastFinishedAt = "";
     const $ = (selector) => document.querySelector(selector);
 
@@ -164,19 +164,21 @@
       if (!switches.length || !panels.length) return;
 
       const setMode = (mode) => {
+        if (runForm) runForm.dataset.approvalMode = mode;
         switches.forEach((button) => {
           button.setAttribute("aria-pressed", String(button.dataset.approvalModeSwitch === mode));
         });
         panels.forEach((panel) => {
           panel.hidden = panel.dataset.approvalModePanel !== mode;
         });
+        updateExecutionSummary();
       };
 
       switches.forEach((button) => {
         button.addEventListener("click", () => setMode(button.dataset.approvalModeSwitch));
       });
       const selectedMode = switches.find((button) => button.getAttribute("aria-pressed") === "true")?.dataset.approvalModeSwitch;
-      setMode(selectedMode || "v1");
+      setMode(selectedMode || "workbuddy");
     }
 
     function setSelectValue(form, name, value) {
@@ -210,11 +212,13 @@
 
     function updateDryRunUi(value) {
       const enabled = String(value || "").toLowerCase() === "true";
+      if (runForm) runForm.dataset.dryRun = String(enabled);
       setText("#dryRunText", enabled ? "开启" : "关闭");
       const pill = document.querySelector("#dryRunPill");
       if (pill) pill.classList.toggle("dry-run-active", enabled);
       const warning = document.querySelector("#dryRunWarning");
       if (warning) warning.hidden = !enabled;
+      updateExecutionSummary();
     }
 
     function setCheckbox(form, name, value) {
@@ -234,7 +238,6 @@
     setCheckbox(settingsForm, "auto_pass", initialRuntime.auto_pass);
     setCheckbox(settingsForm, "scheduler_enabled", initialRuntime.scheduler_enabled);
     setCheckbox(settingsForm, "scheduler_use_default_run_policy", initialRuntime.scheduler_use_default_run_policy || "true");
-    setCheckbox(settingsForm, "scheduler_auto_pass", initialRuntime.scheduler_auto_pass);
     setCheckbox(settingsForm, "scheduler_skip_manual_review_lists", initialRuntime.scheduler_skip_manual_review_lists || "true");
     setCheckbox(settingsForm, "dingtalk_notification_enabled", initialRuntime.dingtalk_notification_enabled);
     setCheckbox(settingsForm, "dingtalk_at_all", initialRuntime.dingtalk_at_all || "true");
@@ -259,6 +262,7 @@
     );
     setCheckbox(settingsForm, "memory_sync_check_remote_on_startup", initialRuntime.memory_sync_check_remote_on_startup);
     setSelectValue(settingsForm, "scheduler_mode", initialRuntime.scheduler_mode);
+    setSelectValue(settingsForm, "scheduler_pipeline", initialRuntime.scheduler_pipeline);
     setSelectValue(settingsForm, "scheduler_approval_write_mode", initialRuntime.scheduler_approval_write_mode);
     setText("#writeModeText", approvalWriteModeLabel(initialRuntime.approval_write_mode));
     setText("#erpApiDiscoveryText", erpApiDiscoveryLabel(initialRuntime.erp_api_discovery_status));
@@ -266,6 +270,7 @@
     setText("#schedulerNextRun", safe(initialScheduler.next_run_at));
     setText("#schedulerLastRun", safe(initialScheduler.last_run_at));
     setText("#schedulerLastResult", safe(initialScheduler.last_result));
+    setText("#schedulerLastMessage", safe(initialScheduler.last_message));
     initLlmSettings();
     initIdentityEnrichmentSettings();
     initSectionNav();
@@ -348,25 +353,70 @@
       data.set("target_list_numbers", selectedNumbers.join(","));
       data.set("process_all_todos", data.has("process_all_todos") ? "true" : "false");
       data.set("auto_pass", data.has("auto_pass") ? "true" : "false");
+      if (action.startsWith("workbuddy_")) data.set("auto_pass", "false");
       if (action !== "workbuddy_loop") data.delete("workbuddy_batch_size");
       return data;
     }
 
+    function updateExecutionSummary() {
+      if (!runForm) return;
+      const workbuddy = runForm.dataset.approvalMode !== "v1";
+      const selected = selectedTodoNumbers();
+      const field = (name) => runForm.elements.namedItem(name);
+      const all = field("process_all_todos").checked;
+      const mode = field("approval_write_mode").value;
+      const dry = runForm.dataset.dryRun === "true";
+      const rawLimit = field("process_all_todos_max").value.trim();
+      const limit = /^[+-]?\d+$/.test(rawLimit) ? Math.max(1, Number(rawLimit)) : 50;
+      const scope = selected.length
+        ? `${selected.length} 个清单：${selected.join("、")}${!workbuddy && limit < selected.length ? `（本次最多处理 ${limit} 个）` : ""}`
+        : all ? (workbuddy ? "全部待办（按 WorkBuddy 执行规则处理）" : `全部待办（最多处理 ${limit} 个）`)
+          : workbuddy ? "尚未选择：请选择清单或启用全部待办"
+            : "未选清单：按 V1 默认待办范围执行";
+      const impact = dry || mode === "disabled"
+        ? `${dry ? "测试模式" : "仅生成建议"} · 不写入 ERP、不点击通过`
+        : `${approvalWriteModeLabel(mode)} · ${workbuddy || !field("auto_pass").checked ? "不点击通过" : "仅在安全校验通过后自动通过"}${workbuddy ? " · 回写须通过 WorkBuddy 和 ERP 接口校验" : ""}`;
+      setText("#executionMode", workbuddy ? "WorkBuddy" : "V1");
+      setText("#executionScope", scope);
+      setText("#executionImpact", impact);
+      setText('#run button[data-action="suggestions"]', dry || mode === "disabled" ? "生成审批建议" : "启动 V1 审批");
+    }
+
     document.querySelectorAll("button[data-action]").forEach((button) => {
       button.addEventListener("click", async () => {
-        const data = buildRunRequestData(runForm, button.dataset.action, selectedTodoNumbers());
-        const options = Object.fromEntries(data.entries());
-        const ticket = await operationTicket("run", options);
-        data.set("operation_ticket", ticket);
-        const response = await fetch("/api/run", { method: "POST", body: data });
-        const payload = await response.json();
-        await refreshStatus();
-        await refreshReviewQueue({force: true});
-        if (!payload.started) {
-          alert(payload.message || payload.detail || "任务未启动");
+        if (runLaunchPending) return;
+        runLaunchPending = true;
+        const feedback = document.querySelector("#runLaunchFeedback");
+        const report = (message, tone = "") => {
+          if (!feedback) return;
+          feedback.hidden = false;
+          feedback.textContent = message;
+          feedback.dataset.tone = tone;
+        };
+        let submitted = false;
+        report("正在请求启动…");
+        try {
+          const data = buildRunRequestData(runForm, button.dataset.action, selectedTodoNumbers());
+          data.set("operation_ticket", await operationTicket("run", Object.fromEntries(data.entries())));
+          submitted = true;
+          const response = await fetch("/api/run", { method: "POST", body: data });
+          const payload = await response.json();
+          if (!response.ok || !payload.started) {
+            report(apiErrorMessage(payload), "error");
+          } else {
+            report("任务已启动，可在运行日志查看进度。");
+          }
+          await Promise.allSettled([refreshStatus(), refreshReviewQueue({force: true})]);
+        } catch (error) {
+          report(submitted ? "未收到启动结果，请先检查运行状态再重试。" : dashboardRequestErrorMessage(error, "未能启动任务。"), "error");
+        } finally {
+          runLaunchPending = false;
         }
       });
     });
+    runForm?.addEventListener("change", updateExecutionSummary);
+    runForm?.addEventListener("input", updateExecutionSummary);
+    let runLaunchPending = false;
 
     if (document.querySelector("#configTransfer")) {
       const passphrase = document.querySelector("#configTransferPassphrase");
@@ -484,8 +534,14 @@
           row.innerHTML = `<td>${escapeHtml(task.task_id.slice(0, 12))}</td><td>${escapeHtml(task.action)}</td><td>${escapeHtml(task.phase)}</td><td>${escapeHtml(String(details.saved ?? "-"))} / ${escapeHtml(String(details.pending_library ?? "-"))}</td><td><label class="check"><input type="checkbox" aria-label="已人工核对 ERP、投递与结果文件">已核对</label></td><td><button type="button">核对恢复</button></td>`;
           const check = row.querySelector("input");
           const button = row.querySelector("button");
-          if (task.state === "needs_review") row.cells[2].textContent = `待核对 · ${task.phase}`;
+          if (task.state === "needs_review" || task.state === "failed") row.cells[2].textContent = `待核对 · ${task.phase}`;
           if (task.lists?.length) row.cells[2].append(` · ${task.lists.join("、")}`);
+          if (task.review_issue) {
+            row.cells[4].textContent = "待核对";
+            row.cells[5].textContent = task.review_issue;
+            body.appendChild(row);
+            continue;
+          }
           if (task.can_discard) button.textContent = "作废旧结果";
           check.checked = reviewedStoppedTasks.has(task.task_id);
           button.disabled = controlRunning || !check.checked;
@@ -527,14 +583,30 @@
     }
 
     on("#restartRunButton", "click", async () => {
-      const response = await fetch("/api/restart", { method: "POST" });
-      const payload = await response.json();
-      if (!payload.restarting) {
-        alert(payload.message || payload.detail || "程序未重启");
-        return;
-      }
-      setText("#statusLine", "Web UI 正在重启，几秒后自动刷新页面。");
-      setTimeout(() => window.location.reload(), 4500);
+      if (!confirm("重启 Web UI？仅在没有运行任务时允许。")) return;
+      try {
+        const response = await fetch("/api/restart", {method: "POST"});
+        const payload = await response.json();
+        if (!response.ok || !payload.restarting) throw new Error(payload.detail || payload.message || "程序未重启");
+        setText("#statusLine", "Web UI 正在重启，等待新服务启动。");
+        for (let attempt = 0; attempt < 30; attempt++) {
+          await new Promise((resolve) => setTimeout(resolve, 1000));
+          try {
+            const health = await fetch("/api/health", {cache: "no-store"});
+            if (health.ok && (await health.json()).process_id !== payload.old_process_id) { window.location.reload(); return; }
+          } catch (_) { /* Waiting for the replacement service. */ }
+        }
+        alert("新服务未能在 30 秒内启动，请检查 data/logs/web_ui_restart.log。");
+      } catch (error) { alert(error.message || String(error)); }
+    });
+    on("#exitProgramButton", "click", async () => {
+      if (!confirm("退出 Web UI 并关闭项目后台进程？已保存的数据不会删除。")) return;
+      try {
+        const prepared = await controlRequest("/api/exit/prepare", {});
+        const result = await controlRequest("/api/exit", {ticket: prepared.ticket});
+        if (!result.exiting) throw new Error(result.message || "退出未启动");
+        setText("#statusLine", "Web UI 正在退出，可关闭此页面。");
+      } catch (error) { alert(error.message || String(error)); }
     });
 
     let lastUpdateInfo = null;
@@ -598,12 +670,12 @@
 
     on("#selectAllTodos", "click", () => {
       todoState.selected = new Set(todoState.tasks.map((task) => task.list_number).filter(Boolean));
-      renderTodoTasks({ tasks: todoState.tasks, exists: todoState.tasks.length > 0 });
+      if (todoState.snapshot) renderTodoTasks(todoState.snapshot, true);
     });
 
     on("#clearTodos", "click", () => {
       todoState.selected.clear();
-      renderTodoTasks({ tasks: todoState.tasks, exists: todoState.tasks.length > 0 });
+      if (todoState.snapshot) renderTodoTasks(todoState.snapshot, true);
     });
 
     function providerById(providerId) {
@@ -817,16 +889,85 @@
       workbuddyDetectionState.textContent = "已选定，尚未保存。";
     });
 
+    let settingsRevision = 0;
+    function clearSettingsErrors() {
+      settingsForm?.querySelectorAll("[data-settings-error]").forEach((message) => {
+        const field = settingsForm.elements.namedItem(message.dataset.settingsError);
+        if (field) {
+          field.removeAttribute("aria-invalid");
+          field.removeAttribute("aria-errormessage");
+        }
+        message.remove();
+      });
+    }
+
+    function showSettingsValidation(detail) {
+      if (!Array.isArray(detail)) return false;
+      let firstField;
+      for (const error of detail) {
+        const name = error.loc?.at(-1);
+        if (typeof name !== "string") continue;
+        const field = settingsForm.elements.namedItem(name);
+        if (!(field instanceof HTMLElement) || field.hasAttribute("aria-invalid")) continue;
+        const label = field.closest("label");
+        if (!label) continue;
+        const section = label.closest(".settings-section-collapsed");
+        section?.querySelector(".settings-section-toggle")?.click();
+        const message = document.createElement("span");
+        message.id = `settings-error-${name}`;
+        message.dataset.settingsError = name;
+        message.className = "settings-field-error";
+        message.textContent = error.msg || "请检查此设置值。";
+        field.setAttribute("aria-invalid", "true");
+        field.setAttribute("aria-errormessage", message.id);
+        label.appendChild(message);
+        firstField ||= field;
+      }
+      firstField?.focus();
+      return Boolean(firstField);
+    }
+
+    function markSettingsDirty() {
+      settingsRevision += 1;
+      clearSettingsErrors();
+      setText("#settingsSaveState", "有未保存更改");
+      setClass("#settingsSaveState", "save-state");
+    }
+    settingsForm?.addEventListener("input", markSettingsDirty);
+    settingsForm?.addEventListener("change", markSettingsDirty);
+    document.querySelectorAll(".settings-jump a").forEach((link) => {
+      link.addEventListener("click", () => {
+        document.querySelector(link.hash + ".settings-section-collapsed .settings-section-toggle")?.click();
+      });
+    });
     settingsForm?.addEventListener("submit", async (event) => {
       event.preventDefault();
       const state = document.querySelector("#settingsSaveState");
       state.textContent = "保存中";
       state.className = "save-state";
-      const response = await fetch("/api/settings", { method: "POST", body: new FormData(settingsForm) });
-      const payload = await response.json();
-      if (!response.ok) {
-        state.textContent = payload.detail || "保存失败";
+      const button = settingsForm.querySelector('button[type="submit"]');
+      if (button.disabled) return;
+      clearSettingsErrors();
+      button.disabled = true;
+      const revision = settingsRevision;
+      let response, payload;
+      try {
+        response = await fetch("/api/settings", { method: "POST", body: new FormData(settingsForm) });
+        payload = await response.json();
+      } catch (_) {
+        state.textContent = "未收到保存结果，请核对设置后再试。";
         state.className = "save-state failed";
+        return;
+      } finally {
+        button.disabled = false;
+      }
+      if (!response.ok) {
+        state.textContent = showSettingsValidation(payload.detail) ? "请修正标记的设置项。" : apiErrorMessage(payload);
+        state.className = "save-state failed";
+        return;
+      }
+      if (settingsRevision !== revision) {
+        state.textContent = "已保存提交时的设置，仍有新的未保存更改。";
         return;
       }
       state.textContent = "已保存";
@@ -851,6 +992,10 @@
     function safe(value, fallback = "-") {
       if (value === null || value === undefined || value === "") return fallback;
       return String(value);
+    }
+
+    function displayTime(value) {
+      return safe(value).replace(/^(\d{4}-\d{2}-\d{2})T(?=\d{2}:\d{2})/, "$1 ");
     }
 
     function apiErrorMessage(payload) {
@@ -980,38 +1125,53 @@
         return;
       }
       rows.forEach((row) => {
-        const manual = String(row["需人工复核"] || "").toLowerCase();
+        const manual = String(row["需人工复核"] ?? "").trim().toLowerCase();
         const tr = document.createElement("tr");
         tr.className = "suggestion-row";
         tr.innerHTML = `
           <td>${escapeHtml(row["序号"])}</td>
-          <td>${escapeHtml(row["试剂名称"])}</td>
+          <td><button type="button" class="evidence-trigger" aria-controls="evidence" aria-expanded="false">${escapeHtml(row["试剂名称"])} <span>查看证据</span></button></td>
           <td>${escapeHtml(row["CAS号"])}</td>
           <td>${escapeHtml(row["标准化名称"])}</td>
-          <td>${escapeHtml(row["查询来源"])}</td>
+          <td>${escapeHtml(suggestionSourceLabel(row["查询来源"]))}</td>
           <td><span class="category suggestion-category">${escapeHtml(row["最终建议类别"])}</span></td>
           <td>${escapeHtml(row["置信度"])}</td>
-          <td><span class="status-badge ${manual === "true" ? "status-warning" : "status-success"}">${escapeHtml(row["需人工复核"])}</span></td>
+          <td><span class="status-badge ${manual === "true" ? "status-warning" : ""}">${manual === "true" ? "待人工复核" : manual === "false" ? "无需复核" : "未标注"}</span></td>
         `;
         tr.addEventListener("click", () => {
           document.querySelectorAll(".suggestion-row-selected").forEach((item) => item.classList.remove("suggestion-row-selected"));
+          document.querySelectorAll('.evidence-trigger[aria-expanded="true"]').forEach((item) => item.setAttribute("aria-expanded", "false"));
           tr.classList.add("suggestion-row-selected");
+          tr.querySelector(".evidence-trigger").setAttribute("aria-expanded", "true");
           renderEvidence(row);
+          document.querySelector("#evidenceTitle")?.focus();
         });
         body.appendChild(tr);
       });
       renderEvidence(null);
     }
 
+    function suggestionSourceLabel(source) {
+      const labels = {business_rule: "业务规则", reagent_memory: "试剂记忆库"};
+      return Object.hasOwn(labels, source) ? labels[source] : safe(source);
+    }
+
+    on("#closeEvidence", "click", () => {
+      const row = document.querySelector(".suggestion-row-selected");
+      const trigger = row?.querySelector(".evidence-trigger");
+      renderEvidence(null);
+      row?.classList.remove("suggestion-row-selected");
+      trigger?.setAttribute("aria-expanded", "false");
+      trigger?.focus();
+    });
+
     function renderEvidence(row) {
       const box = document.querySelector("#evidenceBox");
       const panel = document.querySelector("#evidence");
       if (!box) return;
-      if (panel) panel.classList.toggle("evidence-collapsed", !row);
+      if (panel) panel.hidden = !row;
       if (!row) {
-        box.innerHTML = "<p>点击审批建议表中的记录，查看该条的规则原因、证据和来源摘要。</p>";
-        return;
-        box.innerHTML = "<p>暂无建议结果。</p>";
+        box.replaceChildren();
         return;
       }
       box.innerHTML = `
@@ -1019,7 +1179,7 @@
           <dt>试剂</dt><dd>${escapeHtml(row["试剂名称"])}</dd>
           <dt>CAS</dt><dd>${escapeHtml(row["CAS号"])}</dd>
           <dt>标准名称</dt><dd>${escapeHtml(row["标准化名称"])}</dd>
-          <dt>查询来源</dt><dd>${escapeHtml(row["查询来源"])}</dd>
+          <dt>查询来源</dt><dd>${escapeHtml(suggestionSourceLabel(row["查询来源"]))}</dd>
           <dt>建议类别</dt><dd>${escapeHtml(row["最终建议类别"])}</dd>
           <dt>置信度</dt><dd>${escapeHtml(row["置信度"])}</dd>
           <dt>规则原因</dt><dd>${escapeHtml(row["规则原因"])}</dd>
@@ -1033,8 +1193,8 @@
       if (!meta) return;
       const rows = queue.preview || [];
       meta.textContent = queue.exists
-        ? `共 ${safe(queue.rows, 0)} 条历史记录，当前待处理 ${safe(queue.pending, 0)} 条；最近更新：${safe(queue.modified)}`
-        : "尚未生成 data/review_queue.xlsx";
+        ? `共 ${safe(queue.rows, 0)} 条历史记录，当前待处理 ${safe(queue.pending, 0)} 条；最近更新：${displayTime(queue.modified)}`
+        : "尚未生成复核队列";
       reviewState.rows = rows;
       reviewState.page = Number(queue.page || reviewState.page || 1);
       reviewState.pages = Number(queue.pages || 1);
@@ -1050,18 +1210,24 @@
         .filter(Boolean);
     }
 
-    function renderTodoTasks(todoTasks) {
+    function renderTodoTasks(todoTasks, force = false) {
       const holder = document.querySelector("#todoListPicker");
       const meta = document.querySelector("#todoMeta");
       if (!holder || !meta) return;
       const tasks = todoTasks.tasks || [];
+      const signature = JSON.stringify([todoTasks.exists, todoTasks.rows, todoTasks.modified, tasks]);
+      if (!force && signature === todoState.signature) return;
+      todoState.signature = signature;
+      todoState.snapshot = todoTasks;
       todoState.tasks = tasks;
       meta.textContent = todoTasks.exists
         ? `共 ${safe(todoTasks.rows, tasks.length)} 条；最近刷新：${safe(todoTasks.modified)}`
         : "点击“获取最新清单号”读取 ERP 待审批列表。";
       holder.innerHTML = "";
+      const updateScope = () => updateExecutionSummary();
       if (!tasks.length) {
         holder.innerHTML = "<p>暂无待办清单缓存。</p>";
+        updateScope();
         return;
       }
       tasks.forEach((task) => {
@@ -1084,6 +1250,7 @@
         });
         holder.appendChild(label);
       });
+      updateScope();
     }
 
     function updateReviewListFilter(listNumbers) {
@@ -1329,13 +1496,13 @@
       if (!rows.length) {
         body.innerHTML = tableEmptyHtml(4, "暂无人工复核项", "需要人工确认的审批记录会显示在这里。");
         clearReviewInspector();
+        document.querySelector("#review")?.classList.remove("review-detail-open");
         updateReviewPagination();
         return;
       }
       pageRows.forEach((row) => {
         const tr = document.createElement("tr");
         tr.className = "review-row";
-        tr.tabIndex = 0;
         tr.dataset.reviewKey = row.review_key || [row.list_number, row.sequence, row.cas, row.reagent_name].join("|");
         const preselectedCategory = reviewAllowsSuggestionPreselect(row) ? (row.suggested_category || "") : "";
         const options = categoryOptionsHtml(preselectedCategory);
@@ -1356,7 +1523,7 @@
           <td class="reason-cell" title="${escapeHtml(row.reason_full || row.reason)}">
             <div class="review-reason-short">${escapeHtml(row.reason || "需要核对判定依据。")}</div>
           </td>
-          <td class="review-status-cell"><span class="status-badge status-warning">${escapeHtml(row.status || "待复核")}</span></td>
+          <td class="review-status-cell"><span class="status-badge status-warning">待复核</span></td>
           <td class="review-category-cell">
             <label class="review-category-label">确认类别<select class="review-category">${options}</select></label>
             <span class="review-selected">未选择</span>
@@ -1424,9 +1591,14 @@
             return;
           }
           confirmButton.disabled = true;
+          categorySelect.disabled = true;
+          deleteButton.disabled = true;
+          if (adviceButton) adviceButton.disabled = true;
           rowMessage.textContent = "正在确认...";
           rowMessage.className = "review-row-message";
-          const response = await fetch("/api/review/confirm", {
+          let response, payload;
+          try {
+            response = await fetch("/api/review/confirm", {
             method: "POST",
             headers: {"Content-Type": "application/json"},
             body: JSON.stringify({
@@ -1443,17 +1615,41 @@
               final_category: finalCategory,
               reason: row.reason || row.reason_full || ""
             }),
-          });
-          const payload = await response.json();
-          if (!response.ok || !payload.confirmed) {
-            rowMessage.textContent = payload.detail || payload.message || "人工复核确认失败。";
+            });
+            payload = await response.json();
+          } catch (_) {
+            rowMessage.textContent = "未收到确认结果。请刷新队列核对该条是否仍待处理，再决定是否重试。";
             rowMessage.className = "review-row-message failed";
-            confirmButton.disabled = false;
             return;
           }
-          rowMessage.textContent = payload.message || "已确认分类并加入试剂记忆库；ERP 写入将在已验证的自动化链路中执行。";
-          rowMessage.className = "review-row-message ok";
-          await Promise.all([refreshStatus(), refreshReviewQueue({force: true})]);
+          if (!response.ok || !payload.confirmed) {
+            rowMessage.textContent = apiErrorMessage(payload);
+            rowMessage.className = "review-row-message failed";
+            confirmButton.disabled = false;
+            categorySelect.disabled = false;
+            deleteButton.disabled = false;
+            if (adviceButton) adviceButton.disabled = false;
+            return;
+          }
+          const active = reviewState.selectedRowElement === tr;
+          if (active) reviewState.selectedKey = tr.nextElementSibling?.dataset.reviewKey
+            || tr.previousElementSibling?.dataset.reviewKey || "";
+          const progress = document.querySelector("#reviewProgress");
+          const message = payload.message || "已确认分类并加入试剂记忆库。";
+          progress.hidden = false;
+          progress.textContent = message;
+          try {
+            await refreshReviewQueue({force: true});
+            if (active && reviewState.selectedRowElement) {
+              progress.textContent += " 已定位到下一条待复核记录。";
+              focusReviewTitle();
+            } else if (active) {
+              progress.focus();
+            }
+          } catch (_) {
+            progress.textContent += " 队列刷新失败，请刷新页面，不要重复提交。";
+          }
+          refreshStatus().catch(() => {});
         });
         deleteButton.addEventListener("click", async () => {
           if (!confirm(`确认删除人工复核项：${row.reagent_name || row.cas || row.review_key}？`)) return;
@@ -1484,11 +1680,10 @@
           await Promise.all([refreshStatus(), refreshReviewQueue({force: true})]);
         });
         tr._reviewRecord = row;
-        tr.addEventListener("click", () => selectReviewRecord(row, tr));
-        tr.addEventListener("keydown", (event) => {
-          if (event.target !== tr || !["Enter", " "].includes(event.key)) return;
-          event.preventDefault();
+        tr.addEventListener("click", () => {
           selectReviewRecord(row, tr);
+          document.querySelector("#review")?.classList.add("review-detail-open");
+          focusReviewTitle();
         });
         body.appendChild(tr);
       });
@@ -1507,6 +1702,16 @@
       if (categorySlot && categoryCell) Array.from(categorySlot.childNodes).forEach((node) => categoryCell.appendChild(node));
       if (actionSlot && actionCell) Array.from(actionSlot.childNodes).forEach((node) => actionCell.appendChild(node));
     }
+
+    function focusReviewTitle() {
+      const title = document.querySelector("#reviewInspectorTitle");
+      title?.focus();
+    }
+
+    on("#reviewBackToQueue", "click", () => {
+      document.querySelector("#review")?.classList.remove("review-detail-open");
+      reviewState.selectedRowElement?.querySelector(".review-select-record")?.focus();
+    });
 
     function clearReviewInspector() {
       const content = document.querySelector("#reviewInspectorContent");
@@ -1553,8 +1758,8 @@
       ];
       content.innerHTML = `
         <div class="review-inspector-header">
-          <div class="review-inspector-status"><span class="status-badge status-warning">待人工复核</span><span>${escapeHtml(row.timestamp || "-")}</span></div>
-          <h3 id="reviewInspectorTitle">${escapeHtml(row.reagent_name || "未命名试剂")}</h3>
+          <div class="review-inspector-status"><span class="status-badge status-warning">待人工复核</span><span>${escapeHtml(displayTime(row.timestamp))}</span></div>
+          <h3 id="reviewInspectorTitle" tabindex="-1">${escapeHtml(row.reagent_name || "未命名试剂")}</h3>
           <p>${escapeHtml(row.cleaned_name || row.standard_name || "待确认身份")}</p>
         </div>
         <dl class="review-inspector-meta">${metadata.map(([label, value]) => `<div><dt>${escapeHtml(label)}</dt><dd>${escapeHtml(value)}</dd></div>`).join("")}</dl>
@@ -1624,58 +1829,72 @@
     let memorySearchTimer = null;
     let memorySearchComposing = false;
     const memorySearchInput = document.querySelector("#memorySearch");
+    const memoryStatusDrafts = new Map();
+    let memoryStatusPending = false;
+    let memoryBulkDeletePending = false;
+    const memoryFilterIds = ["memoryCategoryFilter", "memoryReusableFilter", "memoryConflictFilter"];
+    const hasMemoryFilters = () => Boolean(memorySearchInput?.value.trim()
+      || memoryFilterIds.some((id) => document.getElementById(id)?.value));
+    const updateMemoryFilterActions = () => setDisabled("#clearMemoryFilters", !hasMemoryFilters());
     const resetMemoryPage = () => {
+      window.clearTimeout(memorySearchTimer);
       memoryState.page = 1;
+    };
+    const searchMemory = () => {
+      resetMemoryPage();
+      updateMemoryFilterActions();
+      return refreshMemory();
     };
     const scheduleMemorySearch = () => {
       window.clearTimeout(memorySearchTimer);
-      memorySearchTimer = window.setTimeout(() => {
-        resetMemoryPage();
-        refreshMemory();
-      }, 350);
+      memorySearchTimer = window.setTimeout(searchMemory, 350);
     };
     on("#refreshMemoryButton", "click", () => refreshMemory());
+    on("#clearMemoryFilters", "click", () => {
+      memorySearchInput.value = "";
+      memoryFilterIds.forEach((id) => { document.getElementById(id).value = ""; });
+      memorySearchInput.focus();
+      searchMemory();
+    });
+    on("#memoryPageSize", "change", (event) => {
+      memoryState.perPage = Number(event.target.value);
+      searchMemory();
+    });
+    async function changeMemoryPage(offset) {
+      memoryState.page += offset;
+      if (await refreshMemory()) document.querySelector(".memory-table-wrap")?.focus();
+    }
+
     on("#memoryPrevPage", "click", () => {
       if (memoryState.page <= 1) return;
-      memoryState.page -= 1;
-      refreshMemory();
+      changeMemoryPage(-1);
     });
     on("#memoryNextPage", "click", () => {
       if (memoryState.page >= memoryState.pages) return;
-      memoryState.page += 1;
-      refreshMemory();
+      changeMemoryPage(1);
     });
     memorySearchInput?.addEventListener("compositionstart", () => {
       memorySearchComposing = true;
+      window.clearTimeout(memorySearchTimer);
     });
     memorySearchInput?.addEventListener("compositionend", () => {
       memorySearchComposing = false;
       scheduleMemorySearch();
     });
     memorySearchInput?.addEventListener("input", () => {
+      updateMemoryFilterActions();
       if (!memorySearchComposing) scheduleMemorySearch();
     });
     memorySearchInput?.addEventListener("keydown", (event) => {
-      if (event.key === "Enter") {
-        window.clearTimeout(memorySearchTimer);
-        resetMemoryPage();
-        refreshMemory();
+      if (event.key === "Enter" && !event.isComposing && !memorySearchComposing) {
+        event.preventDefault();
+        searchMemory();
       }
     });
-    on("#memoryCategoryFilter", "change", () => {
-      resetMemoryPage();
-      refreshMemory();
-    });
-    on("#memoryReusableFilter", "change", () => {
-      resetMemoryPage();
-      refreshMemory();
-    });
-    on("#memoryConflictFilter", "change", () => {
-      resetMemoryPage();
-      refreshMemory();
-    });
+    memoryFilterIds.forEach((id) => on(`#${id}`, "change", searchMemory));
     on("#saveReusableMemoryButton", "click", () => saveReusableMemoryRows());
     on("#deleteConflictMemoryButton", "click", () => deleteConflictingMemory());
+    on("#deleteNonReusableMemoryButton", "click", () => deleteNonReusableMemory());
     on("#importMemoryButton", "click", async () => {
       const response = await fetch("/api/memory/import_suggestions", { method: "POST" });
       const payload = await response.json();
@@ -1692,18 +1911,29 @@
         `低置信度候选 ${payload.candidate_low_confidence || 0} 条`,
         `类别未映射候选 ${payload.candidate_unmapped_category || 0} 条`
       ].join("；");
-      document.querySelector("#memoryMeta").textContent = `导入完成：${message}`;
       resetMemoryPage();
       await refreshMemory();
+      reportMemoryFeedback(`导入完成：${message}`);
     });
+
+    function reportMemoryFeedback(message, tone = "") {
+      const feedback = document.querySelector("#memoryFeedback");
+      if (!feedback) return;
+      feedback.hidden = !message;
+      feedback.dataset.tone = tone;
+      feedback.textContent = message;
+    }
 
     async function refreshMemory() {
       if (!document.querySelector("#memoryTable")) return;
       const requestId = memoryState.requestSeq + 1;
       memoryState.requestSeq = requestId;
+      window.clearTimeout(memorySearchTimer);
+      reportMemoryFeedback("");
       setMemoryLoading(true);
+      const filtered = hasMemoryFilters();
       const params = new URLSearchParams({
-        q: document.querySelector("#memorySearch").value || "",
+        q: memorySearchInput.value.trim(),
         category: document.querySelector("#memoryCategoryFilter").value || "",
         reusable: document.querySelector("#memoryReusableFilter").value || "",
         conflict: document.querySelector("#memoryConflictFilter").value || "",
@@ -1712,9 +1942,8 @@
         limit: String(memoryState.perPage || 10)
       });
       try {
-        const response = await fetch(`/api/memory?${params.toString()}`);
-        const payload = await response.json();
-        if (requestId !== memoryState.requestSeq) return;
+        const payload = await readDashboardJSON(`/api/memory?${params.toString()}`);
+        if (requestId !== memoryState.requestSeq) return false;
         memoryState.rows = payload.preview || [];
         memoryState.categories = payload.categories || [];
         memoryState.page = Number(payload.page || 1);
@@ -1725,7 +1954,21 @@
           reviewCategories = payload.review_decision_options;
         }
         renderMemoryFilters();
-        renderMemoryRows(payload);
+        renderMemoryRows(payload, filtered);
+        updateMemoryFilterActions();
+        return true;
+      } catch (_) {
+        if (requestId !== memoryState.requestSeq) return false;
+        const wrap = document.querySelector(".memory-table-wrap");
+        const hasResults = wrap.dataset.loaded === "true";
+        reportMemoryFeedback(hasResults ? "刷新失败，仍显示上一次加载的记录。请重试。"
+          : "记忆库暂时无法加载，请重试。", "error");
+        if (!hasResults) {
+          document.querySelector("#memoryTable").innerHTML = tableEmptyHtml(4, "无法加载记录", "可点击上方「刷新」重试。");
+          setText("#memoryPageInfo", "加载失败");
+          setText("#memoryMeta", "加载失败");
+        }
+        return false;
       } finally {
         if (requestId === memoryState.requestSeq) {
           setMemoryLoading(false);
@@ -1763,101 +2006,170 @@
       return options.join("");
     }
 
-    function renderMemoryRows(payload) {
+    function renderMemoryRows(payload, filtered) {
       const body = document.querySelector("#memoryTable");
       const meta = document.querySelector("#memoryMeta");
       if (!body || !meta) return;
       const rows = memoryState.rows || [];
-      meta.textContent = payload.exists
-        ? `\u5171 ${safe(payload.rows, 0)} \u6761\uff1b\u7b2c ${safe(payload.page, 1)} / ${safe(payload.pages, 1)} \u9875\uff1b\u6bcf\u9875 ${safe(payload.per_page, 10)} \u6761\uff1b\u6570\u636e\u5e93\uff1a${safe(payload.path)}`
-        : "\u5c1a\u672a\u751f\u6210 data/reagent_memory.sqlite";
+      meta.textContent = payload.exists ? `${filtered ? "匹配 " : "共 "}${safe(payload.rows, 0)} 条` : "尚未生成记忆库";
+      document.querySelector(".memory-table-wrap").dataset.loaded = "true";
       renderMemoryPagination(payload);
       body.innerHTML = "";
       if (!rows.length) {
         renderMemoryDetail(null);
-        body.innerHTML = tableEmptyHtml(7, "\u6682\u65e0\u8bb0\u5fc6\u5e93\u8bb0\u5f55", "\u5bfc\u5165\u5ba1\u6279\u5efa\u8bae\u540e\uff0c\u53ef\u5728\u8fd9\u91cc\u7ef4\u62a4\u53ef\u590d\u7528\u7684\u5386\u53f2\u5224\u5b9a\u3002");
+        body.innerHTML = filtered ? tableEmptyHtml(4, "没有匹配的记录", "修改关键词或清空筛选后重试。")
+          : tableEmptyHtml(4, "暂无记忆记录", "可从维护操作中导入审批建议。");
         return;
       }
       rows.forEach((row) => {
         const tr = document.createElement("tr");
         tr.className = "memory-row";
+        tr.setAttribute("role", "row");
         tr.dataset.id = row.id;
         const categoryOptions = categoryOptionsHtml(row.final_category);
+        const reusable = boolValue(row.reusable);
+        const manualVerified = boolValue(row.manual_verified);
+        const conflict = boolValue(row.conflict);
+        const savedFlags = {reusable, manual_verified: manualVerified, conflict};
+        const flags = memoryStatusDrafts.get(String(row.id)) || savedFlags;
+        const name = row.standard_name || row.cleaned_name || row.raw_name || "未命名试剂";
         tr.innerHTML = `
-          <td>${escapeHtml(row.id)}</td>
-          <td>
-            <input class="memory-cas" value="${escapeHtml(row.cas)}">
+          <td class="memory-name-cell" role="cell">
+            <strong class="memory-standard-name-view">${escapeHtml(name)}</strong>
+            ${row.raw_name && row.raw_name !== name ? `<span class="memory-raw-name-view">原名：${escapeHtml(row.raw_name)}</span>` : ""}
+            <div class="memory-identity-meta">
+              <span>CAS ${escapeHtml(safe(row.cas, "未记录"))}</span>
+              <span>#${escapeHtml(row.id)}</span>
+            </div>
+            <input type="hidden" class="memory-cas" value="${escapeHtml(row.cas)}">
             <input type="hidden" class="memory-raw-name" value="${escapeHtml(row.raw_name)}">
             <input type="hidden" class="memory-cleaned-name" value="${escapeHtml(row.cleaned_name)}">
             <input type="hidden" class="memory-standard-name" value="${escapeHtml(row.standard_name)}">
+            <input type="hidden" class="memory-confidence" value="${escapeHtml(row.confidence)}">
             <textarea class="memory-reason memory-hidden-field">${escapeHtml(row.reason)}</textarea>
           </td>
-          <td class="memory-name-cell">
-            <strong class="memory-standard-name-view">${escapeHtml(row.standard_name || row.cleaned_name || row.raw_name || "-")}</strong>
-            <span class="memory-raw-name-view">${escapeHtml(row.raw_name || "-")}</span>
+          <td class="memory-category-cell" role="cell">
+            <select class="memory-category" aria-label="${escapeHtml(name)}：物化特性">${categoryOptions}</select>
           </td>
-          <td><select class="memory-category">${categoryOptions}</select></td>
-          <td><input class="memory-confidence" value="${escapeHtml(row.confidence)}"></td>
-          <td class="memory-state-cell">
-            <label class="mini-check"><input type="checkbox" class="memory-reusable" ${boolValue(row.reusable) ? "checked" : ""}>\u53ef\u590d\u7528</label>
-            <label class="mini-check"><input type="checkbox" class="memory-conflict" ${boolValue(row.conflict) ? "checked" : ""}>\u51b2\u7a81</label>
-            <label class="mini-check"><input type="checkbox" class="memory-manual" ${boolValue(row.manual_verified) ? "checked" : ""}>\u4eba\u5de5\u786e\u8ba4</label>
+          <td class="memory-state-cell" role="cell">
+            <div class="memory-row-flags">
+              <label><input type="checkbox" class="memory-reusable" ${flags.reusable ? "checked" : ""}>可复用</label>
+              <label><input type="checkbox" class="memory-manual" ${flags.manual_verified ? "checked" : ""} ${flags.reusable ? "disabled" : ""}>人工确认</label>
+              <label><input type="checkbox" class="memory-conflict" ${flags.conflict ? "checked" : ""} ${flags.reusable ? "disabled" : ""}>有冲突</label>
+              <button type="button" class="memory-save-flags" disabled>保存更改</button>
+            </div>
           </td>
-          <td class="memory-action-cell">
-            <button type="button" class="memory-save memory-save-action">\u4fdd\u5b58</button>
-            <button type="button" class="memory-delete memory-delete-action">\u5220\u9664</button>
+          <td class="memory-action-cell" role="cell">
+            <div class="memory-row-actions">
+              <button type="button" class="memory-delete memory-delete-action" aria-label="删除记录" title="删除记录">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18m-2 0v14a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V6m3 0V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2m-6 4v7m4-7v7"/></svg>
+              </button>
+              <button type="button" class="memory-open" aria-haspopup="dialog">编辑</button>
+            </div>
             <span class="memory-row-status"></span>
           </td>
         `;
-        tr.addEventListener("click", (event) => {
-          if (event.target.closest("button")) return;
+        bindMemoryRowFlags(tr, savedFlags);
+        tr.querySelector(".memory-open").addEventListener("click", () => {
+          if (memoryState.loading) return;
           selectMemoryRow(tr);
+          document.querySelector("#memoryRecordDialog").showModal();
         });
-        tr.querySelector(".memory-save").addEventListener("click", () => saveMemoryRow(tr));
         tr.querySelector(".memory-delete").addEventListener("click", () => deleteMemoryRow(tr));
-        tr.querySelectorAll("input, select, textarea").forEach((field) => {
-          field.addEventListener("input", () => {
-            markMemoryRowDirty(tr);
-            updateMemoryRowPreview(tr);
-            if (tr.classList.contains("memory-row-selected")) renderMemoryDetail(memoryRowPayload(tr), tr);
-          });
-          field.addEventListener("change", () => {
-            markMemoryRowDirty(tr);
-            updateMemoryRowPreview(tr);
-            if (tr.classList.contains("memory-row-selected")) renderMemoryDetail(memoryRowPayload(tr), tr);
-          });
-          field.addEventListener("keydown", (event) => {
-            if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
-              event.preventDefault();
-              saveMemoryRow(tr);
-            }
-          });
-        });
-        const reusableCheck = tr.querySelector(".memory-reusable");
-        reusableCheck.addEventListener("change", () => {
-          if (!reusableCheck.checked) return;
-          tr.querySelector(".memory-conflict").checked = false;
-          tr.querySelector(".memory-manual").checked = true;
-          updateMemoryRowPreview(tr);
-        });
         body.appendChild(tr);
       });
-      const firstRow = body.querySelector(".memory-row");
-      if (firstRow) selectMemoryRow(firstRow);
     }
+
+    function memoryRowFlags(tr) {
+      const reusable = tr.querySelector(".memory-reusable").checked;
+      return {
+        reusable,
+        manual_verified: reusable || tr.querySelector(".memory-manual").checked,
+        conflict: !reusable && tr.querySelector(".memory-conflict").checked,
+      };
+    }
+
+    function bindMemoryRowFlags(tr, savedFlags) {
+      const save = tr.querySelector(".memory-save-flags");
+      const fields = tr.querySelectorAll(".memory-row-flags input");
+      const category = tr.querySelector(".memory-category");
+      category.dataset.savedValue = category.value;
+      if (category.value) category.options[0].disabled = true;
+      const draft = memoryStatusDrafts.get(tr.dataset.id);
+      if (draft?.final_category && Array.from(category.options).some((option) => option.value === draft.final_category)) {
+        category.value = draft.final_category;
+      }
+      const updateDraft = () => {
+        const flags = memoryRowFlags(tr);
+        for (const [key, selector] of [["manual_verified", ".memory-manual"], ["conflict", ".memory-conflict"]]) {
+          const field = tr.querySelector(selector);
+          if (flags.reusable) field.checked = flags[key];
+          field.disabled = flags.reusable;
+        }
+        const changed = category.value !== category.dataset.savedValue || Object.keys(savedFlags).some((key) => flags[key] !== savedFlags[key]);
+        if (changed) memoryStatusDrafts.set(tr.dataset.id, {...flags, final_category: category.value});
+        else memoryStatusDrafts.delete(tr.dataset.id);
+        tr.classList.toggle("memory-row-dirty", changed);
+        save.disabled = !changed;
+      };
+      fields.forEach((field) => field.addEventListener("change", updateDraft));
+      category.addEventListener("change", updateDraft);
+      if (memoryStatusDrafts.has(tr.dataset.id)) updateDraft();
+      save.addEventListener("click", async () => {
+        if (memoryState.loading || memoryStatusPending || memoryBulkDeletePending) return;
+        memoryStatusPending = true;
+        save.disabled = true;
+        category.disabled = true;
+        fields.forEach((field) => { field.disabled = true; });
+        save.textContent = "保存中…";
+        try {
+          const {response, payload} = await fetchDashboardJSON(`/api/memory/${tr.dataset.id}/flags`, {
+            method: "PATCH",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify(memoryRowUpdatePayload(tr)),
+          });
+          if (!response.ok || !payload.updated) {
+            reportMemoryFeedback(response.status === 405 || payload.detail === "Not Found"
+              ? "当前服务尚未加载行内状态接口，请重启 Web UI 后再试。" : apiErrorMessage(payload), "error");
+            return;
+          }
+          memoryStatusDrafts.delete(tr.dataset.id);
+          Object.assign(savedFlags, {
+            reusable: boolValue(payload.record?.reusable ?? memoryRowFlags(tr).reusable),
+            manual_verified: boolValue(payload.record?.manual_verified ?? memoryRowFlags(tr).manual_verified),
+            conflict: boolValue(payload.record?.conflict ?? memoryRowFlags(tr).conflict),
+          });
+          fields[0].checked = savedFlags.reusable;
+          fields[1].checked = savedFlags.manual_verified;
+          fields[2].checked = savedFlags.conflict;
+          category.dataset.savedValue = category.value;
+          if (category.value) category.options[0].disabled = true;
+          if (await refreshMemory()) reportMemoryFeedback("已保存列表更改。");
+        } catch (_) {
+          reportMemoryFeedback("未收到保存结果，请刷新核对后再试。", "error");
+        } finally {
+          memoryStatusPending = false;
+          category.disabled = false;
+          fields[0].disabled = false;
+          save.textContent = "保存更改";
+          if (tr.isConnected) updateDraft();
+        }
+      });
+    }
+
+    function memoryRowUpdatePayload(tr) {
+      const flags = memoryRowFlags(tr);
+      const category = tr.querySelector(".memory-category");
+      if (category.value && category.value !== category.dataset.savedValue) flags.final_category = category.value;
+      return flags;
+    }
+
+    on("#closeMemoryRecord", "click", () => document.querySelector("#memoryRecordDialog").close());
 
     function selectMemoryRow(tr) {
       document.querySelectorAll(".memory-row-selected").forEach((item) => item.classList.remove("memory-row-selected"));
       tr.classList.add("memory-row-selected");
       renderMemoryDetail(memoryRowPayload(tr), tr);
-    }
-
-    function updateMemoryRowPreview(tr) {
-      const payload = memoryRowPayload(tr);
-      const title = tr.querySelector(".memory-standard-name-view");
-      const raw = tr.querySelector(".memory-raw-name-view");
-      if (title) title.textContent = payload.standard_name || payload.cleaned_name || payload.raw_name || "-";
-      if (raw) raw.textContent = payload.raw_name || "-";
     }
 
     function renderMemoryDetail(row, tr = null) {
@@ -1872,11 +2184,6 @@
         `;
         return;
       }
-      const flags = [
-        boolValue(row.reusable) ? "\u53ef\u590d\u7528" : "\u4e0d\u53ef\u590d\u7528",
-        boolValue(row.conflict) ? "\u51b2\u7a81" : "\u65e0\u51b2\u7a81",
-        boolValue(row.manual_verified) ? "\u4eba\u5de5\u786e\u8ba4" : "\u672a\u4eba\u5de5\u786e\u8ba4",
-      ];
       panel.innerHTML = `
         <div class="memory-detail-head">
           <div>
@@ -1890,29 +2197,20 @@
           <label>ERP \u539f\u59cb\u540d <input data-memory-field="raw_name" value="${escapeHtml(row.raw_name || "")}"></label>
           <label>\u6e05\u6d17\u540d <input data-memory-field="cleaned_name" value="${escapeHtml(row.cleaned_name || "")}"></label>
           <label>\u6807\u51c6\u540d <input data-memory-field="standard_name" value="${escapeHtml(row.standard_name || "")}"></label>
+          <label>置信度 <input data-memory-field="confidence" value="${escapeHtml(safe(row.confidence, ""))}"></label>
           <label class="memory-detail-reason">\u5907\u6ce8 <textarea data-memory-field="reason">${escapeHtml(row.reason || "")}</textarea></label>
-        </div>
-        <div class="memory-detail-grid">
-          <div><span>\u5efa\u8bae\u7c7b\u522b</span><strong>${escapeHtml(row.final_category || "-")}</strong></div>
-          <div><span>\u7f6e\u4fe1\u5ea6</span><strong>${escapeHtml(row.confidence || "-")}</strong></div>
-          <div><span>\u72b6\u6001</span><strong>${escapeHtml(flags.join(" / "))}</strong></div>
         </div>
         <div class="memory-detail-actions">
           <button type="button" id="memoryDetailSave" class="memory-save-action">\u4fdd\u5b58\u5f53\u524d\u8bb0\u5f55</button>
-          <span class="memory-detail-note">\u4e5f\u53ef\u4ee5\u5728\u8868\u683c\u884c\u5185\u4fdd\u5b58\u3002</span>
+          <span id="memoryDetailStatus" role="status"></span>
         </div>
       `;
       if (!tr) return;
-      panel.querySelectorAll("[data-memory-field]").forEach((field) => {
-        const name = field.dataset.memoryField;
-        const rowField = tr.querySelector(`.memory-${name.replace(/_/g, "-")}`);
-        field.addEventListener("input", () => {
-          if (rowField) rowField.value = field.value;
-          markMemoryRowDirty(tr);
-          updateMemoryRowPreview(tr);
-        });
+      panel.querySelector("#memoryDetailSave")?.addEventListener("click", () => {
+        const payload = Object.fromEntries(Array.from(panel.querySelectorAll("[data-memory-field]"),
+          (field) => [field.dataset.memoryField, field.value]));
+        saveMemoryRow(tr, {...payload, source: "web_ui_manual_edit"});
       });
-      panel.querySelector("#memoryDetailSave")?.addEventListener("click", () => saveMemoryRow(tr));
     }
 
     function renderMemoryPagination(payload) {
@@ -1925,117 +2223,134 @@
       const perPage = Number(payload.per_page || 10);
       prev.disabled = !payload.exists || page <= 1;
       next.disabled = !payload.exists || page >= pages;
-      info.textContent = `第 ${page} / ${pages} 页，共 ${total} 条，每页 ${perPage} 条`;
+      const start = total ? (page - 1) * perPage + 1 : 0;
+      info.textContent = total ? `${start}–${Math.min(page * perPage, total)} / 共 ${total} 条 · 第 ${page} / ${pages} 页`
+        : "0 条记录";
     }
 
     function setMemoryLoading(loading) {
       memoryState.loading = loading;
       const prev = document.querySelector("#memoryPrevPage");
       const next = document.querySelector("#memoryNextPage");
-      const info = document.querySelector("#memoryPageInfo");
-      if (!prev || !next || !info) return;
+      const wrap = document.querySelector(".memory-table-wrap");
+      if (!prev || !next || !wrap) return;
+      wrap.setAttribute("aria-busy", String(loading));
+      setText("#refreshMemoryButton", loading ? "刷新中…" : "刷新");
+      setDisabled("#refreshMemoryButton", loading);
       prev.disabled = loading || memoryState.page <= 1;
       next.disabled = loading || memoryState.page >= memoryState.pages;
-      if (loading) {
-        const body = document.querySelector("#memoryTable");
-        if (body) body.innerHTML = tableEmptyHtml(7, "正在读取记忆库", "请稍候，正在同步筛选条件和分页数据。");
-        info.textContent = `第 ${memoryState.page} / ${memoryState.pages} 页，正在加载...`;
-      }
     }
 
-    async function saveMemoryRow(tr) {
+    async function saveMemoryRow(tr, payload) {
       const recordId = tr.dataset.id;
-      const payload = memoryRowPayload(tr);
-      const button = tr.querySelector(".memory-save");
+      const button = document.querySelector("#memoryDetailSave");
       const status = tr.querySelector(".memory-row-status");
+      const feedback = document.querySelector("#memoryDetailStatus");
+      if (!button || button.disabled) return false;
       button.disabled = true;
       status.textContent = "保存中...";
       status.className = "memory-row-status";
-      const response = await fetch(`/api/memory/${recordId}`, {
-        method: "POST",
-        headers: {"Content-Type": "application/json"},
-        body: JSON.stringify(payload)
-      });
-      const result = await response.json();
+      if (feedback) feedback.textContent = "保存中…";
+      let response, result;
+      try {
+        response = await fetch(`/api/memory/${recordId}`, {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify(payload)
+        });
+        result = await response.json();
+      } catch (_) {
+        if (feedback) feedback.textContent = "未收到保存结果，请关闭后刷新记录核对。";
+        return false;
+      }
       if (!response.ok || !result.updated) {
         button.disabled = false;
         status.textContent = "保存失败";
         status.className = "memory-row-status failed";
-        alert(result.detail || "记忆库保存失败。");
+        if (feedback) feedback.textContent = apiErrorMessage(result);
         return false;
       }
       status.textContent = "已保存";
       status.className = "memory-row-status saved";
       tr.classList.remove("memory-row-dirty");
-      await refreshMemory();
+      if (button.isConnected) document.querySelector("#memoryRecordDialog").close();
+      const refreshed = await refreshMemory();
+      if (refreshed) reportMemoryFeedback("已保存记录。");
+      if (!document.querySelector("#memoryRecordDialog").open) {
+        const restored = Array.from(document.querySelectorAll(".memory-row")).find((row) => row.dataset.id === recordId);
+        (restored?.querySelector(".memory-open") || memorySearchInput)?.focus({preventScroll: true});
+      }
       return true;
     }
 
-    function markMemoryRowDirty(tr) {
-      tr.classList.add("memory-row-dirty");
-      const status = tr.querySelector(".memory-row-status");
-      if (status) {
-        status.textContent = "未保存";
-        status.className = "memory-row-status unsaved";
-      }
-      const button = tr.querySelector(".memory-save");
-      if (button) button.disabled = false;
-    }
-
     function memoryRowPayload(tr) {
-      const reusable = tr.querySelector(".memory-reusable").checked;
       return {
         cas: tr.querySelector(".memory-cas").value,
         raw_name: tr.querySelector(".memory-raw-name").value,
         cleaned_name: tr.querySelector(".memory-cleaned-name").value,
         standard_name: tr.querySelector(".memory-standard-name").value,
-        final_category: tr.querySelector(".memory-category").value,
         confidence: tr.querySelector(".memory-confidence").value,
-        reusable,
-        conflict: reusable ? false : tr.querySelector(".memory-conflict").checked,
-        manual_verified: reusable ? true : tr.querySelector(".memory-manual").checked,
-        need_manual_review: false,
         reason: tr.querySelector(".memory-reason").value,
-        source: "web_ui_manual_edit"
       };
     }
 
     async function saveReusableMemoryRows() {
+      if (memoryState.loading || memoryStatusPending || memoryBulkDeletePending) return;
       const rows = Array.from(document.querySelectorAll("#memoryTable tr"))
         .filter((tr) => tr.dataset.id && tr.querySelector(".memory-reusable")?.checked);
       if (!rows.length) {
-        alert("当前表格中没有勾选“可复用”的记录。");
+        reportMemoryFeedback("本页没有勾选「可复用」的记录。");
         return;
       }
+      memoryStatusPending = true;
       let saved = 0;
-      for (const tr of rows) {
-        const response = await fetch(`/api/memory/${tr.dataset.id}`, {
-          method: "POST",
-          headers: {"Content-Type": "application/json"},
-          body: JSON.stringify(memoryRowPayload(tr))
-        });
-        const result = await response.json();
-        if (!response.ok || !result.updated) {
-          alert(result.detail || `记录 ${tr.dataset.id} 保存失败，已停止批量保存。`);
-          await refreshMemory();
-          return;
+      try {
+        for (const tr of rows) {
+          const {response, payload} = await fetchDashboardJSON(`/api/memory/${tr.dataset.id}/flags`, {
+            method: "PATCH",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify(memoryRowUpdatePayload(tr)),
+          });
+          if (!response.ok || !payload.updated) {
+            await refreshMemory();
+            reportMemoryFeedback(`已保存 ${saved} 条，批量保存已停止：${apiErrorMessage(payload)}`, "error");
+            return;
+          }
+          memoryStatusDrafts.delete(tr.dataset.id);
+          saved += 1;
         }
-        saved += 1;
+        if (await refreshMemory()) reportMemoryFeedback(`已保存 ${saved} 条可复用记录。`);
+      } catch (_) {
+        reportMemoryFeedback(`已确认保存 ${saved} 条，后续结果未知。请刷新核对。`, "error");
+      } finally {
+        memoryStatusPending = false;
       }
-      document.querySelector("#memoryMeta").textContent = `已一键保存 ${saved} 条可复用记录。`;
-      await refreshMemory();
     }
 
     async function deleteMemoryRow(tr) {
+      if (memoryState.loading) return;
       const recordId = tr.dataset.id;
-      if (!confirm(`确认删除记忆库记录 ${recordId}？`)) return;
-      const response = await fetch(`/api/memory/${recordId}`, { method: "DELETE" });
-      const result = await response.json();
-      if (!response.ok || !result.deleted) {
-        alert(result.detail || "记忆库记录删除失败。");
-        return;
+      const name = tr.querySelector(".memory-standard-name-view")?.textContent;
+      const button = tr.querySelector(".memory-delete");
+      if (button.disabled || !confirm(`确认删除「${name || recordId}」？`)) return;
+      button.disabled = true;
+      reportMemoryFeedback("正在删除记录…");
+      try {
+        const {response, payload} = await fetchDashboardJSON(`/api/memory/${recordId}`, {method: "DELETE"});
+        if (!response.ok || !payload.deleted) {
+          reportMemoryFeedback(apiErrorMessage(payload), "error");
+          return;
+        }
+        if (await refreshMemory()) {
+          memoryStatusDrafts.delete(recordId);
+          reportMemoryFeedback("已删除记录。");
+          document.querySelector(".memory-table-wrap")?.focus({preventScroll: true});
+        }
+      } catch (_) {
+        reportMemoryFeedback("未收到删除结果，请先刷新核对记录是否仍存在。", "error");
+      } finally {
+        button.disabled = false;
       }
-      await refreshMemory();
     }
 
     async function deleteConflictingMemory() {
@@ -2056,6 +2371,36 @@
       alert(`已删除 ${result.deleted || 0} 条冲突记录。`);
     }
 
+    async function deleteNonReusableMemory() {
+      if (memoryStatusPending || memoryBulkDeletePending) return;
+      if (memoryStatusDrafts.size) {
+        reportMemoryFeedback("请先保存列表中的状态修改，或将它们改回原值，再批量删除。", "error");
+        return;
+      }
+      if (!confirm("删除整个试剂记忆库中所有不可复用记录？此操作不受当前筛选或页码限制，包含已人工确认的记录；删除前会自动备份。")) return;
+      const button = document.querySelector("#deleteNonReusableMemoryButton");
+      memoryBulkDeletePending = true;
+      button.disabled = true;
+      reportMemoryFeedback("正在备份并删除不可复用记录…");
+      try {
+        const {response, payload} = await fetchDashboardJSON("/api/memory/delete_non_reusable", {method: "POST"}, 120000);
+        if (!response.ok) {
+          reportMemoryFeedback(response.status === 405 || payload.detail === "Not Found"
+            ? "当前服务尚未加载批量删除接口，请重启 Web UI 后再试。" : apiErrorMessage(payload), "error");
+          return;
+        }
+        resetMemoryPage();
+        const refreshed = await refreshMemory();
+        const message = payload.deleted ? `已删除 ${payload.deleted} 条不可复用记录，备份已保存在运行日志目录。` : "没有需要删除的不可复用记录。";
+        reportMemoryFeedback(refreshed ? message : `${message} 列表刷新失败，请手动刷新。`, refreshed ? "" : "error");
+      } catch (_) {
+        reportMemoryFeedback("未收到批量删除结果，请先刷新核对，不要重复提交。", "error");
+      } finally {
+        memoryBulkDeletePending = false;
+        button.disabled = false;
+      }
+    }
+
     function logLineMatchesFilter(line) {
       const text = String(line || "").toLowerCase();
       if (logState.filter === "error") {
@@ -2071,6 +2416,7 @@
       const lines = logState.lines.filter(logLineMatchesFilter);
       const emptyText = logState.lines.length ? "当前过滤条件下暂无日志。" : "暂无可显示日志。运行任务后会显示最近一次输出。";
       setText("#logBox", lines.join("\n") || emptyText);
+      document.querySelector("#logBox")?.classList.toggle("log-empty", !lines.length);
     }
 
     function artifactGroupName(item) {
@@ -2082,13 +2428,18 @@
       return "其他";
     }
 
+    let artifactItems = [];
+    on("#artifactTypeFilter", "change", () => renderArtifacts(artifactItems));
     function renderArtifacts(items) {
       const holder = document.querySelector("#artifactList");
       const meta = document.querySelector("#artifactMeta");
       if (!holder) return;
+      artifactItems = items || [];
+      const type = document.querySelector("#artifactTypeFilter")?.value;
+      items = artifactItems.filter((item) => !type || artifactGroupName(item) === type);
       holder.innerHTML = "";
       if (!items || items.length === 0) {
-        if (meta) meta.textContent = "暂无可下载产物。运行任务后会生成截图、HTML、Excel 或日志文件。";
+        if (meta) meta.textContent = type ? "此类型暂无产物" : "暂无可下载产物";
         holder.innerHTML = `
           <div class="artifact-empty">
             <strong>暂无产物</strong>
@@ -2097,9 +2448,9 @@
         `;
         return;
       }
-      if (meta) meta.textContent = `共 ${items.length} 个可下载产物，按文件类型分组展示。`;
+      if (meta) meta.textContent = `显示 ${items.length} / ${artifactItems.length} 个产物，组内按最新更新排序。`;
       const groups = new Map();
-      items.forEach((item) => {
+      [...items].sort((a, b) => String(b.modified || "").localeCompare(String(a.modified || ""))).forEach((item) => {
         const groupName = artifactGroupName(item);
         if (!groups.has(groupName)) groups.set(groupName, []);
         groups.get(groupName).push(item);
@@ -2118,7 +2469,7 @@
           link.className = "artifact";
           link.innerHTML = `
             <strong>${escapeHtml(item.name)}</strong>
-            <span>${escapeHtml(item.modified)} · ${Math.ceil(item.size / 1024)} KB</span>
+            <span>${escapeHtml(displayTime(item.modified))} · ${Math.ceil(item.size / 1024)} KB</span>
           `;
           list.appendChild(link);
         });
@@ -2132,6 +2483,7 @@
       const holder = document.querySelector("#workflowSteps");
       if (!holder) return;
       const steps = workflow && workflow.steps ? workflow.steps : [];
+      holder.hidden = !steps.length;
       if (!steps.length) return;
       holder.innerHTML = "";
       steps.forEach((step) => {
@@ -2148,7 +2500,7 @@
       const approval = await readDashboardJSON("/api/approval_summary");
       approvalStateLoaded = true;
       setText("#suggestionRows", safe(approval.rows, "0"));
-      setText("#suggestionMeta", approval.exists ? `最近更新：${safe(approval.modified)}` : "尚未生成 approval_suggestions.xlsx");
+      setText("#suggestionMeta", approval.exists ? `最近更新：${displayTime(approval.modified)}` : "尚未生成审批建议");
       renderTags(approval.categories || {});
       renderSuggestions(approval.preview || []);
     }
@@ -2269,10 +2621,19 @@
         reviewCategories = runtime.review_decision_options;
       }
 
-      setText("#runBadge", status.control?.state === "stopped" ? "已人工停止" : status.control?.state === "stop_requested" ? "等待安全停止" : status.running ? "运行中" : (status.success === false ? "失败" : (status.success === true ? "成功" : "空闲")));
+      setText("#runBadge", status.control?.state === "stopped" ? "已人工停止" : status.control?.state === "stop_requested" ? "等待安全停止" : status.running ? "运行中" : (status.success === false ? "上次运行失败" : (status.success === true ? "上次运行成功" : "空闲")));
       setClass("#runBadge", status.running ? "badge running" : (status.success === false ? "badge failed" : (status.success === true ? "badge succeeded" : "badge")));
       setDisabled("#stopRunButton", !status.running);
-      setDisabled("#restartRunButton", false);
+      const programControl = data.program_control || {};
+      const programBusy = status.running || programControl.pending_workbuddy;
+      setDisabled("#restartRunButton", !programControl.available || programBusy);
+      setDisabled("#exitProgramButton", !programControl.available || programBusy);
+      setDisabled("#safeStopRunButton", !status.running || !["suggestions", "workbuddy_loop", "workbuddy_prepare", "workbuddy_import"].includes(status.action) || !status.task_id || status.control?.state === "stop_requested");
+      const unavailableTitle = !programControl.available ? "热重载模式请在启动终端停止程序" : programBusy ? "请先安全停止并核对任务结果" : "";
+      for (const id of ["#restartRunButton", "#exitProgramButton"]) {
+        const button = document.querySelector(id);
+        if (button) button.title = unavailableTitle;
+      }
       setText("#statusLine", status.running ? "任务执行中，请保持 Playwright 浏览器可见。" : safe(status.error || runSummary.outcome, "当前没有运行中的任务。"));
       setText("#erpUrl", runtime.erp_url_configured ? "已配置" : "未配置");
       setText("#erpUser", runtime.erp_username_configured ? "已配置" : "未配置");
@@ -2281,8 +2642,8 @@
       setText("#currentAction", safe(status.action_label || status.action));
       setText("#lastRunResult", safe(status.result_label));
       setClass("#lastRunResult", status.success === true ? "result-ok" : (status.success === false ? "result-failed" : ""));
-      setText("#startedAt", safe(status.started_at));
-      setText("#finishedAt", safe(status.finished_at));
+      setText("#startedAt", displayTime(status.started_at));
+      setText("#finishedAt", displayTime(status.finished_at));
       const summaryTargets = runSummary.target_list_numbers || [];
       setText("#runTargetLists", summaryTargets.length ? summaryTargets.join("，") : "-");
       setText("#runPages", safe(runSummary.processed_pages, "-"));
@@ -2326,11 +2687,16 @@
       setText("#runNotFoundAfterReread", safe(runSummary.not_found_after_reread_count, "-"));
       setText("#runLogPath", safe(status.run_log_path, "-"));
       updateDryRunUi(runtime.app_dry_run);
-      setText("#autoPassText", safe(runtime.auto_pass));
-      setText("#writeModeText", approvalWriteModeLabel(runtime.approval_write_mode));
-      setText("#erpWriteBackendText", erpWriteBackendLabel(runtime.erp_write_backend));
+      const effective = status.running ? (status.effective_policy || {}) : {};
+      setText("#policySourcePill", status.running ? "本次任务" : "默认设置");
+      setText("#pipelineText", status.running ? (effective.pipeline === "workbuddy" ? "WorkBuddy" : effective.pipeline === "v1" ? (effective.fallback_reason ? "V1（回退）" : "V1") : "非审批任务") : "WorkBuddy");
+      const pipelineElement = document.querySelector("#pipelineText");
+      if (pipelineElement) pipelineElement.title = effective.fallback_reason || "";
+      setText("#autoPassText", safe(status.running ? effective.auto_pass : runtime.auto_pass));
+      setText("#writeModeText", approvalWriteModeLabel(status.running ? effective.write_mode : runtime.approval_write_mode));
+      setText("#erpWriteBackendText", erpWriteBackendLabel(status.running ? effective.write_backend : runtime.erp_write_backend));
       setText("#erpApiDiscoveryText", erpApiDiscoveryLabel(runtime.erp_api_discovery_status));
-      setText("#processScopeText", runtime.process_all_todos === "true" ? "全部待办" : "勾选清单/首条");
+      setText("#processScopeText", (status.running ? effective.process_all_todos : runtime.process_all_todos) === "true" ? "全部待办" : (status.running ? (effective.target_list_numbers || "指定清单") : "勾选清单/首条"));
       const selectedLists = selectedTodoNumbers();
       setText("#targetList", selectedLists.length ? `${selectedLists.length} 个清单` : "-");
       setText("#llmModel", safe(runtime.llm_model));
@@ -2340,10 +2706,11 @@
         setText("#suggestionRows", safe(runSummary.suggestion_count, "0"));
         setText("#manualReview", safe(runSummary.manual_review_count, "0"));
       }
-      setText("#safetyGate", runtime.auto_pass === "true" ? "启用校验" : "默认关闭");
+      setText("#safetyGate", (status.running ? effective.auto_pass : runtime.auto_pass) === "true" ? "启用校验" : "默认关闭");
       setText("#schedulerNextRun", safe(scheduler.next_run_at));
       setText("#schedulerLastRun", safe(scheduler.last_run_at));
       setText("#schedulerLastResult", safe(scheduler.last_result));
+      setText("#schedulerLastMessage", safe(scheduler.last_message));
       setText("#currentVersionText", safe(runtime.app_version));
       setText("#appModeText", runtime.app_frozen ? "安装版" : "源码模式");
 
@@ -2353,7 +2720,10 @@
         await refreshApprovalSummary({force: options.forceApproval || runJustFinished});
       }
       if (activePage === "overview" || activePage === "review" || options.forceReview) {
-        await refreshReviewQueue({force: options.forceReview || runJustFinished});
+        if (runJustFinished) reviewStateLoaded = false;
+        if (options.forceReview || !reviewInteractionActive() || !document.querySelector(".review-row")) {
+          await refreshReviewQueue({force: true === options.forceReview || !reviewStateLoaded});
+        }
       }
       if (activePage === "overview") {
         await refreshDataHealth({force: runJustFinished});

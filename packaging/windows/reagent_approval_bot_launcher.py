@@ -190,17 +190,24 @@ def main() -> int:
     runtime = configure_runtime()
     app = app_root()
     log_path = runtime / "data" / "logs" / "launcher.log"
+    if "--restart-after" in sys.argv:
+        from web_server_control import run_restart_helper
+
+        return run_restart_helper(sys.argv[1:])
     is_worker = worker_requested()
     try:
         worker_return_code = run_worker_if_requested()
         if worker_return_code is not None:
             return worker_return_code
 
-        import uvicorn
+        from web_server_control import run_server
 
         host = os.getenv("WEB_UI_HOST", "127.0.0.1")
         preferred_port = int(os.getenv("WEB_UI_PORT", "8000"))
         port, existing_web_ui = resolve_web_ui_port(host, preferred_port)
+        strict_restart = os.getenv("REAGENT_APPROVAL_RESTART_STRICT_PORT") == "true"
+        if strict_restart and (port != preferred_port or existing_web_ui):
+            raise RuntimeError(f"Restart port {preferred_port} was taken before the new Web UI could start.")
         url = f"http://{host}:{port}/"
         if existing_web_ui:
             webbrowser.open(url)
@@ -210,9 +217,9 @@ def main() -> int:
             os.environ["WEB_UI_PORT"] = str(port)
             print(f"Preferred Web UI port {preferred_port} is occupied; using {port}.")
 
-        threading.Thread(target=open_browser_later, args=(url,), daemon=True).start()
-        uvicorn.run(
-            "web_app:app",
+        if not strict_restart:
+            threading.Thread(target=open_browser_later, args=(url,), daemon=True).start()
+        run_server(
             app_dir=str(app / "src"),
             host=host,
             port=port,

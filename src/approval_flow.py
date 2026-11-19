@@ -25,7 +25,7 @@ from erp_api_discovery import ApiDiscoveryAnalyzer, ApiDiscoveryRecorder, ErpApi
 from llm_extractor import LlmExtractor
 from name_normalizer import NameNormalizer
 from non_reagent_classifier import NonReagentClassifier
-from reagent_name_rules import UNKNOWN_CATEGORY, unknown_reagent_name_reason
+from reagent_name_rules import UNKNOWN_CATEGORY, is_amino_acid_family_label, unknown_reagent_name_reason
 from reagent_data_minimizer import minimize_reagent_record
 from reagent_memory import ReagentMemory
 from rule_engine import NORMAL_CATEGORY, RuleEngine
@@ -556,6 +556,8 @@ class ApprovalFlowMixin:
         compact = re.sub(r"\s+", "", str(name or "").strip())
         if not compact or len(compact) > 100 or unknown_reagent_name_reason(compact):
             return False
+        if is_amino_acid_family_label(compact):
+            return True
         if name_result.get("suspected_invalid_name"):
             return False
         if re.search(r"(?:配方|混合|商品|型号|偶联剂|试剂盒|[A-Z]{2,}[\-_]?\d{2,})", compact, re.I):
@@ -588,7 +590,8 @@ class ApprovalFlowMixin:
         raw_name = str(reagent.get("试剂名称") or "").strip()
         if not self._v1_clear_chemical_name(raw_name, name_result):
             return classification, search_result
-        if search_result.get("is_mixture") and not search_result.get("composition_complete"):
+        if (search_result.get("is_mixture") and not search_result.get("composition_complete")
+                and not is_amino_acid_family_label(raw_name)):
             return classification, search_result
         local = rule_engine.classify({
             "reagent_name": raw_name,
@@ -2670,7 +2673,9 @@ class ApprovalFlowMixin:
             search_result["mixture_selected_category"] = rule_engine.highest_priority_category(component_categories)
             search_result["mixture_classification_basis"] = "highest_rule_priority_of_confirmed_components"
         classification = rule_engine.classify(self._classification_input(reagent, search_result, extracted))
-        if search_result.get("is_mixture") and not search_result.get("composition_complete", False):
+        amino_acid_family_decided = "BUS-NOR-AMINO-ACID-001" in (classification.get("matched_rule_ids") or [])
+        if (search_result.get("is_mixture") and not search_result.get("composition_complete", False)
+                and not amino_acid_family_decided):
             classification = dict(classification)
             classification["need_manual_review"] = True
             classification["reason"] = (
@@ -3155,6 +3160,10 @@ class ApprovalFlowMixin:
             }
         )
         if name_classification.get("final_category") not in {"", "普通类", UNKNOWN_CATEGORY}:
+            return None
+        if {"BUS-NOR-AMINO-ACID-001", "BUS-NOR-SELECTED-ACIDS-001"}.intersection(
+            name_classification.get("matched_rule_ids") or []
+        ):
             return None
 
         ambiguous_acid_reason = self.ambiguous_acid_reason(reagent_name)
@@ -4915,6 +4924,7 @@ class ApprovalFlowMixin:
             "explosive_risk": extracted.get("explosive_risk"),
             "heavy_metal": extracted.get("heavy_metal"),
             "suggested_categories": extracted.get("suggested_categories", []),
+            "is_mixture": bool(search_result.get("is_mixture")),
             "mixture_risk_categories": search_result.get("mixture_risk_categories", []),
             "sds_categories": search_result.get("sds_categories", []),
             "component_categories": search_result.get("component_categories", []),
@@ -4924,6 +4934,13 @@ class ApprovalFlowMixin:
                 and search_result.get("relevance_passed", False)
             ),
             "ordinary_evidence_complete": ordinary_evidence_complete,
+            "allow_verified_identity_normal_fallback": bool(
+                identity_reliable
+                and search_result.get("relevance_passed", False)
+                and not search_result.get("need_manual_review", True)
+                and not (search_result.get("is_mixture") and not search_result.get("composition_complete"))
+                and not any(extracted.get(field) is True for field in hazard_fields)
+            ),
         }
 
     def mark_duplicate_search_url_if_needed(

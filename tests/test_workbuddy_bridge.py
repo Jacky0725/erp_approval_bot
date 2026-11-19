@@ -184,7 +184,7 @@ def test_success_stores_provenance_and_cleans_only_result(bridge):
     with sqlite3.connect(memory.path) as conn:
         rows = conn.execute("SELECT reusable, manual_verified, reason FROM reagent_memory").fetchall()
     assert len(rows) == 2
-    assert all(r[0] == r[1] == 0 and "ERP同步=成功" in r[2] for r in rows)
+    assert all(r[0] == 1 and r[1] == 0 and "ERP同步=成功" in r[2] for r in rows)
     bridge.process(state, client, memory, dry_run=False)
     assert client.writes == ["1", "2"]
 
@@ -268,6 +268,31 @@ def test_model_memory_does_not_modify_existing_verified_entry(bridge):
     assert preserved["source"] == "manual"
     assert preserved["manual_verified"] == preserved["reusable"] == 1
     assert preserved["final_category"] == "普通类"
+
+
+def test_workbuddy_memory_promotes_only_after_sync_and_preserves_conflicts(bridge):
+    memory = ReagentMemory(bridge.root_dir)
+    identity = {"试剂名称": "测试溶剂", "CAS号": ""}
+    result = {"物化特性类别": "易燃类", "判断依据": "已核对"}
+    memory.record_workbuddy_result("batch-a", "row-1", identity, result)
+    pending = memory.find_any(raw_name="测试溶剂")
+    assert pending["reusable"] == 0
+    memory.record_workbuddy_result("batch-a", "row-1", identity, result, synced=True)
+    saved = memory.find_any(raw_name="测试溶剂")
+    assert saved["reusable"] == 1
+    assert memory.lookup(raw_name="测试溶剂")["id"] == saved["id"]
+    memory.record_workbuddy_result("batch-a", "row-1", identity, result)
+    assert memory.find_by_id(saved["id"])["reusable"] == 1
+
+    memory.record_workbuddy_result(
+        "batch-b", "row-2", identity,
+        {"物化特性类别": "普通类", "判断依据": "另一判定"}, synced=True,
+    )
+    assert memory.lookup(raw_name="测试溶剂") is None
+    assert all(row["conflict"] == 1 and row["reusable"] == 0 for row in memory.list_records(limit=10))
+    memory.record_workbuddy_result("batch-c", "row-3", identity, result, synced=True)
+    assert memory.lookup(raw_name="测试溶剂") is None
+    assert all(row["conflict"] == 1 and row["reusable"] == 0 for row in memory.list_records(limit=10))
 
 
 def test_blocked_mapping_can_be_retried_after_mapping_fix(bridge):

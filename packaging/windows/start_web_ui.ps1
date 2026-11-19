@@ -32,18 +32,15 @@ if (Test-Path $PidFile) {
 }
 
 $Args = @(
-    "-m", "uvicorn",
-    "web_app:app",
-    "--app-dir", "src",
-    "--host", "127.0.0.1",
-    "--port", "$Port"
+    "-m", "web_server_control"
 )
+$env:WEB_UI_PORT = "$Port"
 
 Write-Host "Starting Reagent Approval Bot Web UI..."
 $Process = Start-Process `
     -FilePath $Python `
     -ArgumentList $Args `
-    -WorkingDirectory $AppDir `
+    -WorkingDirectory (Join-Path $AppDir "src") `
     -WindowStyle Hidden `
     -RedirectStandardOutput $LogFile `
     -RedirectStandardError $ErrFile `

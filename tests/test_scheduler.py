@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from scheduler import ApprovalScheduler, atomic_write_text, next_run_at, normalize_web_write_mode, scheduled_run_options, scheduler_config
+from scheduler import ApprovalScheduler, atomic_write_text, next_run_at, normalize_web_write_mode, scheduled_run_options, scheduler_config, workbuddy_preflight
 
 
 class FakeJobManager:
@@ -34,6 +34,11 @@ class SchedulerTest(unittest.TestCase):
         result = next_run_at(config, datetime(2026, 7, 13, 8, 30))
 
         self.assertEqual(result, datetime(2026, 7, 13, 14, 30))
+
+    def test_existing_schedule_without_pipeline_defaults_to_workbuddy(self) -> None:
+        config = scheduler_config({"scheduler": {"enabled": True}})
+        self.assertEqual(config["pipeline"], "workbuddy")
+        self.assertFalse(config["auto_pass"])
 
     def test_daily_next_run_rolls_to_tomorrow_after_time_passes(self) -> None:
         config = scheduler_config({"scheduler": {"enabled": True, "mode": "daily", "daily_time": "16:00"}})
@@ -76,13 +81,26 @@ class SchedulerTest(unittest.TestCase):
         self.assertEqual(config["process_all_todos_max"], 12)
         self.assertEqual(config["approval_write_mode"], "disabled")
         self.assertEqual(config["approval_write_min_confidence"], "0.9")
-        self.assertTrue(config["auto_pass"])
+        self.assertFalse(config["auto_pass"])
 
     def test_scheduler_write_mode_fails_closed_for_retired_and_unknown_values(self) -> None:
         self.assertEqual(normalize_web_write_mode("save_one"), "disabled")
         self.assertEqual(normalize_web_write_mode("single_page"), "disabled")
         self.assertEqual(normalize_web_write_mode("unknown"), "disabled")
         self.assertEqual(normalize_web_write_mode("multi_page"), "multi_page")
+
+    def test_workbuddy_dry_run_does_not_require_api_write(self) -> None:
+        settings = {"app": {"dry_run": True}, "workbuddy": {"desktop_enabled": True, "executable": "client.exe"}}
+        options = {"APPROVAL_WRITE_MODE": "multi_page", "ERP_WRITE_BACKEND": "web_ui"}
+        with patch("workbuddy_discovery.client_path", return_value=Path("client.exe")), patch("scheduler.interactive_desktop_available", return_value=True):
+            self.assertEqual(workbuddy_preflight(settings, options), "")
+
+    def test_workbuddy_formal_write_requires_verified_api(self) -> None:
+        settings = {"app": {"dry_run": False}, "workbuddy": {"desktop_enabled": True,
+            "executable": "client.exe", "write_enabled": True}, "erp_api": {"enabled_for_write": False}}
+        options = {"APPROVAL_WRITE_MODE": "multi_page", "ERP_WRITE_BACKEND": "api_write_with_web_verify"}
+        with patch("workbuddy_discovery.client_path", return_value=Path("client.exe")), patch("scheduler.interactive_desktop_available", return_value=True):
+            self.assertIn("未验证", workbuddy_preflight(settings, options))
 
     def test_scheduler_atomic_write_text_replaces_existing_file(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -110,7 +128,7 @@ class SchedulerTest(unittest.TestCase):
             self.assertEqual(manager.started, [])
             self.assertEqual(scheduler.status()["last_result"], "skipped")
 
-    def test_trigger_due_run_starts_suggestions(self) -> None:
+    def test_trigger_due_run_starts_workbuddy_when_ready(self) -> None:
         with TemporaryDirectory() as tmp:
             manager = FakeJobManager()
             scheduler = ApprovalScheduler(
@@ -125,11 +143,55 @@ class SchedulerTest(unittest.TestCase):
                 job_manager=manager,
             )
 
-            result = scheduler.trigger_due_run()
+            with patch("scheduler.workbuddy_preflight", return_value=""):
+                result = scheduler.trigger_due_run()
 
             self.assertTrue(result["started"])
-            self.assertEqual(manager.started[0][0], "suggestions")
+            self.assertEqual(manager.started[0][0], "workbuddy_loop")
             self.assertEqual(manager.started[0][1]["PROCESS_ALL_TODOS_MAX"], "7")
+            self.assertEqual(manager.started[0][1]["AUTO_PASS"], "false")
+
+    def test_workbuddy_preflight_failure_falls_back_only_before_start(self) -> None:
+        with TemporaryDirectory() as tmp:
+            manager = FakeJobManager()
+            scheduler = ApprovalScheduler(Path(tmp), lambda: {"scheduler": {"enabled": True,
+                "use_default_run_policy": False, "approval_write_mode": "multi_page"}}, manager)
+            with patch("scheduler.workbuddy_preflight", return_value="no desktop"), patch("scheduler.v1_preflight", return_value=""):
+                result = scheduler.trigger_due_run()
+            self.assertTrue(result["started"])
+            self.assertEqual([action for action, _ in manager.started], ["suggestions"])
+            self.assertEqual(manager.started[0][1]["SCHEDULED_FALLBACK_REASON"], "no desktop")
+            self.assertEqual(manager.started[0][1]["APPROVAL_WRITE_MODE"], "multi_page")
+            self.assertEqual(manager.started[0][1]["AUTO_PASS"], "false")
+
+    def test_fallback_skips_when_v1_cannot_start(self) -> None:
+        with TemporaryDirectory() as tmp:
+            manager = FakeJobManager()
+            scheduler = ApprovalScheduler(Path(tmp), lambda: {"scheduler": {"enabled": True}}, manager)
+            with patch("scheduler.workbuddy_preflight", return_value="no desktop"), patch("scheduler.v1_preflight", return_value="no ERP config"):
+                result = scheduler.trigger_due_run()
+            self.assertFalse(result["started"])
+            self.assertEqual(manager.started, [])
+
+    def test_explicit_v1_does_not_probe_workbuddy(self) -> None:
+        with TemporaryDirectory() as tmp:
+            manager = FakeJobManager()
+            scheduler = ApprovalScheduler(Path(tmp), lambda: {"scheduler": {"enabled": True, "pipeline": "v1"}}, manager)
+            with patch("scheduler.workbuddy_preflight") as preflight:
+                scheduler.trigger_due_run()
+            preflight.assert_not_called()
+            self.assertEqual(manager.started[0][0], "suggestions")
+
+    def test_workbuddy_start_failure_never_retries_as_v1(self) -> None:
+        with TemporaryDirectory() as tmp:
+            manager = FakeJobManager()
+            manager.start = lambda action, options: (manager.started.append((action, options)) or
+                {"started": False, "message": "result uncertain"})
+            scheduler = ApprovalScheduler(Path(tmp), lambda: {"scheduler": {"enabled": True}}, manager)
+            with patch("scheduler.workbuddy_preflight", return_value=""):
+                result = scheduler.trigger_due_run()
+            self.assertFalse(result["started"])
+            self.assertEqual([action for action, _ in manager.started], ["workbuddy_loop"])
 
     def test_scheduled_job_completion_updates_final_result(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -145,7 +207,8 @@ class SchedulerTest(unittest.TestCase):
                 job_manager=manager,
             )
 
-            scheduler.trigger_due_run()
+            with patch("scheduler.workbuddy_preflight", return_value=""):
+                scheduler.trigger_due_run()
             manager.callbacks[0](
                 action="suggestions",
                 success=False,
@@ -171,7 +234,8 @@ class SchedulerTest(unittest.TestCase):
                 job_manager=manager,
             )
 
-            scheduler.trigger_due_run()
+            with patch("scheduler.workbuddy_preflight", return_value=""):
+                scheduler.trigger_due_run()
             manager.callbacks[0](
                 action="suggestions",
                 success=True,

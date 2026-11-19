@@ -1,3 +1,4 @@
+import os
 import sys
 from pathlib import Path
 
@@ -93,7 +94,28 @@ def test_health_endpoint_does_not_build_dashboard_runtime():
         with TestClient(app, base_url="http://localhost:8000") as client:
             response = client.get("/api/health")
     assert response.status_code == 200
-    assert response.json() == {"ok": True, "version": app_version(), "install_root": str(ROOT_DIR.resolve())}
+    assert response.json() == {"ok": True, "version": app_version(), "install_root": str(ROOT_DIR.resolve()), "process_id": os.getpid()}
+
+
+def test_memory_inline_update_accepts_optional_category_without_allowing_other_fields():
+    from web_app import app, security
+
+    headers = {"Origin": "http://localhost:8000", "X-Reagent-CSRF": security.csrf_token}
+    flags = {"reusable": False, "manual_verified": True, "conflict": False}
+    with TestClient(app, base_url="http://localhost:8000") as client, \
+            patch("web_app.manager.status", return_value={"running": False}), \
+            patch("web_app.update_memory_record", return_value={"updated": True}) as update:
+        path = "/api/memory/1/flags"
+        assert client.patch(path, json=flags, headers=headers).status_code == 200
+        update.assert_called_once_with(1, flags)
+        update.reset_mock()
+        fields = {**flags, "final_category": "普通类"}
+        assert client.patch(path, json=fields, headers=headers).status_code == 200
+        update.assert_called_once_with(1, fields)
+        update.reset_mock()
+        assert client.patch(path, json={**flags, "final_category": ""}, headers=headers).status_code == 422
+        assert client.patch(path, json={**flags, "raw_name": "other"}, headers=headers).status_code == 422
+        update.assert_not_called()
 
 
 def test_run_prepare_rejects_explicit_retired_pipeline():

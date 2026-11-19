@@ -96,6 +96,7 @@ vm.runInContext(helper, context);
     context[name] = value => value;
   }
   context.safe = (value, fallback = '-') => value ?? fallback;
+  context.displayTime = value => context.safe(value);
   context.selectedTodoNumbers = () => [];
   context.lastFinishedAt = '';
   context.activePage = 'artifacts';

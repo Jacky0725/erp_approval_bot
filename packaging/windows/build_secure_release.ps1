@@ -33,7 +33,10 @@ try { tar.exe -a -c -f $BrowserPackage * } finally { Pop-Location }
 
 $Bootstrap = Join-Path $ReleaseDir "ReagentApprovalBotBootstrap.exe"
 $Updater = Join-Path $ReleaseDir "ReagentApprovalBotUpdater.exe"
-& $Python -m PyInstaller --noconfirm --clean --onefile --windowed --name ReagentApprovalBotBootstrap --distpath $ReleaseDir --workpath (Join-Path $RepoRoot "dist\bootstrap-work") --specpath (Join-Path $RepoRoot "dist\bootstrap-spec") (Join-Path $PSScriptRoot "reagent_approval_bot_bootstrap.py")
+$IconPath = Join-Path $RepoRoot "assets\reagent-approval-bot.ico"
+# Installed shortcuts point at the bootstrap, not the versioned application.
+& $Python -m PyInstaller --noconfirm --clean --onefile --windowed --icon $IconPath --name ReagentApprovalBotBootstrap --distpath $ReleaseDir --workpath (Join-Path $RepoRoot "dist\bootstrap-work") --specpath (Join-Path $RepoRoot "dist\bootstrap-spec") (Join-Path $PSScriptRoot "reagent_approval_bot_bootstrap.py")
+if ($LASTEXITCODE -ne 0) { throw "Could not build the shortcut launcher." }
 & $Python -m PyInstaller --noconfirm --clean --onefile --windowed --name ReagentApprovalBotUpdater --distpath $ReleaseDir --workpath (Join-Path $RepoRoot "dist\updater-work") --specpath (Join-Path $RepoRoot "dist\updater-spec") --paths (Join-Path $RepoRoot "src") --hidden-import secure_update (Join-Path $PSScriptRoot "reagent_approval_bot_updater.py")
 
 $Manifest = Join-Path $ReleaseDir "release-manifest.json"

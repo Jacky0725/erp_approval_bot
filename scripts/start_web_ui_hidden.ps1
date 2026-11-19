@@ -34,8 +34,8 @@ if (-not $PythonCommand) {
 }
 
 $Process = Start-Process -FilePath $PythonCommand.Source `
-    -ArgumentList @("-m", "uvicorn", "web_app:app", "--app-dir", "src", "--host", "127.0.0.1", "--port", "8000") `
-    -WorkingDirectory $Root `
+    -ArgumentList @("-m", "web_server_control") `
+    -WorkingDirectory (Join-Path $Root "src") `
     -WindowStyle Hidden `
     -RedirectStandardOutput $Stdout `
     -RedirectStandardError $Stderr `

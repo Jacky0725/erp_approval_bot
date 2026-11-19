@@ -2,7 +2,7 @@
       <header class="review-page-header">
         <div>
           <h2>待人工复核</h2>
-          <p id="reviewMeta">读取 data/review_queue.xlsx，显示仍待处理的最新复核项。</p>
+          <p id="reviewMeta">正在加载复核队列…</p>
         </div>
         <span id="reviewVisibleCount" class="review-count">显示 0 条</span>
       </header>
@@ -18,6 +18,7 @@
           最近更新 <span id="reviewSortIcon" aria-hidden="true">↓</span>
         </button>
       </div>
+      <p id="reviewProgress" class="review-progress" role="status" tabindex="-1" hidden></p>
 
       <div class="review-workspace">
         <section class="panel review-queue-panel" aria-label="人工复核队列">
@@ -53,6 +54,7 @@
         </section>
 
         <aside class="panel review-inspector" id="reviewInspector" aria-labelledby="reviewInspectorTitle">
+          <button type="button" id="reviewBackToQueue" class="review-back">返回复核队列</button>
           <div id="reviewInspectorContent" class="review-inspector-content" aria-live="polite">
             <div class="review-inspector-empty">
               <strong id="reviewInspectorTitle">选择一条复核记录</strong>

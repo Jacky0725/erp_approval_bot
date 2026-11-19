@@ -66,6 +66,14 @@ def test_completed_task_or_new_task_never_consumes_old_stop(managed):
     assert control.get(task_id)["state"] == "running"
 
 
+def test_only_unresolved_workbuddy_blocks_program_shutdown(tmp_path):
+    control = TaskControl(tmp_path)
+    control.register("a" * 32, "workbuddy_loop", {}, OWNER, {})
+    assert not control.has_unresolved_workbuddy()
+    control.finish("a" * 32, "needs_review")
+    assert control.has_unresolved_workbuddy()
+
+
 def test_stopped_task_scope_blocks_scheduled_restart(managed):
     manager, control, _, task_id = managed
     control.record_details(task_id, scope=["SJ001"], scope_frozen=True)

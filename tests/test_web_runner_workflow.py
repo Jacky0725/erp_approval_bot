@@ -412,7 +412,7 @@ class WorkflowSummaryTest(unittest.TestCase):
         with patch.dict("os.environ", {"WEB_UI_HOST": "127.0.0.1", "WEB_UI_PORT": "8123"}):
             command, cwd = web_ui_restart_command(frozen=False)
 
-        self.assertIn("uvicorn", command)
+        self.assertIn("web_server_control", command)
         self.assertEqual(command[-1], "8123")
         self.assertTrue(cwd.endswith("src"))
 

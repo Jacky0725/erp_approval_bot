@@ -5,12 +5,13 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="reagent-csrf" content="{{ csrf_token }}">
   <title>{{ page.title }} - 试剂审批自动化控制台</title>
+  <link rel="icon" type="image/svg+xml" href="/static/reagent-logo.svg">
   <link rel="stylesheet" href="/static/dashboard.css?v={{ static_version }}">
 </head>
 <body data-page="{{ active_page }}">
   <aside class="sidebar">
     <div class="brand">
-      <div class="brand-mark">RA</div>
+      <img class="brand-mark" src="/static/reagent-logo.svg" width="40" height="40" alt="">
       <div class="brand-copy">
         <strong>试剂审批自动化</strong>
         <span>ERP Approval Bot</span>
@@ -20,8 +21,14 @@
       <span class="sidebar-toggle-icon" aria-hidden="true"></span>
     </button>
     <nav>
-      {% for page_id, item in pages.items() %}
-      <a class="{{ 'active' if active_page == page_id else '' }}" href="{{ item.path }}" title="{{ item.label }}">{{ item.label }}</a>
+      {% for group, page_ids in [('审批工作台', ['overview', 'run', 'suggestions', 'review']), ('管理与运维', ['memory', 'settings', 'artifacts', 'logs'])] %}
+      <div class="nav-group" role="group" aria-label="{{ group }}">
+        <span class="nav-group-label" aria-hidden="true">{{ group }}</span>
+        {% for page_id in page_ids if page_id in pages %}
+        {% set item = pages[page_id] %}
+        <a class="{{ 'active' if active_page == page_id else '' }}" href="{{ item.path }}" title="{{ item.label }}"{% if active_page == page_id %} aria-current="page"{% endif %}>{{ item.label }}</a>
+        {% endfor %}
+      </div>
       {% endfor %}
     </nav>
   </aside>
@@ -30,14 +37,18 @@
     <header class="topbar">
       <div class="page-heading">
         <div class="page-heading-meta">
-          <span class="eyebrow">本地 FastAPI 控制台</span>
-          <span class="page-route">{{ page.path }}</span>
+          <span class="eyebrow">试剂审批控制台</span>
         </div>
         <h1>{{ page.title }}</h1>
         <p class="page-description">{{ page.description }}</p>
       </div>
       <div class="command-strip">
-        <span id="runBadge" class="badge">读取中</span>
+        <span id="runBadge" class="badge" role="status">读取中</span>
+        <details class="command-details">
+        <summary>运行与版本信息</summary>
+        <div class="command-details-content">
+        <span class="pill" id="policySourcePill">默认设置</span>
+        <span class="pill">链路 <strong id="pipelineText">WorkBuddy</strong></span>
         <span id="dryRunPill" class="pill dry-run-pill">测试模式 <strong id="dryRunText">{{ "开启" if runtime.app_dry_run == "true" else "关闭" }}</strong></span>
         <span class="pill">AUTO_PASS <strong id="autoPassText">{{ runtime.auto_pass }}</strong></span>
         <span class="pill">写入模式 <strong id="writeModeText">{{ runtime.approval_write_mode }}</strong></span>
@@ -47,8 +58,10 @@
         <span id="updatePill" class="pill update-pill" title="当前版本 {{ runtime.app_version }}">程序更新 <strong id="updateStateText" data-update-state>检查中</strong></span>
         <button type="button" id="checkUpdateButton" data-update-action="check" class="ghost-link update-top-button">检查</button>
         <button type="button" id="installUpdateButton" data-update-action="install" class="ghost-link update-top-button update-install-button" disabled hidden>更新</button>
-        <a id="releaseLink" data-update-release class="ghost-link update-top-button" href="#" target="_blank" rel="noreferrer" hidden>Release</a>
+        <a id="releaseLink" data-update-release class="ghost-link update-top-button" href="#" target="_blank" rel="noreferrer" hidden>发布说明</a>
         <a class="ghost-link" href="/settings">修改设置</a>
+        </div>
+        </details>
       </div>
     </header>
 

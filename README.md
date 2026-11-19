@@ -30,9 +30,11 @@
 
 ### Windows 安装包
 
-发布下载：[GitHub Releases](https://github.com/Jacky0725/erp_approval_bot/releases)。以 Release 页面实际上传的资产为准，Git 标签或仓库 `VERSION` 不代表安装包已发布。当前仓库版本为 `0.1.25`，采用核心程序与浏览器拆包方案。预发布用于验收，不作为稳定自动更新目标。
+发布下载：[GitHub Releases](https://github.com/Jacky0725/erp_approval_bot/releases)。以 Release 页面实际上传的资产为准，Git 标签或仓库 `VERSION` 不代表安装包已发布。当前仓库版本为正式版 **V1.0（`1.0.0`）**，采用核心程序与浏览器拆包方案。历史预发布不作为稳定自动更新目标。
 
-`0.1.25` 的 WorkBuddy 全量循环从 ERP 读取最新待办，隔离可确认已投递、尚未导入或写入的暂停批次，继续处理其余明细。选择「保存并生成试剂库」时，遇到 ERP 要求确认覆盖已有库记录，会保留原记录并继续后续批次；写入结果不明时仍停止核对。详见 [WorkBuddy 运行说明](docs/WORKBUDDY_ERP_OPERATIONS.md)。
+V1.0 的 WorkBuddy 全量循环从 ERP 读取最新待办，隔离可确认已投递、尚未导入或写入的暂停批次，继续处理其余明细。选择「保存并生成试剂库」时，遇到 ERP 要求确认覆盖已有库记录，会保留原记录并继续后续批次；写入结果不明时仍停止核对。新增控制台运行状态、记忆库维护和程序退出/重启优化，包含当前结构化规则修正。详见 [WorkBuddy 运行说明](docs/WORKBUDDY_ERP_OPERATIONS.md)。
+
+安装包暂未做 Authenticode 签名，适用于受控内部部署；下载与更新会校验清单及 SHA-256，但这不能证明发布者身份或抵御发布账户整体失陷。升级不会覆盖已有用户配置，升级前请备份运行数据并核对规则、凭据和写入模式。
 
 - `ReagentApprovalBot-setup-<版本>-windows-amd64.exe`：当前用户安装器，无需管理员权限。
 - `ReagentApprovalBot-core-<版本>-windows-amd64.zip`：供安装器/更新器使用的核心包，不含浏览器，不是完整便携包。
@@ -69,8 +71,10 @@ python src/main.py
 启动本地 Web 控制台：
 
 ```powershell
-python -m uvicorn web_app:app --app-dir src --host 127.0.0.1 --port 8000 --reload
+python src/web_server_control.py --host 127.0.0.1 --port 8000
 ```
+
+需要热重载调试时仍可使用 `python -m uvicorn web_app:app --app-dir src --host 127.0.0.1 --port 8000 --reload`；此模式不提供网页退出或重启，请在终端停止。
 
 打开：
 
@@ -150,6 +154,7 @@ python scripts/cleanup_reagent_memory_conflicts.py --yes
 
 ## WorkBuddy 文件对接（试运行）
 
+- Web UI、钉钉和定时审批默认选择 WorkBuddy；V1 仍可显式选择。已有启用的定时任务升级后也使用 WorkBuddy；仅在投递前确定客户端或桌面不可用时，按原写入策略回退 V1，并强制 `AUTO_PASS=false`。投递后状态不明时不会自动切换链路。
 - 运行页新增“WorkBuddy 准备20条”“WorkBuddy 导入结果”“WorkBuddy 批次循环”。WorkBuddy 独立判定，项目只校验文件、身份和类别映射，只保存物化特性，不执行顶部“通过”。
 - 每批文件位于 `data/workbuddy/<批次ID>/`。`prompt.txt` 是本批任务，输入、规则快照和模板位于同一目录。结果固定为 `result.xlsx`，五列：批次ID、记录ID、试剂名称、物化特性类别、判断依据。
 - 新版安装包首次运行默认关闭桌面联动和正式写入，不预填开发机路径。每台电脑用实际操作的 Windows 账号登录，在「配置项 → WorkBuddy 本机配置」检测客户端，选中候选或手填本机 `WorkBuddy.exe` 的完整路径，填写实际项目名称并保存。检测不会启动客户端或保存候选。已有配置升级时不会被默认配置覆盖。
@@ -166,6 +171,7 @@ python scripts/cleanup_reagent_memory_conflicts.py --yes
 
 ## 安全约束
 
+- “安全停止”等待任务检查点，不会撤销已保存结果；“紧急强制停止”结束工作进程，ERP 中途结果须人工核对。“退出程序”和“重启程序”仅在任务空闲且无待核对的 WorkBuddy 结果时可用；开发 `uvicorn --reload` 模式须在终端停止。正常源码启动及安装版可从 Web UI 正常退出。
 - 正式安装包默认并强制使用无头浏览器；源码开发调试时可在 `config/settings.yaml` 中临时改为 headed 浏览器。
 - 正式安装包启动 Web UI 时优先使用 `127.0.0.1:8000`；如果端口被其他程序占用，会自动尝试后续端口并打开正确地址。
 - 正式安装包的用户数据和日志与程序文件分开，默认位于 `%LOCALAPPDATA%\ReagentApprovalBot\data\`；启动日志位于其中的 `logs\launcher.log`，审批任务日志位于 `logs\runs\`。安装目录仅放程序版本和启动器，升级不应覆盖用户数据。

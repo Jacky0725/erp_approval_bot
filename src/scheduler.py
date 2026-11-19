@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import ctypes
 import threading
 import time
 from dataclasses import dataclass, field
@@ -49,6 +50,7 @@ def normalize_checkbox(value: Any) -> str:
 def scheduler_defaults() -> dict[str, Any]:
     return {
         "enabled": False,
+        "pipeline": "workbuddy",
         "mode": "interval",
         "interval_hours": 6,
         "daily_time": "16:00",
@@ -68,6 +70,7 @@ def scheduler_config(settings: dict[str, Any] | None) -> dict[str, Any]:
     result = scheduler_defaults()
     result.update(configured)
     result["enabled"] = coerce_bool(result.get("enabled"))
+    result["pipeline"] = "v1" if str(result.get("pipeline") or "").lower() == "v1" else "workbuddy"
     result["mode"] = str(result.get("mode") or "interval").strip().lower()
     if result["mode"] not in {"interval", "daily"}:
         result["mode"] = "interval"
@@ -92,13 +95,16 @@ def scheduler_config(settings: dict[str, Any] | None) -> dict[str, Any]:
             os.getenv("APPROVAL_WRITE_BATCH_SIZE")
             or str(approval.get("write_batch_size") or result.get("approval_write_batch_size") or "3")
         ).strip() or "3"
-        result["auto_pass"] = coerce_bool(os.getenv("AUTO_PASS") or result.get("auto_pass"))
+        result["erp_write_backend"] = str(os.getenv("ERP_WRITE_BACKEND") or approval.get("erp_write_backend") or "web_ui")
+        result["auto_pass"] = False
     else:
         result["process_all_todos_max"] = max(1, coerce_int(result.get("process_all_todos_max"), 50))
         result["approval_write_mode"] = normalize_web_write_mode(result.get("approval_write_mode") or "disabled")
         result["approval_write_min_confidence"] = str(result.get("approval_write_min_confidence") or "0.8").strip() or "0.8"
         result["approval_write_batch_size"] = str(result.get("approval_write_batch_size") or "3").strip() or "3"
-        result["auto_pass"] = coerce_bool(result.get("auto_pass"))
+        approval = settings.get("approval", {}) or {}
+        result["erp_write_backend"] = str(os.getenv("ERP_WRITE_BACKEND") or approval.get("erp_write_backend") or "web_ui")
+        result["auto_pass"] = False
     result["skip_manual_review_lists"] = coerce_bool(result.get("skip_manual_review_lists", True))
     return result
 
@@ -149,10 +155,55 @@ def scheduled_run_options(config: dict[str, Any]) -> dict[str, str]:
         "APPROVAL_WRITE_MODE": str(config.get("approval_write_mode") or "disabled"),
         "APPROVAL_WRITE_MIN_CONFIDENCE": str(config.get("approval_write_min_confidence") or "0.8"),
         "APPROVAL_WRITE_BATCH_SIZE": str(config.get("approval_write_batch_size") or "3"),
-        "AUTO_PASS": normalize_checkbox(config.get("auto_pass")),
+        "ERP_WRITE_BACKEND": str(config.get("erp_write_backend") or "web_ui"),
+        "AUTO_PASS": "false",
         "SCHEDULED_RUN": "true",
         "SCHEDULED_SKIP_MANUAL_REVIEW_LISTS": normalize_checkbox(config.get("skip_manual_review_lists", True)),
     }
+
+
+def interactive_desktop_available() -> bool:
+    if os.name != "nt":
+        return False
+    try:
+        user32 = ctypes.windll.user32
+        user32.OpenInputDesktop.restype = ctypes.c_void_p
+        user32.GetUserObjectInformationW.restype = ctypes.c_int
+        desktop = user32.OpenInputDesktop(0, False, 0x0001)
+        if not desktop:
+            return False
+        try:
+            name = ctypes.create_unicode_buffer(256)
+            length = ctypes.c_uint()
+            return bool(user32.GetUserObjectInformationW(desktop, 2, name, ctypes.sizeof(name), ctypes.byref(length))) and name.value.lower() == "default"
+        finally:
+            user32.CloseDesktop(desktop)
+    except (AttributeError, OSError):
+        return False
+
+
+def workbuddy_preflight(settings: dict[str, Any], options: dict[str, str]) -> str:
+    from workbuddy_discovery import client_path
+
+    config = settings.get("workbuddy") or {}
+    if not config.get("desktop_enabled") or client_path(str(config.get("executable") or "")) is None:
+        return "WorkBuddy 客户端未启用或程序路径失效"
+    if not interactive_desktop_available():
+        return "没有可交互的 Windows 桌面"
+    dry_run = coerce_bool((settings.get("app") or {}).get("dry_run")) or coerce_bool(os.getenv("APP_DRY_RUN")) or coerce_bool(os.getenv("DRY_RUN"))
+    if options["APPROVAL_WRITE_MODE"] != "disabled" and not dry_run:
+        api = settings.get("erp_api") or {}
+        if not config.get("write_enabled") or options["ERP_WRITE_BACKEND"] != "api_write_with_web_verify":
+            return "WorkBuddy 正式写入前置条件未满足"
+        if api.get("enabled_for_write") is not True or str((api.get("discovery") or {}).get("status") or "").lower() != "verified":
+            return "ERP 接口写入未验证或未启用"
+    return ""
+
+
+def v1_preflight() -> str:
+    if not all(os.getenv(key, "").strip() for key in ("ERP_URL", "ERP_USERNAME", "ERP_PASSWORD")):
+        return "V1 所需的 ERP 地址或账号配置缺失"
+    return ""
 
 
 @dataclass
@@ -204,6 +255,7 @@ class ApprovalScheduler:
         with self._lock:
             return {
                 "enabled": bool(self._config.get("enabled")),
+                "pipeline": self._config.get("pipeline", "workbuddy"),
                 "mode": self._config.get("mode", "interval"),
                 "interval_hours": self._config.get("interval_hours", 6),
                 "daily_time": self._config.get("daily_time", "16:00"),
@@ -242,7 +294,30 @@ class ApprovalScheduler:
         elif self.job_manager.status().get("running"):
             result = {"started": False, "message": "Skipped scheduled run because another task is running."}
         else:
-            result = self.job_manager.start("suggestions", scheduled_run_options(config))
+            options = scheduled_run_options(config)
+            if config.get("pipeline") == "v1":
+                result = self.job_manager.start("suggestions", options)
+            else:
+                settings = self.settings_loader()
+                reason = workbuddy_preflight(settings, options)
+                if reason:
+                    options["SCHEDULED_FALLBACK_REASON"] = reason
+                    v1_reason = v1_preflight()
+                    if v1_reason:
+                        result = {"started": False, "message": f"WorkBuddy 投递前不可用（{reason}），且{v1_reason}；本次已跳过。"}
+                    else:
+                        result = self.job_manager.start("suggestions", options)
+                        result["message"] = f"WorkBuddy 投递前不可用（{reason}）；回退 V1：{result.get('message', '')}"
+                else:
+                    workbuddy = settings.get("workbuddy") or {}
+                    from workbuddy_bridge import WEB_BATCH_TIMEOUTS, web_batch_sizes
+
+                    size = coerce_int(workbuddy.get("batch_size"), 20)
+                    if size not in web_batch_sizes(workbuddy):
+                        size = 20
+                    options.update({"FREEZE_TODO_SCOPE": "true", "WORKBUDDY_BATCH_SIZE": str(size),
+                                    "WORKBUDDY_RESULT_TIMEOUT_SECONDS": str(WEB_BATCH_TIMEOUTS[size])})
+                    result = self.job_manager.start("workbuddy_loop", options)
 
         with self._lock:
             self._last_result = "started" if result.get("started") else "skipped"

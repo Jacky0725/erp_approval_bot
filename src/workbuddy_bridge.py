@@ -262,6 +262,38 @@ class WorkBuddyBridge:
                               and TaskControl.failed_workbuddy_dispatch(task))
                           or (batch.get("operator_disposition") or {}).get("task_id") == task["task_id"])), None)
 
+    def failed_dispatch_requires_review(self, task: dict[str, Any]) -> bool:
+        # The checkpoint is written before the durable "sending" marker; the phase alone proves neither outcome.
+        batch_id = (task.get("details") or {}).get("batch_id")
+        if not isinstance(batch_id, str) or not batch_id:
+            return True
+        try:
+            path = self.batch_path({"batch_id": batch_id})
+            batch = json.loads((path / "state.json").read_text(encoding="utf-8"))
+            if not isinstance(batch, dict) or batch.get("batch_id") != batch_id:
+                return True
+            disposition = batch.get("operator_disposition") or {}
+            if batch.get("status") == SUPERSEDED_FAILURE and disposition.get("reason") in {
+                DISCARDED_FOR_REJUDGMENT, "operator_closed_uncertain_dispatch_without_replay",
+            }:
+                return False
+            if batch.get("status") not in {"waiting_result", "superseded_before_dispatch"}:
+                return True
+            if any(batch.get(key) for key in (
+                "dispatch_state", "dispatch_started_at", "submitted_at", "workbuddy_request",
+                "result_sha256", "replacement", "operator_stop_task",
+            )):
+                return True
+            if any((path / name).exists() for name in ("result.xlsx", JUDGMENTS_NAME)):
+                return True
+            items = batch["items"]
+            return not items or any(
+                item["status"] != "pending" or item.get("attempts") != 0
+                or item.get("write_started") or item.get("library") for item in items
+            )
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            return True
+
     def can_discard_review(self, task: dict[str, Any], batch: dict[str, Any]) -> bool:
         if (batch.get("operator_disposition") or {}).get("reason") == DISCARDED_FOR_REJUDGMENT:
             return batch["operator_disposition"].get("task_id") == task["task_id"]
