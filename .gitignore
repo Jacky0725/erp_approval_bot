@@ -13,3 +13,14 @@ config/name_alias_candidates.xlsx
 /dist/
 scripts/create_desktop_shortcut.ps1
 .codex-ui-audit/
+
+.codex-spreadsheet-work/
+.codex_artifacts/
+.codex_tmp/
+/tmp/
+/outputs/
+/deliverables/
+config/rule_backups/
+config/rules_structured.*.xlsx
+config/*.inspect.ndjson
+design-qa.md

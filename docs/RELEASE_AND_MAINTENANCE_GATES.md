@@ -26,4 +26,4 @@ Keep the public `browser_bot`, FastAPI routes, workbook columns, and existing se
 
 ## Search-policy drift to resolve separately
 
-The active configuration selects V3, while the V1 searcher still enables `chemical_search.cas_authoritative`. The removed `chemical_search.query_priority` list was not read by the searcher and falsely suggested that a name-first order was configured. Do not switch V1's authoritative-CAS branch by editing the YAML alone: that would change identity and approval behavior. A future policy change needs explicit name/CAS conflict cases, cache migration rules, and ERP dry-run comparison before activation.
+V2/V3 pipelines are retired and the active configuration runs WorkBuddy/V1, while the V1 searcher still enables `chemical_search.cas_authoritative`. The removed `chemical_search.query_priority` list was not read by the searcher and falsely suggested that a name-first order was configured. Do not switch V1's authoritative-CAS branch by editing the YAML alone: that would change identity and approval behavior. A future policy change needs explicit name/CAS conflict cases, cache migration rules, and ERP dry-run comparison before activation.
