@@ -424,15 +424,9 @@ class ApprovalFlowMixin:
 
     @staticmethod
     def should_verify_api_page(row_index: int, is_canary: bool, api_settings: dict[str, Any]) -> bool:
-        if is_canary:
-            return True
-        if not bool(api_settings.get("web_verify_after_api_write", True)):
-            return False
-        try:
-            sample_every = max(1, int(api_settings.get("web_verify_sample_every", 1)))
-        except (TypeError, ValueError):
-            sample_every = 1
-        return row_index % sample_every == 0
+        from erp_api_write_verifier import should_verify_api_page
+
+        return should_verify_api_page(row_index, is_canary, api_settings)
 
     @classmethod
     def is_terminal_reject_decision(cls, category: Any) -> bool:
@@ -3821,52 +3815,35 @@ class ApprovalFlowMixin:
                         print("ERP API candidate was rejected and rolled back; continuing with webpage writes.")
 
             if verified:
+                from erp_api_write_verifier import reconcile_api_canary_result, sample_verified_api_write_on_page
+
                 api_settings = self.settings.get("erp_api") or {}
                 page_check_ok = True
-                if (
-                    write_backend == "api_write_with_web_verify"
-                    and api_client is not None
-                    and self.should_verify_api_page(row_index, is_canary, api_settings)
-                ):
-                    try:
-                        page.reload(wait_until="domcontentloaded")
-                        wait_until_spinner_hidden(page, timeout_ms=5000)
-                    except Error as error:
-                        print(f"[api_property_verify] sequence={sequence} reload_failed={error}")
-                    page_value = self.read_reagent_property_by_sequence(page, sequence)
-                    if not self.property_value_matches(page_value, category, writer):
-                        list_number = str(suggestion.get("试剂清单号") or self.current_detail_list_number() or "").strip()
-                        if list_number:
-                            try:
-                                if self.reopen_target_detail_for_recovery(page, list_number):
-                                    page_value = self.read_reagent_property_by_sequence(page, sequence)
-                            except Exception as error:
-                                print(f"[api_property_verify] sequence={sequence} detail_reopen_failed={error}")
-                    page_check_ok = self.property_value_matches(page_value, category, writer)
-                    if not page_check_ok:
-                        warning = "stable_id_confirmed_page_mismatch" if page_value else "stable_id_confirmed_page_not_located"
-                        print(
-                            f"[api_property_verify] sequence={sequence} warning={warning} "
-                            f"page_value={page_value or '<not located>'}; no duplicate save"
-                        )
+                if write_backend == "api_write_with_web_verify" and api_client is not None:
+                    page_check_ok, warned = sample_verified_api_write_on_page(
+                        self,
+                        page,
+                        writer,
+                        suggestion=suggestion,
+                        sequence=sequence,
+                        category=category,
+                        row_index=row_index,
+                        is_canary=is_canary,
+                        api_settings=api_settings,
+                    )
+                    if warned:
                         result.setdefault("warnings", set()).add(work_key)
-                    if page_value:
-                        print(f"[api_property_verify] sequence={sequence} webpage_value={page_value}")
-                if verified and is_canary and not page_check_ok:
-                    api_configurator.reject("API canary readback passed, but webpage readback could not be confirmed")
-                    write_backend = "web_ui"
-                    api_client = None
+                if verified and is_canary:
+                    activated = reconcile_api_canary_result(
+                        api_configurator,
+                        self.settings,
+                        api_client,
+                        page_check_ok=page_check_ok,
+                    )
+                    if not activated:
+                        write_backend = "web_ui"
+                        api_client = None
                     canary_pending = False
-                    print("ERP API canary was not activated; subsequent writes use webpage fallback.")
-                if verified and is_canary and page_check_ok:
-                    api_configurator.activate()
-                    erp_api_settings = self.settings.setdefault("erp_api", {})
-                    erp_api_settings["enabled_for_write"] = True
-                    erp_api_settings.setdefault("discovery", {})["status"] = "verified"
-                    if api_client is not None:
-                        api_client.api_settings["enabled_for_write"] = True
-                    canary_pending = False
-                    print("ERP API canary passed API and webpage read-back checks; API writes are now active.")
             if verified:
                 self.record_save_result(f"reagent_save_{sequence}", True, category)
                 result["handled"].add(work_key)
