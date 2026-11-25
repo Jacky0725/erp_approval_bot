@@ -400,7 +400,8 @@ class DingTalkCommandService:
                 self._pending.popitem(last=False)
         scope = number or "本次首次读取的全部待办（固定范围）"
         trial = "；试运行，不回写 ERP" if options.get("DINGTALK_TRIAL_MODE") == "true" else ""
-        return f"待确认，尚未启动\n- 链路：{'WorkBuddy' if pipeline == 'workbuddy' else 'V1'}\n- 范围：{scope}\n- 写入模式：{options.get('APPROVAL_WRITE_MODE', 'disabled')}{trial}\n请由本人在本会话 2 分钟内发送“确认 {code}”；发送“取消”放弃。"
+        auto_pass = "\n- 整单自动通过：全部校验通过后提交" if options.get("WORKBUDDY_AUTO_PASS") == "true" else ""
+        return f"待确认，尚未启动\n- 链路：{'WorkBuddy' if pipeline == 'workbuddy' else 'V1'}\n- 范围：{scope}\n- 写入模式：{options.get('APPROVAL_WRITE_MODE', 'disabled')}{trial}{auto_pass}\n请由本人在本会话 2 分钟内发送“确认 {code}”；发送“取消”放弃。"
 
     def confirm_approval(self, key: tuple[str, str], code: str, *, notification_target: dict[str, Any] | None = None, actor: dict[str, str] | None = None) -> str:
         if not all(key):
@@ -481,7 +482,9 @@ class DingTalkCommandService:
             mode = options.get("APPROVAL_WRITE_MODE", "disabled")
             trial = options.get("DINGTALK_TRIAL_MODE") == "true"
             trial_text = "\n- 试运行：不回写 ERP" + ("；WorkBuddy 仅执行单批。" if pipeline == "workbuddy" else "。") if trial else ""
-            return f"已启动审批任务\n- 链路：{'WorkBuddy' if pipeline == 'workbuddy' else 'V1'}\n- 范围：{scope}\n- 写入模式：{mode}" + trial_text
+            batch_text = f"\n- 每批：{options['WORKBUDDY_BATCH_SIZE']} 条" if pipeline == "workbuddy" and options.get("WORKBUDDY_BATCH_SIZE") else ""
+            auto_pass = "\n- 整单自动通过：全部校验通过后提交" if options.get("WORKBUDDY_AUTO_PASS") == "true" else ""
+            return f"已启动审批任务\n- 链路：{'WorkBuddy' if pipeline == 'workbuddy' else 'V1'}\n- 范围：{scope}\n- 写入模式：{mode}" + trial_text + batch_text + auto_pass
         return str(result.get("message") or "审批任务未启动。")
 
 

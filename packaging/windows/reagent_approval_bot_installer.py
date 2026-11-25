@@ -457,7 +457,7 @@ def write_uninstaller(target: Path) -> None:
                     }} else {{ Remove-Item -LiteralPath $Item -Force }}
                 }}
             }}
-            foreach ($Folder in @('DesktopDirectory', 'Programs')) {{
+            foreach ($Folder in @('DesktopDirectory', 'Programs', 'Startup')) {{
                 $Directory = [Environment]::GetFolderPath([Environment+SpecialFolder]$Folder)
                 if (!$Directory) {{ continue }}
                 foreach ($Name in @($ShortcutName, $UninstallShortcutName)) {{
@@ -493,7 +493,8 @@ def write_uninstaller(target: Path) -> None:
     )
 
 
-def shortcut_command(folder: str, target: Path | None = None, *, uninstall: bool = False) -> str:
+def shortcut_command(folder: str, target: Path | None = None, *, uninstall: bool = False,
+                     remove: bool = False) -> str:
     ps = r"""
     $ErrorActionPreference = 'Stop'
     [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
@@ -509,10 +510,19 @@ def shortcut_command(folder: str, target: Path | None = None, *, uninstall: bool
     }
     [IO.Directory]::CreateDirectory($directory) | Out-Null
     $exe = Join-Path $env:RAB_SHORTCUT_ROOT 'ReagentApprovalBot.exe'
-    $arguments = ''
+    $arguments = if ($env:RAB_SHORTCUT_FOLDER -eq 'Startup') { '--background' } else { '' }
     if ($env:RAB_UNINSTALL_LINK -eq '1') {
         $exe = Join-Path $PSHOME 'powershell.exe'
         $arguments = '-NoProfile -ExecutionPolicy RemoteSigned -File "' + (Join-Path $env:RAB_SHORTCUT_ROOT 'uninstall_installed.ps1') + '"'
+    }
+    if ($env:RAB_SHORTCUT_REMOVE -eq '1') {
+        if (Test-Path -LiteralPath $link -PathType Leaf) {
+            $old = [UnicodeShellLink]::Read($link)
+            if ($old.TargetPath -eq $exe -and $old.WorkingDirectory -eq $env:RAB_SHORTCUT_ROOT) {
+                Remove-Item -LiteralPath $link -Force
+            }
+        }
+        exit
     }
     [UnicodeShellLink]::Save($link, $exe, $env:RAB_SHORTCUT_ROOT, $arguments)
     $shortcut = [UnicodeShellLink]::Read($link)
@@ -522,7 +532,7 @@ def shortcut_command(folder: str, target: Path | None = None, *, uninstall: bool
     $link
     """.replace("__SHELL_LINK_HELPER__", shell_link_powershell())
     env = {**os.environ, "RAB_SHORTCUT_FOLDER": folder, "RAB_SHORTCUT_ROOT": str(target) if target else "",
-           "RAB_UNINSTALL_LINK": "1" if uninstall else "0"}
+           "RAB_UNINSTALL_LINK": "1" if uninstall else "0", "RAB_SHORTCUT_REMOVE": "1" if remove else "0"}
     powershell = Path(os.environ["SystemRoot"]) / "System32/WindowsPowerShell/v1.0/powershell.exe"
     encoded = base64.b64encode(ps.encode("utf-16-le")).decode("ascii")
     result = subprocess.run(
@@ -534,7 +544,14 @@ def shortcut_command(folder: str, target: Path | None = None, *, uninstall: bool
     return result.stdout.strip()
 
 
-def create_shortcuts(target: Path, desktop: bool, log_path: Path) -> dict[str, str | None]:
+def startup_shortcut_enabled(target: Path) -> bool:
+    try:
+        return Path(shortcut_command("Startup")).resolve() == (target / LAUNCHER_NAME).resolve()
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def create_shortcuts(target: Path, desktop: bool, log_path: Path, *, autostart: bool = False) -> dict[str, str | None]:
     outcomes: dict[str, str | None] = {}
     entries = [("开始菜单", "Programs", False)]
     if (target / "uninstall_installed.ps1").is_file():
@@ -543,6 +560,15 @@ def create_shortcuts(target: Path, desktop: bool, log_path: Path) -> dict[str, s
         entries.insert(0, ("桌面", "DesktopDirectory", False))
     else:
         outcomes["桌面"] = None
+    if autostart:
+        entries.append(("登录自启", "Startup", False))
+    else:
+        try:
+            shortcut_command("Startup", target, remove=True)
+            outcomes["登录自启"] = None
+        except (OSError, subprocess.SubprocessError) as exc:
+            outcomes["登录自启"] = str(exc)
+            write_install_log(log_path, f"Startup shortcut removal failed: {exc}")
     for label, folder, uninstall in entries:
         try:
             link = shortcut_command(folder, target, uninstall=uninstall)
@@ -654,6 +680,7 @@ def perform_install(progress: ProgressReporter, state: dict[str, Any]) -> Path:
     progress.update("1/5 准备安装")
     runtime = runtime_data_dir()
     target = validate_install_target(state.get("target") or install_dir(), runtime, existing_installs())
+    state.setdefault("autostart", startup_shortcut_enabled(target) if is_product_install(target) else True)
     log_path = state["log_path"]
     write_install_log(log_path, f"Installing Reagent Approval Bot to: {target}")
     write_install_log(log_path, f"Runtime data directory: {runtime}")
@@ -716,7 +743,8 @@ def perform_install(progress: ProgressReporter, state: dict[str, Any]) -> Path:
 
 def finish_install(progress: ProgressReporter, state: dict[str, Any], target: Path) -> None:
     progress.update("5/5 创建入口", str(target))
-    state["outcomes"] = repair_install_entries(target, state.get("desktop", True), state["log_path"])
+    state["outcomes"] = repair_install_entries(target, state.get("desktop", True), state["log_path"],
+                                                autostart=state["autostart"])
     write_install_log(state["log_path"], "Installation complete.")
 
 
@@ -735,7 +763,7 @@ def publish_fresh_install(staged: Path, target: Path) -> None:
         raise
 
 
-def repair_install_entries(target: Path, desktop: bool, log_path: Path) -> dict[str, str | None]:
+def repair_install_entries(target: Path, desktop: bool, log_path: Path, *, autostart: bool) -> dict[str, str | None]:
     warnings: dict[str, str | None] = {}
     for label, operation in (("安装记录", record_install), ("卸载脚本", write_uninstaller), ("Windows 应用列表", register_uninstall)):
         try:
@@ -743,7 +771,7 @@ def repair_install_entries(target: Path, desktop: bool, log_path: Path) -> dict[
         except (OSError, ValueError, KeyError) as exc:
             warnings[label] = str(exc)
             write_install_log(log_path, f"{label} failed: {exc}")
-    return {**create_shortcuts(target, desktop, log_path), **warnings}
+    return {**create_shortcuts(target, desktop, log_path, autostart=autostart), **warnings}
 
 
 def perform_versioned_install(
@@ -849,7 +877,7 @@ def download_browser_package(asset: dict[str, Any], runtime: Path, version: str,
                              progress=progress.download_progress)
 
 
-def choose_install_options(existing: list[Path]) -> tuple[Path, bool] | None:
+def choose_install_options(existing: list[Path]) -> tuple[Path, bool, bool] | None:
     import tkinter as tk
     from tkinter import filedialog, ttk
 
@@ -862,8 +890,9 @@ def choose_install_options(existing: list[Path]) -> tuple[Path, bool] | None:
     frame.columnconfigure(0, weight=1)
     location = tk.StringVar(value=str(existing[0] if len(existing) == 1 else default_install_dir() if not existing else ""))
     desktop = tk.BooleanVar(value=True)
+    autostart = tk.BooleanVar(value=startup_shortcut_enabled(existing[0]) if len(existing) == 1 else not existing)
     message = tk.StringVar()
-    selected: tuple[Path, bool] | None = None
+    selected: tuple[Path, bool, bool] | None = None
 
     def browse() -> None:
         directory = filedialog.askdirectory(parent=root, title="选择完整的安装目录")
@@ -877,7 +906,7 @@ def choose_install_options(existing: list[Path]) -> tuple[Path, bool] | None:
         except (OSError, ValueError) as exc:
             message.set(str(exc))
             return
-        selected = (target, desktop.get())
+        selected = (target, desktop.get(), autostart.get())
         root.destroy()
 
     ttk.Label(frame, text="安装目录（完整路径）").grid(row=0, column=0, sticky="w")
@@ -885,11 +914,12 @@ def choose_install_options(existing: list[Path]) -> tuple[Path, bool] | None:
         row=1, column=0, sticky="ew", pady=6)
     ttk.Button(frame, text="浏览…", command=browse).grid(row=1, column=1, padx=(8, 0))
     ttk.Checkbutton(frame, text="创建桌面快捷方式", variable=desktop).grid(row=2, column=0, sticky="w")
-    ttk.Label(frame, textvariable=message, wraplength=475).grid(row=3, columnspan=2, sticky="w", pady=8)
+    ttk.Checkbutton(frame, text="登录 Windows 后自动启动 Web UI", variable=autostart).grid(row=3, column=0, sticky="w")
+    ttk.Label(frame, textvariable=message, wraplength=475).grid(row=4, columnspan=2, sticky="w", pady=8)
     if existing:
         message.set("检测到已有安装。请选择原目录进行升级或修复。")
     buttons = ttk.Frame(frame)
-    buttons.grid(row=4, columnspan=2, sticky="e")
+    buttons.grid(row=5, columnspan=2, sticky="e")
     ttk.Button(buttons, text="取消", command=root.destroy).pack(side="left", padx=(0, 8))
     ttk.Button(buttons, text="安装 / 修复", command=accept).pack(side="left")
     root.mainloop()
@@ -929,7 +959,8 @@ def show_completion(target: Path, state: dict[str, Any], *, interactive: bool) -
     def retry_entries() -> None:
         retry.configure(state="disabled")
         root.update_idletasks()
-        render(repair_install_entries(target, state.get("desktop", True), state["log_path"]))
+        render(repair_install_entries(target, state.get("desktop", True), state["log_path"],
+                                      autostart=state["autostart"]))
 
     retry = ttk.Button(buttons, text="重试创建入口", command=retry_entries)
     retry.pack(side="left", padx=(0, 8))
@@ -947,7 +978,7 @@ def main() -> int:
             options = choose_install_options(existing_installs())
             if options is None:
                 return 0
-            state["target"], state["desktop"] = options
+            state["target"], state["desktop"], state["autostart"] = options
         progress = ProgressReporter()
         if progress.window_error:
             raise RuntimeError(f"安装进度窗口无法初始化：{progress.window_error}")

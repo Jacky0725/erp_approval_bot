@@ -1036,6 +1036,7 @@ class AutomationJobManager:
             "ERP_WRITE_BACKEND",
             "APPROVAL_WRITE_BATCH_SIZE",
             "WORKBUDDY_BATCH_SIZE",
+            "WORKBUDDY_AUTO_PASS",
             "WORKBUDDY_RESULT_TIMEOUT_SECONDS",
             "WORKBUDDY_CANARY_BATCH",
         }

@@ -1,5 +1,6 @@
 import importlib.util
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 
@@ -38,6 +39,20 @@ def test_resolve_web_ui_port_reuses_existing_reagent_web_ui():
         patch.object(launcher, "is_reagent_web_ui", return_value=True),
     ):
         assert launcher.resolve_web_ui_port("127.0.0.1", 8000) == (8000, True)
+
+
+def test_background_start_does_not_open_browser(tmp_path, monkeypatch):
+    launcher = load_launcher_module()
+    monkeypatch.setattr(launcher.sys, "argv", ["ReagentApprovalBot.exe", "--background"])
+    with (
+        patch.object(launcher, "configure_runtime", return_value=tmp_path),
+        patch.object(launcher, "app_root", return_value=tmp_path),
+        patch.object(launcher, "resolve_web_ui_port", return_value=(8000, True)),
+        patch.dict(launcher.sys.modules, {"web_server_control": SimpleNamespace(run_server=lambda **kwargs: None)}),
+        patch.object(launcher.webbrowser, "open") as open_mock,
+    ):
+        assert launcher.main() == 0
+        open_mock.assert_not_called()
 
 
 def test_worker_failure_does_not_open_launcher_log(tmp_path, monkeypatch):

@@ -235,6 +235,12 @@ class ApprovalFlowMixin:
                 active_state = state
                 if state is None:
                     bridge.report_pending_reviews(scope)
+                    if (not dry_run and not canary and self.auto_pass_enabled()
+                            and self._truthy(os.getenv("WORKBUDDY_AUTO_PASS", "false"))):
+                        from workbuddy_autopass import WorkBuddyAutoPass
+                        if client.protocol != "odoo_jsonrpc":
+                            raise RuntimeError("WorkBuddy 整单自动通过需要完整性校验的 Odoo 明细读取。")
+                        WorkBuddyAutoPass(self, bridge, client, page).run(numbers)
                     print("[workbuddy] 当前范围无新记录，循环结束；失败项保留原批次。")
                     return
                 if not batch_in_scope(state, scope, reject_partial=True):

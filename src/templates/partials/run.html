@@ -129,7 +129,7 @@
               <p class="workbuddy-availability" id="workbuddyAvailabilityNote" {% if runtime.workbuddy_desktop_enabled %}hidden{% endif %}>批次循环当前不可用：需完成客户端适配并在配置中启用；准备与导入仍可手动使用。</p>
               <details class="workbuddy-safety-note">
                 <summary>执行与写入说明</summary>
-                <p>禁用写入模式下只测试一批，不写入记忆库或删除文件；正式回写还需通过 ERP API 安全校验。WorkBuddy 流程不会执行 AUTO_PASS。</p>
+                <p>禁用写入模式下只测试一批，不写入记忆库或删除文件；正式回写还需通过 ERP API 安全校验。Web UI 默认不自动提交整单；钉钉发起的正式 WorkBuddy 审批在全部校验通过后自动提交。</p>
               </details>
             </div>
           </section>

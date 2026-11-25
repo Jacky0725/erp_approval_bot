@@ -1149,9 +1149,17 @@ def dingtalk_run_options(list_number: str = "", pipeline: str = "workbuddy") -> 
         auto_pass=str(runtime.get("auto_pass") or "false"),
     )
     options["FREEZE_TODO_SCOPE"] = "true"
+    if pipeline == "workbuddy":
+        try:
+            options.update(workbuddy_run_size({"workbuddy_batch_size": "50"}))
+        except HTTPException as error:
+            raise ValueError(str(error.detail)) from error
     dry_run = normalize_checkbox(str((settings.get("app", {}) or {}).get("dry_run", False))) == "true"
     dry_run = dry_run or normalize_checkbox(os.getenv("APP_DRY_RUN") or os.getenv("DRY_RUN") or "false") == "true"
     options["DINGTALK_TRIAL_MODE"] = "true" if dry_run or options["APPROVAL_WRITE_MODE"] == "disabled" else "false"
+    if pipeline == "workbuddy":
+        options["WORKBUDDY_AUTO_PASS"] = options["AUTO_PASS"] = (
+            "true" if options["DINGTALK_TRIAL_MODE"] == "false" else "false")
     if pipeline == "workbuddy" and options["DINGTALK_TRIAL_MODE"] == "false":
         if not workbuddy.get("write_enabled", False):
             raise ValueError("WorkBuddy 正式写入尚未启用。")

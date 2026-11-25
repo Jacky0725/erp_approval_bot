@@ -18,6 +18,15 @@ def test_shortcut_reuses_the_running_project_server(tmp_path, monkeypatch):
     open_url.assert_called_once_with(launcher.URL)
 
 
+def test_background_start_reuses_server_without_opening_browser(tmp_path, monkeypatch):
+    monkeypatch.setattr(launcher.socket.socket, "connect_ex", lambda *_: 0)
+    monkeypatch.setattr(launcher, "health", lambda: {"install_root": str(tmp_path)})
+    open_url = Mock()
+    monkeypatch.setattr(launcher.os, "startfile", open_url, raising=False)
+    launcher.start(tmp_path, Path("pythonw.exe"), open_browser=False)
+    open_url.assert_not_called()
+
+
 def test_shortcut_starts_the_controlled_server_without_a_console(tmp_path, monkeypatch):
     (tmp_path / "python.exe").touch()
     monkeypatch.setattr(launcher.socket.socket, "connect_ex", lambda *_: 1)

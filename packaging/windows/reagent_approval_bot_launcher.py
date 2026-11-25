@@ -195,6 +195,7 @@ def main() -> int:
 
         return run_restart_helper(sys.argv[1:])
     is_worker = worker_requested()
+    background = "--background" in sys.argv[1:]
     try:
         worker_return_code = run_worker_if_requested()
         if worker_return_code is not None:
@@ -210,14 +211,15 @@ def main() -> int:
             raise RuntimeError(f"Restart port {preferred_port} was taken before the new Web UI could start.")
         url = f"http://{host}:{port}/"
         if existing_web_ui:
-            webbrowser.open(url)
+            if not background:
+                webbrowser.open(url)
             return 0
 
         if port != preferred_port:
             os.environ["WEB_UI_PORT"] = str(port)
             print(f"Preferred Web UI port {preferred_port} is occupied; using {port}.")
 
-        if not strict_restart:
+        if not strict_restart and not background:
             threading.Thread(target=open_browser_later, args=(url,), daemon=True).start()
         run_server(
             app_dir=str(app / "src"),
@@ -233,10 +235,11 @@ def main() -> int:
         if is_worker:
             traceback.print_exc()
             return 1
-        try:
-            webbrowser.open(str(log_path))
-        except Exception:
-            pass
+        if not background:
+            try:
+                webbrowser.open(str(log_path))
+            except Exception:
+                pass
         return 1
 
 

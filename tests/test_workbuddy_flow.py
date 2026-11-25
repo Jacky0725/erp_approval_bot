@@ -602,7 +602,7 @@ def test_dingtalk_options_preserve_write_mode_and_validate_workbuddy(tmp_path, m
     import web_app
     executable = tmp_path / "WorkBuddy.exe"
     executable.write_bytes(b"fake")
-    settings = {"app": {"dry_run": False}, "workbuddy": {"desktop_enabled": True, "write_enabled": True, "executable": str(executable)},
+    settings = {"app": {"dry_run": False}, "workbuddy": {"desktop_enabled": True, "write_enabled": True, "executable": str(executable), "fixed_result_writer": True, "accepted_batch_sizes": [20, 30, 50]},
         "erp_api": {"enabled_for_write": True, "discovery": {"status": "verified"}}}
     monkeypatch.delenv("APP_DRY_RUN", raising=False)
     monkeypatch.delenv("DRY_RUN", raising=False)
@@ -612,6 +612,11 @@ def test_dingtalk_options_preserve_write_mode_and_validate_workbuddy(tmp_path, m
     assert options["FREEZE_TODO_SCOPE"] == "true"
     assert options["APPROVAL_WRITE_MODE"] == "generate_library"
     assert options["DINGTALK_TRIAL_MODE"] == "false"
+    assert options["WORKBUDDY_BATCH_SIZE"] == "50"
+    assert options["WORKBUDDY_RESULT_TIMEOUT_SECONDS"] == "1500"
+    assert options["WORKBUDDY_AUTO_PASS"] == options["AUTO_PASS"] == "true"
+    assert web_app.dingtalk_run_options("SJ123")["WORKBUDDY_BATCH_SIZE"] == "50"
+    assert "WORKBUDDY_BATCH_SIZE" not in web_app.dingtalk_run_options(pipeline="v1")
     assert web_app.manager._env_overrides(options)["FREEZE_TODO_SCOPE"] == "true"
     assert web_app.manager._env_overrides(options)["ERP_WRITE_BACKEND"] == "api_write_with_web_verify"
     settings["workbuddy"]["desktop_enabled"] = False
@@ -624,6 +629,10 @@ def test_dingtalk_options_preserve_write_mode_and_validate_workbuddy(tmp_path, m
         web_app.dingtalk_run_options()
     monkeypatch.setenv("APP_DRY_RUN", "true")
     assert web_app.dingtalk_run_options()["DINGTALK_TRIAL_MODE"] == "true"
+    assert web_app.dingtalk_run_options()["WORKBUDDY_AUTO_PASS"] == "false"
+    settings["workbuddy"]["accepted_batch_sizes"] = [20, 30]
+    with pytest.raises(ValueError, match="尚未正式放行"):
+        web_app.dingtalk_run_options()
 
 
 def test_web_actions_are_available_and_pass_through_manager(monkeypatch):

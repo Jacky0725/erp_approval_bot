@@ -1,9 +1,11 @@
+import base64
 import importlib.util
 import hashlib
 import json
 import os
 from pathlib import Path
 import subprocess
+from types import SimpleNamespace
 import uuid
 from unittest.mock import patch
 import zipfile
@@ -122,11 +124,48 @@ def test_shortcut_failure_does_not_skip_start_menu_and_can_retry(tmp_path, monke
 
     monkeypatch.setattr(installer, "shortcut_command", command)
     log = tmp_path / "install.log"
-    results = installer.create_shortcuts(tmp_path, True, log)
-    assert results == {"桌面": "redirected desktop is unavailable", "开始菜单": ""}
+    results = installer.create_shortcuts(tmp_path, True, log, autostart=True)
+    assert results == {"桌面": "redirected desktop is unavailable", "开始菜单": "", "登录自启": ""}
     assert calls[1] == ("Programs", tmp_path)
-    assert installer.create_shortcuts(tmp_path, True, log) == {"桌面": "", "开始菜单": ""}
+    assert calls[2] == ("Startup", tmp_path)
+    assert installer.create_shortcuts(tmp_path, True, log, autostart=True) == {"桌面": "", "开始菜单": "", "登录自启": ""}
     assert installer.create_shortcuts(tmp_path, False, log)["桌面"] is None
+
+
+def test_disabling_autostart_removes_only_installed_shortcut(tmp_path, monkeypatch):
+    installer = load_installer_module()
+    calls = []
+    monkeypatch.setattr(installer, "shortcut_command", lambda folder, target=None, **kwargs: calls.append((folder, kwargs)) or "")
+    outcomes = installer.create_shortcuts(tmp_path, False, tmp_path / "install.log", autostart=False)
+    assert outcomes["登录自启"] is None
+    assert ("Startup", {"remove": True}) in calls
+    assert "Startup" not in [folder for folder, kwargs in calls if not kwargs.get("remove")]
+
+
+def test_startup_shortcut_uses_background_mode_and_verified_removal(tmp_path, monkeypatch):
+    installer = load_installer_module()
+    calls = []
+
+    def run(command, **kwargs):
+        script = base64.b64decode(command[-1]).decode("utf-16-le")
+        assert "--background" in script
+        assert "$old.TargetPath -eq $exe" in script
+        assert "$old.WorkingDirectory -eq $env:RAB_SHORTCUT_ROOT" in script
+        calls.append(kwargs["env"])
+        return SimpleNamespace(returncode=0, stdout="ok", stderr="")
+
+    monkeypatch.setattr(installer.subprocess, "run", run)
+    assert installer.shortcut_command("Startup", tmp_path) == "ok"
+    assert installer.shortcut_command("Startup", tmp_path, remove=True) == "ok"
+    assert [call["RAB_SHORTCUT_REMOVE"] for call in calls] == ["0", "1"]
+
+
+def test_uninstaller_includes_startup_shortcut_cleanup(tmp_path):
+    installer = load_installer_module()
+    installer.write_uninstaller(tmp_path)
+    script = (tmp_path / "uninstall_installed.ps1").read_text(encoding="utf-8-sig")
+    assert "'DesktopDirectory', 'Programs', 'Startup'" in script
+    assert "$Shortcut.WorkingDirectory -eq $InstallDir" in script
 
 
 def test_offline_install_checks_hash_and_repairs_original_version(tmp_path, monkeypatch):
@@ -154,7 +193,7 @@ def test_offline_install_checks_hash_and_repairs_original_version(tmp_path, monk
     monkeypatch.setattr(installer, "secure_payload_dir", lambda: payload)
     monkeypatch.setattr(installer, "existing_installs", list)
     monkeypatch.setattr(installer, "running_app_processes", lambda _: [])
-    monkeypatch.setattr(installer, "repair_install_entries", lambda *args: {})
+    monkeypatch.setattr(installer, "repair_install_entries", lambda *args, **kwargs: {})
     state = {"target": target, "log_path": tmp_path / "install.log"}
     progress = installer.ProgressReporter()
     package = browser.read_bytes()

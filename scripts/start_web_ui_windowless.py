@@ -31,7 +31,7 @@ def is_our_server(status: dict, root: Path) -> bool:
     return bool(status.get("install_root") and Path(status["install_root"]).resolve() == root.resolve())
 
 
-def start(root: Path, interpreter: Path) -> None:
+def start(root: Path, interpreter: Path, *, open_browser: bool = True) -> None:
     with socket.socket() as probe:
         probe.settimeout(0.5)
         port_in_use = probe.connect_ex(ADDRESS) == 0
@@ -58,7 +58,8 @@ def start(root: Path, interpreter: Path) -> None:
     while time.monotonic() < deadline:
         status = health()
         if is_our_server(status, root):
-            os.startfile(URL)
+            if open_browser:
+                os.startfile(URL)
             return
         if status or (process is not None and process.poll() is not None):
             break
@@ -70,7 +71,7 @@ def start(root: Path, interpreter: Path) -> None:
 
 def main() -> None:
     try:
-        start(ROOT, Path(sys.executable))
+        start(ROOT, Path(sys.executable), open_browser="--background" not in sys.argv[1:])
     except (OSError, RuntimeError) as error:
         ctypes.windll.user32.MessageBoxW(None, str(error), "Reagent Approval Bot", 0x10)
 

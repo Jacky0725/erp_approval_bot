@@ -865,6 +865,10 @@ class ErpApiClient:
         for start in range(0, len(line_ids), page_size):
             chunk = line_ids[start:start + page_size]
             records.extend(self._rpc_search_read(line_model, [["id", "in", chunk]], fields, limit=len(chunk)))
+        expected_ids = {str(identity) for identity in line_ids}
+        actual_ids = [str(record.get("id") or "") for record in records]
+        if len(expected_ids) != len(line_ids) or len(actual_ids) != len(expected_ids) or set(actual_ids) != expected_ids:
+            raise ErpApiUnsupported("ERP reagent detail response is incomplete or contains duplicate/unexpected line ids.")
         normalized: list[dict[str, Any]] = []
         for record in records:
             item = self.normalize_record(record)
