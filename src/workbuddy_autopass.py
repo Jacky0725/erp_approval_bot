@@ -92,6 +92,68 @@ class WorkBuddyAutoPass:
             raise ValueError("ERP 清单父记录不唯一")
         return result
 
+    def _find_visible_approval_modal(self) -> Any | None:
+        locator_fn = getattr(self.page, "locator", None)
+        if not callable(locator_fn):
+            return None
+        modals = locator_fn(".ant-modal")
+        count = modals.count()
+        if not isinstance(count, int) or count <= 0:
+            return None
+        for index in range(count):
+            modal = modals.nth(index)
+            if not modal.is_visible():
+                continue
+            title_loc = modal.locator(".ant-modal-title").first
+            title_count = title_loc.count()
+            title_text = "".join(str(title_loc.inner_text() or "").split()) if isinstance(title_count, int) and title_count > 0 else ""
+            if "审批结果" in title_text:
+                return modal
+        return None
+
+    @staticmethod
+    def _find_modal_confirm_button(modal: Any) -> Any | None:
+        primary = modal.locator(".ant-modal-footer button.ant-btn-primary").first
+        primary_count = primary.count()
+        if isinstance(primary_count, int) and primary_count > 0 and primary.is_visible():
+            return primary
+        buttons = modal.locator(".ant-modal-footer button")
+        count = buttons.count()
+        if not isinstance(count, int) or count <= 0:
+            return None
+        for index in range(count):
+            btn = buttons.nth(index)
+            if not btn.is_visible():
+                continue
+            label = "".join(str(btn.inner_text() or "").split())
+            if label in {"确定", "确认", "通过"}:
+                return btn
+        return None
+
+    def _confirm_approval_modal(self) -> bool:
+        """Click the confirm button inside ERP's '审批结果' modal when present."""
+        modal = None
+        for attempt in range(12):
+            modal = self._find_visible_approval_modal()
+            if modal is not None:
+                break
+            locator_fn = getattr(self.page, "locator", None)
+            if not callable(locator_fn) or not isinstance(locator_fn(".ant-modal").count(), int):
+                return False
+            if attempt < 11:
+                self.page.wait_for_timeout(250)
+        if modal is None:
+            return False
+        confirm_button = self._find_modal_confirm_button(modal)
+        if confirm_button is None:
+            raise RuntimeError("审批结果确认弹窗未找到确定按钮")
+        confirm_button.click()
+        for _ in range(20):
+            if not modal.is_visible():
+                break
+            self.page.wait_for_timeout(250)
+        return True
+
     def run(self, numbers: list[str]) -> None:
         for number in dict.fromkeys(numbers):
             checkpoint("WorkBuddy 整单提交前核对", current_list=number)
@@ -149,6 +211,7 @@ class WorkBuddyAutoPass:
             try:
                 button.click()
                 # No stop checkpoint inside an in-flight submission/readback.
+                self._confirm_approval_modal()
                 verified_state = None
                 for _ in range(2):
                     self.page.wait_for_timeout(1000)

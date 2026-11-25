@@ -211,3 +211,102 @@ def test_matching_unknown_never_submits(harness):
         '{"test":{"list_number":"SJ001","status":"sending"}}', encoding="utf-8")
     h.service.run(["SJ001"])
     h.button.click.assert_not_called()
+
+
+class _FakeLocator:
+    def __init__(self, items):
+        self._items = items
+
+    def count(self):
+        return len(self._items)
+
+    def nth(self, index):
+        return self._items[index]
+
+    @property
+    def first(self):
+        return self._items[0] if self._items else _FakeElement(visible=False)
+
+
+class _FakeElement:
+    def __init__(self, *, visible=True, text="", children=None, on_click=None):
+        self._visible = visible
+        self._text = text
+        self._children = children or {}
+        self._on_click = on_click
+        self.clicks = 0
+
+    def count(self):
+        return 1 if self._visible else 0
+
+    def is_visible(self):
+        return self._visible
+
+    def inner_text(self):
+        return self._text
+
+    def click(self):
+        self.clicks += 1
+        if self._on_click:
+            self._on_click()
+
+    def locator(self, selector):
+        return _FakeLocator(self._children.get(selector, []))
+
+
+def test_submit_confirms_erp_approval_result_modal_with_spaced_ok_text(harness):
+    h = harness
+    modal_state = {"visible": False}
+
+    def confirm_submit():
+        modal_state["visible"] = False
+        h.todos.clear()
+        h.row["_erp_parent_state"] = "done"
+
+    cancel_btn = _FakeElement(visible=True, text="取 消")
+    ok_btn = _FakeElement(visible=True, text="确 定", on_click=confirm_submit)
+    title = _FakeElement(visible=True, text="审批结果")
+    modal = _FakeElement(
+        visible=True,
+        children={
+            ".ant-modal-title": [title],
+            ".ant-modal-footer button.ant-btn-primary": [ok_btn],
+            ".ant-modal-footer button": [cancel_btn, ok_btn],
+        },
+    )
+    modal.is_visible = lambda: modal_state["visible"]
+
+    h.button.click.side_effect = lambda: modal_state.__setitem__("visible", True)
+    h.page.locator = lambda selector: _FakeLocator([modal] if selector == ".ant-modal" else [])
+
+    h.service.run(["SJ001"])
+
+    h.button.click.assert_called_once()
+    assert ok_btn.clicks == 1
+    assert cancel_btn.clicks == 0
+    assert h.service.receipt("SJ001") == "submitted_verified"
+
+
+def test_approval_result_modal_without_confirm_button_fails_closed(harness):
+    h = harness
+    modal_state = {"visible": False}
+    cancel_btn = _FakeElement(visible=True, text="取 消")
+    title = _FakeElement(visible=True, text="审批结果")
+    modal = _FakeElement(
+        visible=True,
+        children={
+            ".ant-modal-title": [title],
+            ".ant-modal-footer button.ant-btn-primary": [],
+            ".ant-modal-footer button": [cancel_btn],
+        },
+    )
+    modal.is_visible = lambda: modal_state["visible"]
+
+    h.button.click.side_effect = lambda: modal_state.__setitem__("visible", True)
+    h.page.locator = lambda selector: _FakeLocator([modal] if selector == ".ant-modal" else [])
+
+    with pytest.raises(RuntimeError, match="禁止自动重发"):
+        h.service.run(["SJ001"])
+
+    assert cancel_btn.clicks == 0
+    assert h.service.receipt("SJ001") == "needs_review"
