@@ -54,3 +54,9 @@ This repository contains a Python + Playwright automation bot for reagent approv
 - Buttons, inputs, selects, status badges, pagination controls, and table affordances should share consistent sizing, focus states, disabled states, and hover states.
 - Wide data tables may scroll horizontally inside `.table-wrap`, but the page itself should not introduce accidental horizontal scrolling at desktop or mobile breakpoints.
 - Validate dashboard changes at desktop and narrow mobile widths, and check browser console errors when possible.
+
+
+## Session Handoff & Progress
+
+- At the start of a new conversation involving ongoing development, debugging, or release follow-ups, check for and read the latest dated `docs/UPDATE_PROGRESS_*.md` file before planning or making changes.
+- After completing a meaningful milestone, bug fix, or refactor, update the current day's `docs/UPDATE_PROGRESS_YYYYMMDD.md` (or create one if requested) with commits, verification results, and remaining follow-ups.
