@@ -42,3 +42,8 @@
 - **阶段 1 隔离实现**：新增 [`src/workbuddy_headless.py`](file:///d:/codex/reagent-approval-bot/src/workbuddy_headless.py) 与 [`tests/test_workbuddy_headless.py`](file:///d:/codex/reagent-approval-bot/tests/test_workbuddy_headless.py)；未修改任何现有业务流程、桌面适配器或默认配置。
 
 - **阶段 2 双模流程接入**：已将 `workbuddy_headless` 双模分流接入 `src/approval_flow.py`、`src/scheduler.py`、`src/web_app.py`、`src/web_runner.py`、`src/templates/partials/run.html` 和 `packaging/windows/build_runtime_defaults.py`；默认保持 `dispatch_mode="desktop"`、`headless.enabled=False`、`headless.auto_pass_enabled=False`，`workbuddy_desktop.py` 与 `workbuddy_recovery.py` 零修改。
+
+- **阶段 3 脱敏大批次隔离验收（20 条 & 50 条，零 ERP / 记忆库写入）**：
+  - **20 条批次**（`20261126_125424_a3021682`）：耗时 **105.8s**（预算 900s），`is_error=False`，`permission_denials=0`，`unmapped=0`，`WorkBuddyBridge.load_results()` 100% 通过。
+  - **50 条批次**（`20261126_125641_ea75aea5`）：耗时 **334.4s**（约 5.6 分钟，预算 1,500s），`is_error=False`，`permission_denials=0`，`unmapped=0`，覆盖 13 个 ERP 类别（易燃 10、普通 8、氧化剂 7、常规酸 5、特殊酸 4、常规碱 3、强反应 3、溴碘 3、异味 2、未知 2、易爆 1、发烟 1、拒收 1），`WorkBuddyBridge.load_results()` 100% 通过。
+  - **阶段 3 剩余实测项**：① Windows 锁屏状态下的真实 ERP 只读链路实测（Playwright 无头登录 + 无头 CLI 判定，`dry_run=True`）；② 业务人工抽检分类细节确认无误后，再进入阶段 4 切换正式配置。
