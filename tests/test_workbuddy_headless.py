@@ -26,7 +26,7 @@ def _make_fake_cli_env(tmp_path: Path) -> dict[str, Any]:
     cli = tmp_path / "codebuddy"
     cli.write_text("// fake cli", encoding="utf-8")
     creds = tmp_path / ".codebuddy"
-    creds.mkdir()
+    creds.mkdir(exist_ok=True)
     return {
         "headless": {
             "enabled": True,
@@ -314,3 +314,204 @@ def test_freeze_and_publish_rejects_rule_tampering_and_frozen_digest_change(tmp_
     (bridge.batch_path(state) / "rules.xlsx").write_bytes(b"tampered")
     with pytest.raises(wh.HeadlessError, match="规则快照"):
         wh.freeze_and_publish_headless_result(bridge, state, judgments)
+
+
+# ---------------------------------------------------------------------------
+# Phase 2: Dual-mode orchestration, crash recovery, scheduler, Web & DingTalk
+# ---------------------------------------------------------------------------
+
+def test_recover_frozen_headless_result_republishes_without_cli_and_rejects_tamper(tmp_path: Path) -> None:
+    bridge, state = _prepare_isolated_batch(tmp_path)
+    keys = [item["key"] for item in state["items"]]
+    judgments = [
+        {"记录ID": keys[0], "物化特性类别": "易燃液体", "判断依据": "冻结依据A"},
+        {"记录ID": keys[1], "物化特性类别": "普通类", "判断依据": "冻结依据B"},
+    ]
+    payload = json.dumps(judgments, ensure_ascii=False, indent=2).encode("utf-8")
+    batch_dir = bridge.batch_path(state)
+    (batch_dir / "judgments.json").write_bytes(payload)
+    state["judgments_sha256"] = hashlib.sha256(payload).hexdigest()
+    bridge.save(state)
+
+    assert not (batch_dir / "result.xlsx").exists()
+    assert wh.recover_frozen_headless_result(bridge, state) is True
+    assert (batch_dir / "result.xlsx").is_file()
+
+    # Tampering frozen judgments.json must fail closed
+    (batch_dir / "judgments.json").write_bytes(b"[]")
+    with pytest.raises(wh.HeadlessError, match="摘要不匹配"):
+        wh.recover_frozen_headless_result(bridge, state)
+
+
+def test_scheduler_preflight_allows_headless_without_interactive_desktop(tmp_path: Path, monkeypatch) -> None:
+    import scheduler as sched
+
+    cfg = _make_fake_cli_env(tmp_path)
+    settings = {
+        "app": {"dry_run": False},
+        "workbuddy": {
+            "dispatch_mode": "headless",
+            "desktop_enabled": False,
+            "write_enabled": True,
+            "executable": "",
+            **cfg,
+        },
+        "erp_api": {"enabled_for_write": True, "discovery": {"status": "verified"}},
+    }
+    monkeypatch.setattr(sched, "interactive_desktop_available", lambda: False)
+    options = {"APPROVAL_WRITE_MODE": "generate_library", "ERP_WRITE_BACKEND": "api_write_with_web_verify"}
+    assert sched.workbuddy_preflight(settings, options) == ""
+
+    # Headless default keeps auto_pass disabled until explicitly opted in
+    manager_started: list[tuple[str, dict[str, Any]]] = []
+
+    class _Manager:
+        def status(self):
+            return {"running": False}
+
+        def start(self, action, opts):
+            manager_started.append((action, dict(opts)))
+            return {"started": True}
+
+    settings["scheduler"] = {"enabled": True, "use_default_run_policy": False, "approval_write_mode": "generate_library"}
+    s = sched.ApprovalScheduler(tmp_path, lambda: settings, _Manager())
+    monkeypatch.setenv("APP_DRY_RUN", "false")
+    res = s.trigger_due_run()
+    assert res["started"] is True
+    assert manager_started[0][0] == "workbuddy_loop"
+    assert manager_started[0][1]["WORKBUDDY_AUTO_PASS"] == "false"
+    assert manager_started[0][1]["AUTO_PASS"] == "false"
+
+    # Explicit opt-in enables auto_pass in formal write mode
+    settings["workbuddy"]["headless"]["auto_pass_enabled"] = True
+    res2 = s.trigger_due_run()
+    assert res2["started"] is True
+    assert manager_started[1][1]["WORKBUDDY_AUTO_PASS"] == "true"
+    assert manager_started[1][1]["AUTO_PASS"] == "true"
+
+
+def test_web_and_dingtalk_respect_headless_mode_and_auto_pass_opt_in(tmp_path: Path, monkeypatch) -> None:
+    from unittest.mock import Mock
+    from fastapi.testclient import TestClient
+    import web_app
+
+    cfg = _make_fake_cli_env(tmp_path)
+    settings = {
+        "app": {"dry_run": False},
+        "workbuddy": {
+            "dispatch_mode": "headless",
+            "desktop_enabled": False,
+            "write_enabled": True,
+            "executable": "",
+            "fixed_result_writer": True,
+            "accepted_batch_sizes": [20, 30, 50],
+            **cfg,
+        },
+        "erp_api": {"enabled_for_write": True, "discovery": {"status": "verified"}},
+    }
+    monkeypatch.setenv("APP_DRY_RUN", "false")
+    monkeypatch.setattr(web_app, "load_settings", lambda: settings)
+    monkeypatch.setattr(web_app, "runtime_config_snapshot", lambda: {
+        "approval_write_mode": "generate_library",
+        "erp_write_backend": "api_write_with_web_verify",
+    })
+
+    # DingTalk options succeed in headless mode without desktop_enabled / WorkBuddy.exe, and default auto_pass=false
+    dt_opts = web_app.dingtalk_run_options()
+    assert dt_opts["WORKBUDDY_AUTO_PASS"] == "false"
+    assert dt_opts["AUTO_PASS"] == "false"
+
+    # Web UI /api/run also keeps WORKBUDDY_AUTO_PASS=false by default in headless mode
+    start = Mock(return_value={"started": True})
+    monkeypatch.setattr(web_app.manager, "start", start)
+    resp = TestClient(web_app.app).post("/api/run", data={"action": "workbuddy_loop", "approval_write_mode": "generate_library"})
+    assert resp.status_code == 200
+    assert start.call_args.args[1]["WORKBUDDY_AUTO_PASS"] == "false"
+
+    # Explicit opt-in unlocks auto_pass for both DingTalk and Web UI
+    settings["workbuddy"]["headless"]["auto_pass_enabled"] = True
+    assert web_app.dingtalk_run_options()["WORKBUDDY_AUTO_PASS"] == "true"
+    resp2 = TestClient(web_app.app).post("/api/run", data={"action": "workbuddy_loop", "approval_write_mode": "generate_library"})
+    assert resp2.status_code == 200
+    assert start.call_args.args[1]["WORKBUDDY_AUTO_PASS"] == "true"
+
+
+def test_approval_flow_headless_recovery_and_failure_isolation(tmp_path: Path, monkeypatch) -> None:
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+    import approval_flow
+    from browser_bot import BrowserBot
+
+    bridge, state = _prepare_isolated_batch(tmp_path)
+    keys = [item["key"] for item in state["items"]]
+    judgments = [
+        {"记录ID": keys[0], "物化特性类别": "易燃液体", "判断依据": "崩溃前已冻结依据A"},
+        {"记录ID": keys[1], "物化特性类别": "普通类", "判断依据": "崩溃前已冻结依据B"},
+    ]
+    # Simulate crash right after judgments.json was frozen and result.xlsx published, before dispatch_state="submitted"
+    wh.freeze_and_publish_headless_result(bridge, state, judgments)
+    state["dispatch_mode"] = "headless"
+    state["dispatch_state"] = "sending"
+    bridge.save(state)
+
+    # Even if global settings switched back to desktop, in-flight headless batch recovers via headless path without invoking CLI or Desktop
+    settings = {
+        "paths": {"structured_rules_excel": "config/rules_structured.xlsx"},
+        "app": {"dry_run": True},
+        "workbuddy": {
+            "dispatch_mode": "desktop",
+            "desktop_enabled": True,
+            "batch_size": 2,
+            "batch_dir": "data/workbuddy",
+            "compact_rules": True,
+            "fixed_result_writer": True,
+            **_make_fake_cli_env(tmp_path),
+        },
+    }
+    bot = BrowserBot(settings=settings, root_dir=tmp_path)
+    bot.target_list_numbers = ["SJTEST01"]
+    bot.dry_run_enabled = lambda: True
+    bot.approval_write_mode = lambda: "disabled"
+    bot.run_after_login_capture = lambda _png, _html, cb: cb(object())
+
+    client = SimpleNamespace(
+        protocol="odoo_jsonrpc",
+        write_enabled=lambda: False,
+        fetch_reagent_detail=lambda _n: [],
+    )
+    monkeypatch.setattr(approval_flow, "ErpApiClient", lambda *_: client)
+    cli_called = Mock(side_effect=AssertionError("CLI must not be re-invoked when result.xlsx already exists"))
+    monkeypatch.setattr(wh.WorkBuddyHeadless, "execute_batch", cli_called)
+    desktop_send = Mock(side_effect=AssertionError("Desktop send must not be called for in-flight headless batch"))
+    import workbuddy_desktop
+    monkeypatch.setattr(workbuddy_desktop.WorkBuddyDesktop, "send", desktop_send)
+    monkeypatch.setattr(workbuddy_desktop.WorkBuddyDesktop, "confirm_existing_submission", desktop_send)
+
+    bot.run_workbuddy_loop()
+
+    cli_called.assert_not_called()
+    desktop_send.assert_not_called()
+    reloaded = bridge.batches()[0]
+    assert reloaded["dispatch_state"] == "submitted"
+    assert reloaded["status"] == "imported"
+
+
+def test_packaged_runtime_defaults_reset_headless_settings(tmp_path: Path) -> None:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "packaging" / "windows"))
+    import build_runtime_defaults as brd
+    import yaml
+
+    src = tmp_path / "src.yaml"
+    dst = tmp_path / "dst.yaml"
+    src.write_text(yaml.safe_dump({
+        "workbuddy": {
+            "dispatch_mode": "headless",
+            "headless": {"enabled": True, "auto_pass_enabled": True, "cli_script": "C:/secret/cli"},
+        }
+    }), encoding="utf-8")
+    brd.write_defaults(src, dst)
+    actual = yaml.safe_load(dst.read_text(encoding="utf-8"))
+    assert actual["workbuddy"]["dispatch_mode"] == "desktop"
+    assert actual["workbuddy"]["headless"]["enabled"] is False
+    assert actual["workbuddy"]["headless"]["auto_pass_enabled"] is False
+    assert actual["workbuddy"]["headless"]["cli_script"] == ""

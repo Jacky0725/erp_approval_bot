@@ -129,12 +129,20 @@ class ApprovalFlowMixin:
         import time
         from workbuddy_bridge import WorkBuddyBridge, batch_in_scope
         from workbuddy_desktop import WorkBuddyDesktop
+        from workbuddy_headless import (
+            WorkBuddyHeadless,
+            recover_frozen_headless_result,
+            workbuddy_dispatch_mode,
+            workbuddy_headless_auto_pass_allowed,
+            workbuddy_mode_enabled,
+        )
         from workbuddy_recovery import dispatch_outcome, identify_dispatch
 
         bridge = WorkBuddyBridge(self.root_dir, self.settings)
         active_state = None
-        if not bridge.config.get("desktop_enabled", False):
-            raise RuntimeError("WorkBuddy 自动投递尚未启用；请先完成客户端适配验证，或使用准备/导入入口。")
+        configured_mode = workbuddy_dispatch_mode(bridge.config)
+        if not workbuddy_mode_enabled(bridge.config):
+            raise RuntimeError("WorkBuddy 自动投递尚未启用；请先完成客户端适配或无头模式配置，或使用准备/导入入口。")
         dry_run = self.dry_run_enabled() or self.approval_write_mode() == "disabled"
         json_handoff = bridge.config.get("json_handoff_trial") is True
         if json_handoff and not dry_run:
@@ -151,9 +159,12 @@ class ApprovalFlowMixin:
                 raise RuntimeError("ERP API 未验证或未启用，禁止 WorkBuddy 回写。")
             memory = ReagentMemory.from_settings(self.settings, self.root_dir)
             desktop = WorkBuddyDesktop(bridge.config)
+            headless = WorkBuddyHeadless(bridge.config)
             frozen_numbers: list[str] | None = None
             previous_session: tuple[str, str, str, int] | None = None
-            compact_rules = bridge.config.get("compact_rules") is True
+            compact_rules = True if configured_mode == "headless" else (bridge.config.get("compact_rules") is True)
+            if configured_mode == "headless":
+                bridge.publish_compact_rules()
             reuse_chat = bridge.config.get("reuse_chat") is True
             auto_recover = bridge.config.get("auto_recover") is True and not dry_run
             canary = os.getenv("WORKBUDDY_CANARY_BATCH") == "true"
@@ -237,10 +248,13 @@ class ApprovalFlowMixin:
                     bridge.report_pending_reviews(scope)
                     if (not dry_run and not canary and self.auto_pass_enabled()
                             and self._truthy(os.getenv("WORKBUDDY_AUTO_PASS", "false"))):
-                        from workbuddy_autopass import WorkBuddyAutoPass
-                        if client.protocol != "odoo_jsonrpc":
-                            raise RuntimeError("WorkBuddy 整单自动通过需要完整性校验的 Odoo 明细读取。")
-                        WorkBuddyAutoPass(self, bridge, client, page).run(numbers)
+                        if configured_mode == "headless" and not workbuddy_headless_auto_pass_allowed(bridge.config):
+                            print("[workbuddy auto_pass] 无头模式默认关闭整单自动通过；需显式开启 workbuddy.headless.auto_pass_enabled。", flush=True)
+                        else:
+                            from workbuddy_autopass import WorkBuddyAutoPass
+                            if client.protocol != "odoo_jsonrpc":
+                                raise RuntimeError("WorkBuddy 整单自动通过需要完整性校验的 Odoo 明细读取。")
+                            WorkBuddyAutoPass(self, bridge, client, page).run(numbers)
                     print("[workbuddy] 当前范围无新记录，循环结束；失败项保留原批次。")
                     return
                 if not batch_in_scope(state, scope, reject_partial=True):
@@ -273,7 +287,44 @@ class ApprovalFlowMixin:
                 session_batches = 1
                 print("[workbuddy scope] " + ", ".join(dict.fromkeys(i["input"]["试剂清单号"] for i in state["items"])), flush=True)
                 print(f"[workbuddy progress] 批次 {state['batch_id']}：准备处理", flush=True)
-                if state.get("dispatch_state") == "sending":
+                batch_mode = str(state.get("dispatch_mode") or configured_mode)
+                if batch_mode == "headless":
+                    if state["status"] == "waiting_result":
+                        result_path = path / "result.xlsx"
+                        confirmation = "无头只读 CLI 完成"
+                        if result_path.exists():
+                            confirmation = "恢复已有无头结果 Excel"
+                        elif recover_frozen_headless_result(bridge, state):
+                            confirmation = "从已冻结判定 JSON 恢复发布 Excel"
+                        else:
+                            if not state.get("dispatch_state"):
+                                problems = bridge.check_before_dispatch(state, client)
+                                if problems:
+                                    raise RuntimeError("发送前 ERP 核对失败，未投递：" + "；".join(problems))
+                                print(f"[workbuddy] 批次 {state['batch_id']}：发送前 ERP 核对通过，共 {len(state['items'])} 条仍待判定。", flush=True)
+                            checkpoint("WorkBuddy 无头投递前安全点", batch_id=state["batch_id"])
+                            state["dispatch_mode"] = "headless"
+                            state["dispatch_state"] = "sending"
+                            state["dispatch_started_at"] = time.time()
+                            bridge.save(state)
+                            instructions_path = self.root_dir / "docs" / "WORKBUDDY_PROJECT_INSTRUCTIONS.txt"
+                            instructions_text = instructions_path.read_text(encoding="utf-8") if instructions_path.is_file() else ""
+                            timeout = int(os.getenv("WORKBUDDY_RESULT_TIMEOUT_SECONDS") or bridge.config.get("result_timeout_seconds") or 900)
+                            meta = headless.execute_batch(bridge, state, instructions_text=instructions_text, timeout_seconds=timeout)
+                            print(f"[workbuddy] 批次 {state['batch_id']}：无头 CLI 完成（turns={meta.get('num_turns')}, ms={meta.get('duration_ms')}）。", flush=True)
+                        state["dispatch_state"] = "submitted"
+                        state["submitted_at"] = time.time()
+                        bridge.save(state)
+                        validation_started = time.monotonic()
+                        bridge.load_results(state)
+                        bridge.audit.info(json.dumps({"event": "workbuddy_result_accepted", "batch_id": state["batch_id"],
+                                                      "dispatch_mode": "headless", "confirmation": confirmation,
+                                                      "result_sha256": state["result_sha256"],
+                                                      "validation_seconds": round(time.monotonic() - validation_started, 3)}, ensure_ascii=False))
+                        print(f"[workbuddy] 批次 {state['batch_id']}：{confirmation}；开始同步 ERP。", flush=True)
+                    else:
+                        print(f"[workbuddy] 批次 {state['batch_id']}：沿用已校验结果，继续同步 ERP。", flush=True)
+                elif state.get("dispatch_state") == "sending":
                     if dry_run:
                         raise RuntimeError(f"批次 {state['batch_id']} 上次投递结果不明；本次未点击发送，禁止自动重发。")
                     binding = (identify_dispatch(path.resolve(), state["dispatch_started_at"], projects)
@@ -285,7 +336,7 @@ class ApprovalFlowMixin:
                     state["dispatch_state"] = "submitted"
                     bridge.save(state)
                     print(f"[workbuddy] 批次 {state['batch_id']}：已重新确认原投递，仅恢复等待，未重发。", flush=True)
-                if not (path / "result.xlsx").exists():
+                if batch_mode != "headless" and not (path / "result.xlsx").exists():
                     if not state.get("dispatch_state"):
                         problems = bridge.check_before_dispatch(state, client)
                         if problems:
@@ -315,7 +366,7 @@ class ApprovalFlowMixin:
                         state["submitted_at"] = time.time()
                         bridge.save(state)
                         print(f"[workbuddy] 批次 {state['batch_id']}：投递状态已记录。", flush=True)
-                if not state.get("result_sha256"):
+                if batch_mode != "headless" and not state.get("result_sha256"):
                     timeout = int(state.get("result_timeout_seconds", bridge.config.get("result_timeout_seconds", 900)))
                     if not state.get("submitted_at") and state.get("dispatch_state") == "submitted":
                         state["submitted_at"] = state.get("dispatch_started_at", time.time())

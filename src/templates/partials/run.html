@@ -144,7 +144,7 @@
                           {% endfor %}
                         </select>
                       </label>
-                      <button type="button" class="primary" data-action="workbuddy_loop" {% if not runtime.workbuddy_desktop_enabled %}disabled aria-describedby="workbuddyAvailabilityNote"{% endif %}>启动批次循环</button>
+                      <button type="button" class="primary" data-action="workbuddy_loop" {% if not (runtime.workbuddy_available if runtime.workbuddy_available is defined else runtime.workbuddy_desktop_enabled) %}disabled aria-describedby="workbuddyAvailabilityNote"{% endif %}>启动批次循环</button>
                     </div>
                   </div>
                   <details class="run-advanced-ops">
@@ -154,7 +154,7 @@
                       <button type="button" data-action="workbuddy_import">导入 WorkBuddy 结果</button>
                     </div>
                   </details>
-                  <p class="workbuddy-availability" id="workbuddyAvailabilityNote" {% if runtime.workbuddy_desktop_enabled %}hidden{% endif %}>批次循环当前不可用：需完成客户端适配并在配置中启用；准备与导入仍可手动使用。</p>
+                  <p class="workbuddy-availability" id="workbuddyAvailabilityNote" {% if (runtime.workbuddy_available if runtime.workbuddy_available is defined else runtime.workbuddy_desktop_enabled) %}hidden{% endif %}>批次循环当前不可用：需完成客户端适配或无头模式配置并在设置中启用；准备与导入仍可手动使用。</p>
                   <details class="workbuddy-safety-note">
                     <summary>执行与写入说明</summary>
                     <p class="field-note">禁用写入模式下只测试一批，不写入记忆库或删除文件；正式回写还需通过 ERP API 安全校验。正式写入模式下，Web UI、钉钉及定时任务发起的 WorkBuddy 批次循环在全部校验通过后默认自动提交整单；试运行/禁用写入模式不会自动提交。</p>

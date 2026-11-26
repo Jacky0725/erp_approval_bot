@@ -40,3 +40,5 @@
   - UTF-8 stdin 管道 62KB 中文长输入：`exit=0`，耗时 **6.5s**，完整准确返回。
   - `--tools Read,WebSearch,WebFetch,StructuredOutput` + `--json-schema` + `--strict-mcp-config`：`exit=0`，耗时 **7.1s**，原生返回 `structured_output`。
 - **阶段 1 隔离实现**：新增 [`src/workbuddy_headless.py`](file:///d:/codex/reagent-approval-bot/src/workbuddy_headless.py) 与 [`tests/test_workbuddy_headless.py`](file:///d:/codex/reagent-approval-bot/tests/test_workbuddy_headless.py)；未修改任何现有业务流程、桌面适配器或默认配置。
+
+- **阶段 2 双模流程接入**：已将 `workbuddy_headless` 双模分流接入 `src/approval_flow.py`、`src/scheduler.py`、`src/web_app.py`、`src/web_runner.py`、`src/templates/partials/run.html` 和 `packaging/windows/build_runtime_defaults.py`；默认保持 `dispatch_mode="desktop"`、`headless.enabled=False`、`headless.auto_pass_enabled=False`，`workbuddy_desktop.py` 与 `workbuddy_recovery.py` 零修改。

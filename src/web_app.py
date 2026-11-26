@@ -890,7 +890,13 @@ def api_run(
             options["FREEZE_TODO_SCOPE"] = "true"
         dry_run = normalize_checkbox(str((settings.get("app", {}) or {}).get("dry_run", False))) == "true"
         dry_run = dry_run or normalize_checkbox(os.getenv("APP_DRY_RUN") or os.getenv("DRY_RUN") or "false") == "true"
-        if not dry_run and options["APPROVAL_WRITE_MODE"] != "disabled":
+        from workbuddy_headless import workbuddy_dispatch_mode, workbuddy_headless_auto_pass_allowed
+        wb_cfg = settings.get("workbuddy") or {}
+        headless_blocks_auto_pass = (
+            workbuddy_dispatch_mode(wb_cfg) == "headless"
+            and not workbuddy_headless_auto_pass_allowed(wb_cfg)
+        )
+        if not dry_run and options["APPROVAL_WRITE_MODE"] != "disabled" and not headless_blocks_auto_pass:
             options["WORKBUDDY_AUTO_PASS"] = options["AUTO_PASS"] = "true"
         else:
             options["WORKBUDDY_AUTO_PASS"] = options["AUTO_PASS"] = "false"
@@ -1146,11 +1152,19 @@ def dingtalk_run_options(list_number: str = "", pipeline: str = "workbuddy") -> 
     runtime = runtime_config_snapshot()
     settings = load_settings()
     if pipeline == "workbuddy":
+        from workbuddy_headless import preflight as headless_preflight, workbuddy_dispatch_mode, workbuddy_mode_enabled
         workbuddy = settings.get("workbuddy", {}) or {}
-        if not workbuddy.get("desktop_enabled", False):
-            raise ValueError("WorkBuddy 客户端自动投递未启用。")
-        if client_path(str(workbuddy.get("executable") or "")) is None:
-            raise ValueError("WorkBuddy 程序路径无效，请先在本机完成客户端配置。")
+        if workbuddy_dispatch_mode(workbuddy) == "headless":
+            if not workbuddy_mode_enabled(workbuddy):
+                raise ValueError("WorkBuddy 无头模式未启用。")
+            issue = headless_preflight(workbuddy)
+            if issue:
+                raise ValueError(issue)
+        else:
+            if not workbuddy.get("desktop_enabled", False):
+                raise ValueError("WorkBuddy 客户端自动投递未启用。")
+            if client_path(str(workbuddy.get("executable") or "")) is None:
+                raise ValueError("WorkBuddy 程序路径无效，请先在本机完成客户端配置。")
     target_list_number = str(list_number or "").strip()
     options = run_options(
         target_list_numbers=target_list_number,
@@ -1173,8 +1187,13 @@ def dingtalk_run_options(list_number: str = "", pipeline: str = "workbuddy") -> 
     dry_run = dry_run or normalize_checkbox(os.getenv("APP_DRY_RUN") or os.getenv("DRY_RUN") or "false") == "true"
     options["DINGTALK_TRIAL_MODE"] = "true" if dry_run or options["APPROVAL_WRITE_MODE"] == "disabled" else "false"
     if pipeline == "workbuddy":
+        from workbuddy_headless import workbuddy_dispatch_mode, workbuddy_headless_auto_pass_allowed
+        headless_blocks_auto_pass = (
+            workbuddy_dispatch_mode(workbuddy) == "headless"
+            and not workbuddy_headless_auto_pass_allowed(workbuddy)
+        )
         options["WORKBUDDY_AUTO_PASS"] = options["AUTO_PASS"] = (
-            "true" if options["DINGTALK_TRIAL_MODE"] == "false" else "false")
+            "true" if (options["DINGTALK_TRIAL_MODE"] == "false" and not headless_blocks_auto_pass) else "false")
     if pipeline == "workbuddy" and options["DINGTALK_TRIAL_MODE"] == "false":
         if not workbuddy.get("write_enabled", False):
             raise ValueError("WorkBuddy 正式写入尚未启用。")

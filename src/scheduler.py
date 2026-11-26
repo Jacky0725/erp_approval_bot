@@ -184,12 +184,20 @@ def interactive_desktop_available() -> bool:
 
 def workbuddy_preflight(settings: dict[str, Any], options: dict[str, str]) -> str:
     from workbuddy_discovery import client_path
+    from workbuddy_headless import preflight as headless_preflight, workbuddy_dispatch_mode, workbuddy_mode_enabled
 
     config = settings.get("workbuddy") or {}
-    if not config.get("desktop_enabled") or client_path(str(config.get("executable") or "")) is None:
-        return "WorkBuddy 客户端未启用或程序路径失效"
-    if not interactive_desktop_available():
-        return "没有可交互的 Windows 桌面"
+    if workbuddy_dispatch_mode(config) == "headless":
+        if not workbuddy_mode_enabled(config):
+            return "WorkBuddy 无头模式尚未启用"
+        issue = headless_preflight(config)
+        if issue:
+            return issue
+    else:
+        if not config.get("desktop_enabled") or client_path(str(config.get("executable") or "")) is None:
+            return "WorkBuddy 客户端未启用或程序路径失效"
+        if not interactive_desktop_available():
+            return "没有可交互的 Windows 桌面"
     dry_run = coerce_bool((settings.get("app") or {}).get("dry_run")) or coerce_bool(os.getenv("APP_DRY_RUN")) or coerce_bool(os.getenv("DRY_RUN"))
     if options["APPROVAL_WRITE_MODE"] != "disabled" and not dry_run:
         api = settings.get("erp_api") or {}
@@ -320,7 +328,12 @@ class ApprovalScheduler:
                         or coerce_bool(os.getenv("APP_DRY_RUN"))
                         or coerce_bool(os.getenv("DRY_RUN"))
                     )
-                    formal_auto_pass = "true" if (not dry_run and options["APPROVAL_WRITE_MODE"] != "disabled") else "false"
+                    from workbuddy_headless import workbuddy_dispatch_mode, workbuddy_headless_auto_pass_allowed
+                    headless_blocks_auto_pass = (
+                        workbuddy_dispatch_mode(workbuddy) == "headless"
+                        and not workbuddy_headless_auto_pass_allowed(workbuddy)
+                    )
+                    formal_auto_pass = "true" if (not dry_run and options["APPROVAL_WRITE_MODE"] != "disabled" and not headless_blocks_auto_pass) else "false"
                     options.update({
                         "FREEZE_TODO_SCOPE": "true",
                         "WORKBUDDY_BATCH_SIZE": str(size),

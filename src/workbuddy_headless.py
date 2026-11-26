@@ -60,6 +60,46 @@ def headless_settings(workbuddy_config: dict[str, Any] | None) -> dict[str, Any]
     return dict(raw) if isinstance(raw, dict) else {}
 
 
+def workbuddy_dispatch_mode(workbuddy_config: dict[str, Any] | None) -> str:
+    mode = str((workbuddy_config or {}).get("dispatch_mode") or "desktop").strip().lower()
+    return "headless" if mode == "headless" else "desktop"
+
+
+def workbuddy_mode_enabled(workbuddy_config: dict[str, Any] | None) -> bool:
+    """Unified WorkBuddy mode availability check across UI, DingTalk, scheduler, and loop."""
+    cfg = workbuddy_config or {}
+    if workbuddy_dispatch_mode(cfg) == "headless":
+        return bool(headless_settings(cfg).get("enabled", False))
+    return bool(cfg.get("desktop_enabled", False))
+
+
+def workbuddy_headless_auto_pass_allowed(workbuddy_config: dict[str, Any] | None) -> bool:
+    """Headless mode keeps WorkBuddyAutoPass opt-in until separately accepted."""
+    return bool(headless_settings(workbuddy_config).get("auto_pass_enabled", False))
+
+
+def recover_frozen_headless_result(bridge: Any, state: dict[str, Any]) -> bool:
+    """Republish result.xlsx from a previously frozen judgments.json after a crash."""
+    batch_dir = bridge.batch_path(state)
+    judgments_path = batch_dir / JUDGMENTS_NAME
+    frozen_digest = str(state.get("judgments_sha256") or "").strip()
+    if not frozen_digest or not judgments_path.is_file():
+        return False
+    payload = judgments_path.read_bytes()
+    actual_digest = hashlib.sha256(payload).hexdigest()
+    if actual_digest != frozen_digest:
+        raise HeadlessError("恢复时发现已冻结的判定文件摘要不匹配，保留现场并停止。", code="protocol_error")
+    rules_path = batch_dir / "rules.xlsx"
+    if not rules_path.is_file() or hashlib.sha256(rules_path.read_bytes()).hexdigest() != state["rules_sha256"]:
+        raise HeadlessError("本批规则快照缺失或已被修改，禁止恢复发布结果。", code="protocol_error")
+    if state.get("compact_rules_sha256"):
+        verify_compact(batch_dir, state["rules_sha256"], state["compact_rules_sha256"])
+    expected_ids = {str(item["key"]) for item in state["items"]}
+    parse_judgments(payload, expected_ids)
+    publish_result(batch_dir, judgments_payload=payload)
+    return True
+
+
 def _default_cli_script_candidates() -> list[Path]:
     candidates: list[Path] = []
     appdata = os.getenv("APPDATA", "").strip()

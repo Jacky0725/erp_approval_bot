@@ -2319,6 +2319,13 @@ def runtime_config_snapshot() -> dict[str, Any]:
         "app_frozen": bool(getattr(sys, "frozen", False)),
         "app_dry_run": "true" if app_settings.get("dry_run") else "false",
         "workbuddy_desktop_enabled": bool(workbuddy_settings.get("desktop_enabled", False)),
+        "workbuddy_dispatch_mode": "headless" if str(workbuddy_settings.get("dispatch_mode") or "").strip().lower() == "headless" else "desktop",
+        "workbuddy_headless_enabled": bool(((workbuddy_settings.get("headless") or {}) if isinstance(workbuddy_settings.get("headless"), dict) else {}).get("enabled", False)),
+        "workbuddy_available": (
+            bool(((workbuddy_settings.get("headless") or {}) if isinstance(workbuddy_settings.get("headless"), dict) else {}).get("enabled", False))
+            if str(workbuddy_settings.get("dispatch_mode") or "").strip().lower() == "headless"
+            else bool(workbuddy_settings.get("desktop_enabled", False))
+        ),
         "workbuddy_executable": str(workbuddy_settings.get("executable") or ""),
         "workbuddy_project_name": str(workbuddy_settings.get("project_name") or ""),
         "workbuddy_path_valid": client_path(str(workbuddy_settings.get("executable") or "")) is not None,
