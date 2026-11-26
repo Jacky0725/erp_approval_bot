@@ -246,5 +246,34 @@ class SchedulerTest(unittest.TestCase):
             self.assertEqual(scheduler.status()["last_result"], "started")
 
 
+    def test_scheduled_workbuddy_enables_auto_pass_in_formal_write_mode_only(self) -> None:
+        with TemporaryDirectory() as tmp:
+            manager = FakeJobManager()
+            scheduler = ApprovalScheduler(
+                root_dir=Path(tmp),
+                settings_loader=lambda: {
+                    "app": {"dry_run": False},
+                    "scheduler": {
+                        "enabled": True,
+                        "use_default_run_policy": False,
+                        "approval_write_mode": "generate_library",
+                    },
+                },
+                job_manager=manager,
+            )
+            with patch.dict("os.environ", {"APP_DRY_RUN": "false"}, clear=False), patch("scheduler.workbuddy_preflight", return_value=""):
+                result = scheduler.trigger_due_run()
+            self.assertTrue(result["started"])
+            self.assertEqual(manager.started[0][0], "workbuddy_loop")
+            self.assertEqual(manager.started[0][1]["WORKBUDDY_AUTO_PASS"], "true")
+            self.assertEqual(manager.started[0][1]["AUTO_PASS"], "true")
+
+            with patch.dict("os.environ", {"APP_DRY_RUN": "true"}, clear=False), patch("scheduler.workbuddy_preflight", return_value=""):
+                result = scheduler.trigger_due_run()
+            self.assertTrue(result["started"])
+            self.assertEqual(manager.started[1][1]["WORKBUDDY_AUTO_PASS"], "false")
+            self.assertEqual(manager.started[1][1]["AUTO_PASS"], "false")
+
+
 if __name__ == "__main__":
     unittest.main()

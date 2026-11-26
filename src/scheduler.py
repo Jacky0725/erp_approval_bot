@@ -315,8 +315,19 @@ class ApprovalScheduler:
                     size = coerce_int(workbuddy.get("batch_size"), 20)
                     if size not in web_batch_sizes(workbuddy):
                         size = 20
-                    options.update({"FREEZE_TODO_SCOPE": "true", "WORKBUDDY_BATCH_SIZE": str(size),
-                                    "WORKBUDDY_RESULT_TIMEOUT_SECONDS": str(WEB_BATCH_TIMEOUTS[size])})
+                    dry_run = (
+                        coerce_bool((settings.get("app") or {}).get("dry_run"))
+                        or coerce_bool(os.getenv("APP_DRY_RUN"))
+                        or coerce_bool(os.getenv("DRY_RUN"))
+                    )
+                    formal_auto_pass = "true" if (not dry_run and options["APPROVAL_WRITE_MODE"] != "disabled") else "false"
+                    options.update({
+                        "FREEZE_TODO_SCOPE": "true",
+                        "WORKBUDDY_BATCH_SIZE": str(size),
+                        "WORKBUDDY_RESULT_TIMEOUT_SECONDS": str(WEB_BATCH_TIMEOUTS[size]),
+                        "WORKBUDDY_AUTO_PASS": formal_auto_pass,
+                        "AUTO_PASS": formal_auto_pass,
+                    })
                     result = self.job_manager.start("workbuddy_loop", options)
 
         with self._lock:

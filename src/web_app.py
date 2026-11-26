@@ -882,10 +882,18 @@ def api_run(
         pipeline_version="v1",
         auto_pass=auto_pass,
     )
-    if (action == "workbuddy_loop" and not options["TARGET_LIST_NUMBERS"]
-            and options["PROCESS_ALL_TODOS"] == "true"
-            and (load_settings().get("workbuddy") or {}).get("freeze_web_todo_scope") is True):
-        options["FREEZE_TODO_SCOPE"] = "true"
+    if action == "workbuddy_loop":
+        settings = load_settings()
+        if (not options["TARGET_LIST_NUMBERS"]
+                and options["PROCESS_ALL_TODOS"] == "true"
+                and (settings.get("workbuddy") or {}).get("freeze_web_todo_scope") is True):
+            options["FREEZE_TODO_SCOPE"] = "true"
+        dry_run = normalize_checkbox(str((settings.get("app", {}) or {}).get("dry_run", False))) == "true"
+        dry_run = dry_run or normalize_checkbox(os.getenv("APP_DRY_RUN") or os.getenv("DRY_RUN") or "false") == "true"
+        if not dry_run and options["APPROVAL_WRITE_MODE"] != "disabled":
+            options["WORKBUDDY_AUTO_PASS"] = options["AUTO_PASS"] = "true"
+        else:
+            options["WORKBUDDY_AUTO_PASS"] = options["AUTO_PASS"] = "false"
     options.update(workbuddy_run_size(raw_options))
     return JSONResponse(manager.start(action, options))
 

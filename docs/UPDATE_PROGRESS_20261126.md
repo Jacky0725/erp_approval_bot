@@ -1,10 +1,31 @@
-# V1.0.1 发布进度（2026-11-26）
+# 项目更新与维护进度记录（2026-11-26）
 
-- 状态：源码已推送至 main / 779dd2d；本地验证通过，等待新标签的 Windows 发布验收。起始本地基线 e0c2ae7，旧稳定版 v1.0.0 为 23829b1。
-- 范围：推送此前本地提交及当前功能更新，使用新标签 v1.0.1，不替换 v1.0.0。包括双主题界面、模块等价拆分、Windows 自启、钉钉通知/聊天角色、WorkBuddy 整单确认、退回清单跳过、重复分类一致性及试剂库只读重新核对。
-- 运行边界：发布不授权启动真实审批、重启现有服务、改写 ERP、清除检查点或修改本机凭据。新安装仍使用安全默认配置。
-- 重要行为：钉钉 WorkBuddy 正式命令可在全部校验通过后提交整单；未知类不是单独的拦截条件。Web UI 和调度不自动获得该权限。README 与 Release 必须明确该差异。
-- 验证计划：隔离发布快照编译和全量 pytest，模拟数据浏览器检查，GitHub Windows 构建、资源哈希、Defender 及安装生命周期验收。真实 ERP 与钉钉消息验收未执行，不将模拟验证称为生产验收。
-- 详细历史依据：docs/UPDATE_PROGRESS_20261125.md；该文件描述过去阶段，不作为额外生产操作授权。
-- 本地发布快照：编译通过；1167 passed、1 deselected（真实 ERP 测试未运行），有 1 条已有 Starlette/httpx 弃用提示。
-- 页面验收：旧脚本的设置导航、移动导航和原生确认框已适配现有设计；新增双主题检查。实测发现并修复手机复核表内部溢出，隐藏辅助时间列并换行，完整信息仍在详情查看。修复后 24 个页面/尺寸场景通过，浅深主题截图各 24 张，无页面错误、意外请求或页面横向溢出，取消/确认及断网恢复测试通过。
+> 基准版本：`1.0.0`（分支：`main`，接续 `docs/UPDATE_PROGRESS_20261125.md`）
+
+---
+
+## 1. 本轮改动内容
+
+- **Web UI 默认开启 WorkBuddy 正式写入 `auto_pass`**：[`src/web_app.py`](file:///d:/codex/reagent-approval-bot/src/web_app.py) 的 `api_run()` 在 `action == "workbuddy_loop"` 且处于正式写入模式（`not dry_run` 且 `APPROVAL_WRITE_MODE != "disabled"`）时，默认设置 `WORKBUDDY_AUTO_PASS=true` 与 `AUTO_PASS=true`；试运行或禁用写入模式仍强制为 `false`。
+- **定时任务默认开启 WorkBuddy 正式写入 `auto_pass`**：[`src/scheduler.py`](file:///d:/codex/reagent-approval-bot/src/scheduler.py) 在 `workbuddy_preflight` 通过且处于正式写入模式时，默认设置 `WORKBUDDY_AUTO_PASS=true` 与 `AUTO_PASS=true`；当回退 V1 链路或试运行/禁用写入模式时，仍保持 `AUTO_PASS=false`。
+- **控制台说明同步**：更新 [`src/templates/partials/run.html`](file:///d:/codex/reagent-approval-bot/src/templates/partials/run.html) 中的 WorkBuddy 执行与写入说明。
+- **单元测试补充**：在 [`tests/test_workbuddy_flow.py`](file:///d:/codex/reagent-approval-bot/tests/test_workbuddy_flow.py) 和 [`tests/test_scheduler.py`](file:///d:/codex/reagent-approval-bot/tests/test_scheduler.py) 补充正式写入开启与试运行/禁用写入关闭的回归用例。
+
+---
+
+## 2. 验证记录
+
+| 检查项 | 执行命令 | 结果 |
+| :--- | :--- | :--- |
+| 字节码编译 | `python -m compileall -q src` | **已通过** |
+| 关联单元测试 | `python -m pytest -q tests/test_workbuddy_flow.py tests/test_scheduler.py tests/test_workbuddy_autopass.py tests/test_packaged_runtime_defaults.py` | **已通过**（`113 passed`） |
+| 真实 ERP 实测 | — | **未执行**（待重启后台 Web UI 进程后验收） |
+
+---
+
+## 3. 待办与后续跟进
+
+- [ ] 核对 `SJ202611240003` 当前 ERP 待办状态；若已手动通过则无需处理，若仍在待办可手工通过或备份后清理 `data/dingtalk_state.sqlite3` 中对应 `needs_review` 锁定记录。
+- [ ] 重启本地 Web UI / 钉钉机器人后台进程，使 11-25 弹窗确认修复与 11-26 全入口默认 `auto_pass` 生效。
+- [ ] 在真实 ERP 环境下实测验收一次 WorkBuddy 整单自动通过闭环。
+- [ ] 确认无误后推送本地 `main` 分支至远端。

@@ -700,3 +700,32 @@ def test_recovered_workbuddy_save_is_not_a_new_api_attempt():
     summary = light_run_summary(["[workbuddy] recovered saved: 上次写入结果已在 ERP 中确认。"], action="workbuddy_loop", options={}, running=False, success=True, error="")
     assert summary["write_success_count"] == 1
     assert summary["api_write_attempt_count"] == 0
+
+
+def test_web_workbuddy_loop_enables_auto_pass_only_in_formal_write_mode(monkeypatch):
+    from fastapi.testclient import TestClient
+    import web_app
+    start = Mock(return_value={"started": True})
+    monkeypatch.setattr(web_app.manager, "start", start)
+    monkeypatch.setenv("APP_DRY_RUN", "false")
+    monkeypatch.setattr(web_app, "load_settings", lambda: {"app": {"dry_run": False}, "workbuddy": {}})
+    client = TestClient(web_app.app)
+
+    resp = client.post("/api/run", data={"action": "workbuddy_loop", "approval_write_mode": "generate_library"})
+    assert resp.status_code == 200
+    opts = start.call_args.args[1]
+    assert opts["WORKBUDDY_AUTO_PASS"] == "true"
+    assert opts["AUTO_PASS"] == "true"
+
+    resp = client.post("/api/run", data={"action": "workbuddy_loop", "approval_write_mode": "disabled"})
+    assert resp.status_code == 200
+    opts = start.call_args.args[1]
+    assert opts["WORKBUDDY_AUTO_PASS"] == "false"
+    assert opts["AUTO_PASS"] == "false"
+
+    monkeypatch.setenv("APP_DRY_RUN", "true")
+    resp = client.post("/api/run", data={"action": "workbuddy_loop", "approval_write_mode": "generate_library"})
+    assert resp.status_code == 200
+    opts = start.call_args.args[1]
+    assert opts["WORKBUDDY_AUTO_PASS"] == "false"
+    assert opts["AUTO_PASS"] == "false"
