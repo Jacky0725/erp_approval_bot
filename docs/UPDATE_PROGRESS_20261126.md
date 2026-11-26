@@ -1,51 +1,54 @@
 # 项目更新与维护进度记录（2026-11-26）
 
-> 基准版本：`1.0.0`（分支：`main`，接续 `docs/UPDATE_PROGRESS_20261125.md`）
+> **基准版本**：`1.0.0`（分支：`main`，最新代码提交 `f558158`，接续 `docs/UPDATE_PROGRESS_20261125.md`）
 
 ---
 
-## 1. 本轮改动内容
+## 1. 本日提交清单
 
-- **Web UI 默认开启 WorkBuddy 正式写入 `auto_pass`**：[`src/web_app.py`](file:///d:/codex/reagent-approval-bot/src/web_app.py) 的 `api_run()` 在 `action == "workbuddy_loop"` 且处于正式写入模式（`not dry_run` 且 `APPROVAL_WRITE_MODE != "disabled"`）时，默认设置 `WORKBUDDY_AUTO_PASS=true` 与 `AUTO_PASS=true`；试运行或禁用写入模式仍强制为 `false`。
-- **定时任务默认开启 WorkBuddy 正式写入 `auto_pass`**：[`src/scheduler.py`](file:///d:/codex/reagent-approval-bot/src/scheduler.py) 在 `workbuddy_preflight` 通过且处于正式写入模式时，默认设置 `WORKBUDDY_AUTO_PASS=true` 与 `AUTO_PASS=true`；当回退 V1 链路或试运行/禁用写入模式时，仍保持 `AUTO_PASS=false`。
-- **控制台说明同步**：更新 [`src/templates/partials/run.html`](file:///d:/codex/reagent-approval-bot/src/templates/partials/run.html) 中的 WorkBuddy 执行与写入说明。
-- **单元测试补充**：在 [`tests/test_workbuddy_flow.py`](file:///d:/codex/reagent-approval-bot/tests/test_workbuddy_flow.py) 和 [`tests/test_scheduler.py`](file:///d:/codex/reagent-approval-bot/tests/test_scheduler.py) 补充正式写入开启与试运行/禁用写入关闭的回归用例。
-
----
-
-## 2. 验证记录
-
-| 检查项 | 执行命令 | 结果 |
-| :--- | :--- | :--- |
-| 字节码编译 | `python -m compileall -q src` | **已通过** |
-| 关联单元测试 | `python -m pytest -q tests/test_workbuddy_flow.py tests/test_scheduler.py tests/test_workbuddy_autopass.py tests/test_packaged_runtime_defaults.py` | **已通过**（`113 passed`） |
-| 真实 ERP 实测 | — | **未执行**（待重启后台 Web UI 进程后验收） |
+| 顺序 | Commit | 类型 | 摘要 |
+| :---: | :--- | :--- | :--- |
+| 1 | `350d059` | 功能配置 | Web UI 与定时任务在 WorkBuddy 正式写入模式下默认开启 `auto_pass`（试运行及回退 V1 仍强制关闭） |
+| 2 | `6f31113` | 阶段 1 | 新增只读无头 CodeBuddy CLI 适配器 `src/workbuddy_headless.py`、15 项单元测试与 v2 集成方案文档 |
+| 3 | `0bb8167` | 阶段 2 | 接入 `approval_flow.py`、`scheduler.py`、`web_app.py`、`web_runner.py`、`run.html`、`build_runtime_defaults.py` 双模分流与崩溃恢复（默认保持 `desktop`，`workbuddy_desktop.py`/`workbuddy_recovery.py` 零修改） |
+| 4 | `6e5e520` | 阶段 3 | 记录 20 条（105.8s）与 50 条（334.4s）脱敏全类别隔离验收结果 |
+| 5 | `aa2fb5c` | 阶段 4 | 用户确认 50 条分类均符合业务预期后，将本机 `config/settings.yaml` 切换为 `dispatch_mode: headless`（`auto_pass_enabled: false`），并重启本地 Web UI 生效 |
+| 6 | `f558158` | Web UI | 运行页 `/run` 新增当前投递模式徽标（`CodeBuddy CLI 无头模式` / `WorkBuddy 桌面客户端`），配置页 `/settings` 新增投递模式、无头模型、无头开关与无头自动通过开关并重启生效 |
 
 ---
 
-## 3. 待办与后续跟进
+## 2. WorkBuddy / CodeBuddy 无头模式验收与生效状态
 
-- [ ] 核对 `SJ202611240003` 当前 ERP 待办状态；若已手动通过则无需处理，若仍在待办可手工通过或备份后清理 `data/dingtalk_state.sqlite3` 中对应 `needs_review` 锁定记录。
-- [ ] 重启本地 Web UI / 钉钉机器人后台进程，使 11-25 弹窗确认修复与 11-26 全入口默认 `auto_pass` 生效。
-- [ ] 在真实 ERP 环境下实测验收一次 WorkBuddy 整单自动通过闭环。
-- [ ] 确认无误后推送本地 `main` 分支至远端。
-
-
----
-
-## 4. WorkBuddy 无头模式阶段 1 进展（2026-11-26 下午）
-
-- **方案交叉审查与修订**：吸收 Codex 审查意见，更新 [`docs/WORKBUDDY_HEADLESS_INTEGRATION_PLAN_20261126.md`](file:///d:/codex/reagent-approval-bot/docs/WORKBUDDY_HEADLESS_INTEGRATION_PLAN_20261126.md) 为 v2 修订版（明确现有桌面功能零影响、批次级 `dispatch_mode`/`headless_pid` 崩溃恢复、最小数据范围 `--add-dir` + `--strict-mcp-config`、复用摘要冻结原子发布、首轮不开放自动通过）。
-- **CLI 专项技术验证（固定版本 `@tencent-ai/codebuddy-code@2.187.0`）**：
-  - UTF-8 stdin 管道 62KB 中文长输入：`exit=0`，耗时 **6.5s**，完整准确返回。
+- **CLI 专项实测（`@tencent-ai/codebuddy-code@2.187.0`）**：
+  - UTF-8 stdin 管道 62KB 中文长输入：`exit=0`，耗时 **6.5s**。
   - `--tools Read,WebSearch,WebFetch,StructuredOutput` + `--json-schema` + `--strict-mcp-config`：`exit=0`，耗时 **7.1s**，原生返回 `structured_output`。
-- **阶段 1 隔离实现**：新增 [`src/workbuddy_headless.py`](file:///d:/codex/reagent-approval-bot/src/workbuddy_headless.py) 与 [`tests/test_workbuddy_headless.py`](file:///d:/codex/reagent-approval-bot/tests/test_workbuddy_headless.py)；未修改任何现有业务流程、桌面适配器或默认配置。
-
-- **阶段 2 双模流程接入**：已将 `workbuddy_headless` 双模分流接入 `src/approval_flow.py`、`src/scheduler.py`、`src/web_app.py`、`src/web_runner.py`、`src/templates/partials/run.html` 和 `packaging/windows/build_runtime_defaults.py`；默认保持 `dispatch_mode="desktop"`、`headless.enabled=False`、`headless.auto_pass_enabled=False`，`workbuddy_desktop.py` 与 `workbuddy_recovery.py` 零修改。
-
-- **阶段 3 脱敏大批次隔离验收（20 条 & 50 条，零 ERP / 记忆库写入）**：
+- **脱敏大批次隔离验收（零 ERP / 零记忆库写入）**：
   - **20 条批次**（`20261126_125424_a3021682`）：耗时 **105.8s**（预算 900s），`is_error=False`，`permission_denials=0`，`unmapped=0`，`WorkBuddyBridge.load_results()` 100% 通过。
-  - **50 条批次**（`20261126_125641_ea75aea5`）：耗时 **334.4s**（约 5.6 分钟，预算 1,500s），`is_error=False`，`permission_denials=0`，`unmapped=0`，覆盖 13 个 ERP 类别（易燃 10、普通 8、氧化剂 7、常规酸 5、特殊酸 4、常规碱 3、强反应 3、溴碘 3、异味 2、未知 2、易爆 1、发烟 1、拒收 1），`WorkBuddyBridge.load_results()` 100% 通过。
-  - **阶段 3 剩余实测项**：① Windows 锁屏状态下的真实 ERP 只读链路实测（Playwright 无头登录 + 无头 CLI 判定，`dry_run=True`）；② 业务人工抽检分类细节确认无误后，再进入阶段 4 切换正式配置。
+  - **50 条批次**（`20261126_125641_ea75aea5`）：耗时 **334.4s**（约 5.6 分钟，预算 1,500s），`is_error=False`，`permission_denials=0`，`unmapped=0`，覆盖 13 个 ERP 类别，经用户抽检确认全部符合 `rules_structured.xlsx` 业务预期。
+- **本机当前实时运行状态**：
+  - `http://127.0.0.1:8000` 已重启并健康运行；
+  - `workbuddy.dispatch_mode = headless`、`workbuddy.headless.enabled = true`、`workbuddy.headless.auto_pass_enabled = false`；
+  - `headless_preflight`、`scheduler_preflight`、`dingtalk_run_options` 及 `/run`、`/settings` 实时页面均已验证通过。
 
-- **阶段 4（受控切换无头分类写入）**：用户确认 50 条分类结果符合业务预期后，已将本机 `config/settings.yaml` 切换为 `dispatch_mode: headless`、`headless.enabled: true`、`headless.auto_pass_enabled: false`；`headless_preflight`、`scheduler_preflight`、`dingtalk_run_options` 均已验证通过，并重启本地 Web UI 进程使 11-25/11-26 全部更新生效。
+---
+
+## 3. 验证记录
+
+| 检查项 | 执行命令 / 方式 | 结果 |
+| :--- | :--- | :--- |
+| 字节码编译 | `python -m compileall -q src packaging\windows` | **已通过** |
+| 无头适配器与 UI 专项测试 | `python -m pytest -q tests/test_workbuddy_headless.py tests/test_dashboard_requests.py` | **已通过**（`23 passed`） |
+| WorkBuddy / 自动通过 / 调度 / 打包回归 | `python -m pytest -q tests/test_workbuddy_flow.py tests/test_workbuddy_autopass.py tests/test_scheduler.py tests/test_packaged_runtime_defaults.py` | **已通过** |
+| 本地 Web UI 实时页面校验 | 重启后校验 `GET /api/status`、`/run`、`/settings` | **已通过** |
+| 真实 ERP 锁屏跑批与无头整单通过实测 | — | **未执行**（待实测验收） |
+
+---
+
+## 4. 待办与后续跟进
+
+- [x] 完成 50 条无头批次业务抽检确认与本机切换 `dispatch_mode: headless`。
+- [x] 重启本地 Web UI 进程，并在 `/run` 与 `/settings` 展示 CodeBuddy 无头模式状态与切换开关。
+- [ ] 在真实 ERP 环境下（含锁屏状态）实测一次无头模式正式分类写入，验收端到端稳定性。
+- [ ] 无头分类写入验收无误后，按需在 `/settings` 开启 `无头模式允许整单自动通过` 并实测一次「审批结果」二级弹窗自动确认闭环。
+- [ ] 核对 `SJ202611240003` 当前 ERP 待办状态；若已手动通过则无需处理，若仍在待办可手工通过或备份后清理 `data/dingtalk_state.sqlite3` 中对应 `needs_review` 锁定记录。
+- [ ] 确认无误后推送本地 `main` 分支至远端。
