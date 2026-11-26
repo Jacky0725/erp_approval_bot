@@ -292,16 +292,16 @@ class ApprovalFlowMixin:
                     if state["status"] == "waiting_result":
                         result_path = path / "result.xlsx"
                         confirmation = "无头只读 CLI 完成"
+                        headless_meta: dict[str, Any] = {}
                         if result_path.exists():
                             confirmation = "恢复已有无头结果 Excel"
                         elif recover_frozen_headless_result(bridge, state):
                             confirmation = "从已冻结判定 JSON 恢复发布 Excel"
                         else:
-                            if not state.get("dispatch_state"):
-                                problems = bridge.check_before_dispatch(state, client)
-                                if problems:
-                                    raise RuntimeError("发送前 ERP 核对失败，未投递：" + "；".join(problems))
-                                print(f"[workbuddy] 批次 {state['batch_id']}：发送前 ERP 核对通过，共 {len(state['items'])} 条仍待判定。", flush=True)
+                            problems = bridge.check_before_dispatch(state, client)
+                            if problems:
+                                raise RuntimeError("发送前 ERP 核对失败，未投递：" + "；".join(problems))
+                            print(f"[workbuddy] 批次 {state['batch_id']}：发送前 ERP 核对通过，共 {len(state['items'])} 条仍待判定。", flush=True)
                             checkpoint("WorkBuddy 无头投递前安全点", batch_id=state["batch_id"])
                             state["dispatch_mode"] = "headless"
                             state["dispatch_state"] = "sending"
@@ -309,18 +309,38 @@ class ApprovalFlowMixin:
                             bridge.save(state)
                             instructions_path = self.root_dir / "docs" / "WORKBUDDY_PROJECT_INSTRUCTIONS.txt"
                             instructions_text = instructions_path.read_text(encoding="utf-8") if instructions_path.is_file() else ""
-                            timeout = int(os.getenv("WORKBUDDY_RESULT_TIMEOUT_SECONDS") or bridge.config.get("result_timeout_seconds") or 900)
-                            meta = headless.execute_batch(bridge, state, instructions_text=instructions_text, timeout_seconds=timeout)
-                            print(f"[workbuddy] 批次 {state['batch_id']}：无头 CLI 完成（turns={meta.get('num_turns')}, ms={meta.get('duration_ms')}）。", flush=True)
+                            timeout = int(
+                                os.getenv("WORKBUDDY_RESULT_TIMEOUT_SECONDS")
+                                or state.get("result_timeout_seconds")
+                                or headless.config.get("timeout_seconds")
+                                or bridge.config.get("result_timeout_seconds")
+                                or 900
+                            )
+                            headless_meta = headless.execute_batch(bridge, state, instructions_text=instructions_text, timeout_seconds=timeout)
+                            print(
+                                f"[workbuddy] 批次 {state['batch_id']}：无头 CLI 完成"
+                                f"（turns={headless_meta.get('num_turns')}, ms={headless_meta.get('duration_ms')}, "
+                                f"denials={headless_meta.get('permission_denials_count', 0)}）。",
+                                flush=True,
+                            )
                         state["dispatch_state"] = "submitted"
                         state["submitted_at"] = time.time()
                         bridge.save(state)
                         validation_started = time.monotonic()
                         bridge.load_results(state)
-                        bridge.audit.info(json.dumps({"event": "workbuddy_result_accepted", "batch_id": state["batch_id"],
-                                                      "dispatch_mode": "headless", "confirmation": confirmation,
-                                                      "result_sha256": state["result_sha256"],
-                                                      "validation_seconds": round(time.monotonic() - validation_started, 3)}, ensure_ascii=False))
+                        audit_event = {
+                            "event": "workbuddy_result_accepted",
+                            "batch_id": state["batch_id"],
+                            "dispatch_mode": "headless",
+                            "confirmation": confirmation,
+                            "result_sha256": state["result_sha256"],
+                            "validation_seconds": round(time.monotonic() - validation_started, 3),
+                        }
+                        if headless_meta:
+                            for key in ("subtype", "duration_ms", "num_turns", "permission_denials_count"):
+                                if key in headless_meta:
+                                    audit_event[key] = headless_meta[key]
+                        bridge.audit.info(json.dumps(audit_event, ensure_ascii=False))
                         print(f"[workbuddy] 批次 {state['batch_id']}：{confirmation}；开始同步 ERP。", flush=True)
                     else:
                         print(f"[workbuddy] 批次 {state['batch_id']}：沿用已校验结果，继续同步 ERP。", flush=True)

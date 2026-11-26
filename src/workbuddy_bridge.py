@@ -301,6 +301,10 @@ class WorkBuddyBridge:
         if (batch.get("operator_disposition") or {}).get("reason") == DISCARDED_FOR_REJUDGMENT:
             return batch["operator_disposition"].get("task_id") == task["task_id"]
         if batch.get("dispatch_state") == "sending":
+            if batch.get("dispatch_mode") == "headless" and int(batch.get("headless_pid") or 0):
+                from workbuddy_headless import _pid_is_alive
+                if _pid_is_alive(int(batch["headless_pid"])):
+                    return False
             path = self.batch_path(batch)
             return (batch["status"] in {"waiting_result", "operator_stopped"} and bool(batch["items"])
                     and not batch.get("result_sha256") and not batch.get("replacement")
@@ -782,6 +786,15 @@ class WorkBuddyBridge:
             judgments_payload = self._read_json_judgments(state, self.batch_path(state) / JUDGMENTS_NAME)
             if hashlib.sha256(judgments_payload).hexdigest() != state.get("judgments_sha256"):
                 raise ValueError("判定文件未经本机冻结或已发生变化，禁止导入。")
+        elif state.get("dispatch_mode") == "headless" and state.get("judgments_sha256"):
+            if state.get("compact_rules_sha256"):
+                verify_compact(self.batch_path(state), state["rules_sha256"], state["compact_rules_sha256"])
+            judgments_file = self.batch_path(state) / JUDGMENTS_NAME
+            if judgments_file.resolve() != judgments_file or not judgments_file.is_file():
+                raise ValueError("无头判定文件缺失或路径越界，禁止导入。")
+            judgments_payload = judgments_file.read_bytes()
+            if hashlib.sha256(judgments_payload).hexdigest() != state.get("judgments_sha256"):
+                raise ValueError("无头判定文件未经本机冻结或已发生变化，禁止导入。")
         elif state.get("compact_rules_sha256"):
             verify_compact(self.batch_path(state), state["rules_sha256"], state["compact_rules_sha256"])
         path = self.batch_path(state) / "result.xlsx"
@@ -811,7 +824,7 @@ class WorkBuddyBridge:
                 raise ValueError(f"结果表头必须为：{'、'.join(RESULT_COLUMNS)}")
             expected = {i["key"]: i for i in state["items"]}
             judgments = None
-            if state.get("result_writer_sha256") or state.get("json_handoff"):
+            if state.get("result_writer_sha256") or state.get("json_handoff") or judgments_payload is not None:
                 try:
                     judgments = (parse_judgments(judgments_payload, set(expected)) if judgments_payload is not None
                                  else read_judgments(self.batch_path(state) / JUDGMENTS_NAME, set(expected)))
@@ -1105,7 +1118,7 @@ class WorkBuddyBridge:
             return
         try:
             (self.batch_path(state) / "result.xlsx").unlink(missing_ok=True)
-            if state.get("result_writer_sha256"):
+            if state.get("result_writer_sha256") or state.get("dispatch_mode") == "headless":
                 (self.batch_path(state) / JUDGMENTS_NAME).unlink(missing_ok=True)
             state["cleaned"] = True
             state.pop("cleanup_error", None)

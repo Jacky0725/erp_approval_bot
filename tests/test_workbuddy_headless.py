@@ -535,10 +535,11 @@ def test_dashboard_renders_headless_badge_and_saves_headless_settings(tmp_path: 
     run_html = client.get("/run").text
     settings_html = client.get("/settings").text
     assert "当前投递：CodeBuddy CLI 无头模式" in run_html
+    assert "不会自动点击整单“通过”" in run_html
     assert "workbuddyDispatchModeSelect" in settings_html
     assert "workbuddy_headless_auto_pass_enabled" in settings_html
 
-    target = {"workbuddy": {}}
+    target = {"workbuddy": {"headless": dict(cfg["headless"])}}
     web_runner._update_workbuddy_headless_settings(
         target,
         {
@@ -552,3 +553,310 @@ def test_dashboard_renders_headless_badge_and_saves_headless_settings(tmp_path: 
     assert target["workbuddy"]["headless"]["enabled"] is True
     assert target["workbuddy"]["headless"]["auto_pass_enabled"] is True
     assert target["workbuddy"]["headless"]["model"] == "deepseek-v4.1-flash"
+
+    # Reject invalid dispatch_mode, unsafe model name, auto_pass without headless enabled, and missing CLI preflight
+    with pytest.raises(ValueError, match="desktop 或 headless"):
+        web_runner._update_workbuddy_headless_settings(target, {"workbuddy_dispatch_mode": "invalid"})
+    with pytest.raises(ValueError, match="名称无效"):
+        web_runner._update_workbuddy_headless_settings(
+            target,
+            {"workbuddy_dispatch_mode": "headless", "workbuddy_headless_enabled": "true", "workbuddy_headless_model": "--bad"},
+        )
+    with pytest.raises(ValueError, match="需先启用"):
+        web_runner._update_workbuddy_headless_settings(
+            target,
+            {"workbuddy_dispatch_mode": "headless", "workbuddy_headless_enabled": "false", "workbuddy_headless_auto_pass_enabled": "true"},
+        )
+    broken_target = {"workbuddy": {"headless": {"node_executable": str(tmp_path / "missing_node")}}}
+    with pytest.raises(ValueError, match="无法启用 CodeBuddy CLI 无头模式"):
+        web_runner._update_workbuddy_headless_settings(
+            broken_target,
+            {"workbuddy_dispatch_mode": "headless", "workbuddy_headless_enabled": "true"},
+        )
+    # Omitting workbuddy_dispatch_mode must preserve existing dispatch_mode instead of silently resetting to desktop
+    web_runner._update_workbuddy_headless_settings(
+        target,
+        {"workbuddy_headless_enabled": "false", "workbuddy_headless_auto_pass_enabled": "false"},
+    )
+    assert target["workbuddy"]["dispatch_mode"] == "headless"
+    assert target["workbuddy"]["headless"]["enabled"] is False
+
+
+def test_job_manager_start_allows_headless_without_desktop_executable(tmp_path: Path, monkeypatch) -> None:
+    import web_runner
+
+    cfg = _make_fake_cli_env(tmp_path)
+    settings = {
+        "workbuddy": {
+            "dispatch_mode": "headless",
+            "desktop_enabled": False,
+            "executable": "",
+            "batch_dir": "data/workbuddy",
+            **cfg,
+        }
+    }
+    monkeypatch.setattr(web_runner, "load_settings", lambda: settings)
+
+    started_threads: list[Any] = []
+
+    class _NoopThread:
+        def __init__(self, *args, **kwargs):
+            self.args = args
+            self.kwargs = kwargs
+
+        def start(self) -> None:
+            started_threads.append(self)
+
+        def is_alive(self) -> bool:
+            return False
+
+    monkeypatch.setattr(web_runner.threading, "Thread", _NoopThread)
+
+    manager = web_runner.AutomationJobManager(root_dir=tmp_path)
+    res = manager.start("workbuddy_loop", {"TARGET_LIST_NUMBERS": "SJTEST01"})
+    assert res["started"] is True
+    assert len(started_threads) == 1
+
+    # When headless is disabled, manager.start must reject cleanly
+    settings["workbuddy"]["headless"]["enabled"] = False
+    manager2 = web_runner.AutomationJobManager(root_dir=tmp_path)
+    res2 = manager2.start("workbuddy_loop", {"TARGET_LIST_NUMBERS": "SJTEST01"})
+    assert res2["started"] is False
+    assert "无头模式尚未启用" in res2["message"]
+
+
+def test_headless_prompt_preserves_type_desc_list_number_and_strips_file_delivery_clauses(tmp_path: Path) -> None:
+    (tmp_path / "config").mkdir(parents=True, exist_ok=True)
+    _make_minimal_rules_workbook(tmp_path / "config" / "rules_structured.xlsx")
+    settings = {
+        "paths": {"structured_rules_excel": "config/rules_structured.xlsx"},
+        "workbuddy": {"batch_size": 2, "batch_dir": "data/workbuddy", "compact_rules": True, **_make_fake_cli_env(tmp_path)},
+    }
+    bridge = WorkBuddyBridge(tmp_path, settings)
+    bridge.publish_compact_rules()
+    state = bridge.prepare([
+        {
+            "清单号": "SJ999",
+            "序号": "1",
+            "_erp_record_id": "101",
+            "试剂名称": "盐酸溶液",
+            "CAS号": "7647-01-0",
+            "type": "分析纯 37%",
+            "desc": "浓盐酸水溶液",
+        }
+    ], compact=True)
+    assert state is not None
+    raw_instructions = (
+        "【试剂审批文件协议】\n"
+        "1. 规则来源：只用本批 rules.xlsx。\n"
+        "2. 判定依据：按本批规则处理优先级。\n"
+        "3. WB-EXCEL-v1：读取 input.xlsx，运行 write_result.py，发布 result.xlsx。\n"
+        "4. WB-JSON-v1：只交付 judgments.json。\n"
+    )
+    prompt = wh.build_headless_prompt(state, bridge.batch_path(state), instructions_text=raw_instructions)
+    assert "SJ999" in prompt
+    assert "分析纯 37%" in prompt
+    assert "浓盐酸水溶液" in prompt
+    assert state["rules_sha256"] in prompt
+    assert "同一清单" in prompt
+    assert "WB-EXCEL-v1" not in prompt
+    assert "write_result.py" not in prompt
+    assert "WB-JSON-v1" not in prompt
+
+
+def test_build_command_rejects_disallowed_tools_and_unsafe_models(tmp_path: Path) -> None:
+    cfg = _make_fake_cli_env(tmp_path)
+    paths = wh.discover_headless_cli(cfg)
+    assert paths is not None
+
+    cfg_bad_tool = {"headless": {**cfg["headless"], "tools": "Read,Bash"}}
+    with pytest.raises(wh.HeadlessError) as exc_tool:
+        wh.WorkBuddyHeadless(cfg_bad_tool).build_command(paths, tmp_path)
+    assert exc_tool.value.code == "config_error"
+
+    cfg_bad_model = {"headless": {**cfg["headless"], "model": "--dangerously-skip-permissions"}}
+    with pytest.raises(wh.HeadlessError) as exc_model:
+        wh.WorkBuddyHeadless(cfg_bad_model).build_command(paths, tmp_path)
+    assert exc_model.value.code == "config_error"
+
+
+def test_execute_batch_isolates_cwd_clears_pid_on_error_and_rejects_nonzero_exit(tmp_path: Path, monkeypatch) -> None:
+    bridge, state = _prepare_isolated_batch(tmp_path)
+    keys = [item["key"] for item in state["items"]]
+    monkeypatch.setattr(wh, "_pid_is_alive", lambda _pid: False)
+    monkeypatch.setattr(wh, "terminate_process_tree", lambda proc: proc.terminate())
+
+    # 1. Timeout must clear headless_pid in finally and run in isolated cwd outside batch_dir
+    seen_cwds: list[Path] = []
+    slow_proc = _FakePopen(delay_seconds=10.0, pid=33333)
+
+    def _slow_factory(cmd, **kwargs):
+        seen_cwds.append(Path(kwargs["cwd"]))
+        return slow_proc
+
+    adapter = wh.WorkBuddyHeadless(bridge.config, popen_factory=_slow_factory, poll_interval_seconds=0.05)
+    with pytest.raises(wh.HeadlessError) as exc_timeout:
+        adapter.execute_batch(bridge, state, timeout_seconds=1, check_stop=lambda: None)
+    assert exc_timeout.value.code == "timeout"
+    assert state["headless_pid"] == 0
+    assert seen_cwds[0].resolve() != bridge.batch_path(state).resolve()
+    assert not seen_cwds[0].resolve().is_relative_to(tmp_path.resolve())
+
+    # 2. Non-zero exit code must fail even if stdout contains JSON
+    bad_exit_stdout = json.dumps([
+        {
+            "type": "result",
+            "is_error": False,
+            "structured_output": {
+                "batch_id": state["batch_id"],
+                "judgments": [
+                    {"记录ID": keys[0], "物化特性类别": "易燃液体", "判断依据": "依据A"},
+                    {"记录ID": keys[1], "物化特性类别": "普通类", "判断依据": "依据B"},
+                ],
+            },
+        }
+    ], ensure_ascii=False)
+    bad_proc = _FakePopen(stdout=bad_exit_stdout, stderr="fatal crash", returncode=1, pid=44444)
+    adapter2 = wh.WorkBuddyHeadless(bridge.config, popen_factory=lambda *a, **k: bad_proc, poll_interval_seconds=0.05)
+    with pytest.raises(wh.HeadlessError) as exc_exit:
+        adapter2.execute_batch(bridge, state, check_stop=lambda: None)
+    assert exc_exit.value.code == "process_failed"
+    assert state["headless_pid"] == 0
+
+
+def test_parse_cli_output_validates_basis_and_extracts_json_with_surrounding_braces() -> None:
+    bad_basis = json.dumps([
+        {
+            "type": "result",
+            "is_error": False,
+            "structured_output": {
+                "batch_id": "B1",
+                "judgments": [{"记录ID": "k1", "物化特性类别": "普通类", "判断依据": "---"}],
+            },
+        }
+    ], ensure_ascii=False)
+    with pytest.raises(wh.HeadlessError) as exc:
+        wh.parse_cli_output(bad_basis, expected_batch_id="B1", expected_record_ids={"k1"})
+    assert exc.value.code == "protocol_error"
+
+    noisy_plain = json.dumps([
+        {
+            "type": "result",
+            "is_error": False,
+            "result": (
+                "前置说明 {note: ignore}\n"
+                + json.dumps({
+                    "batch_id": "B1",
+                    "judgments": [{"记录ID": "k1", "物化特性类别": "普通类", "判断依据": "依据充分"}],
+                }, ensure_ascii=False)
+                + "\n尾部说明 {done: true}"
+            ),
+        }
+    ], ensure_ascii=False)
+    parsed, _ = wh.parse_cli_output(noisy_plain, expected_batch_id="B1", expected_record_ids={"k1"})
+    assert parsed[0]["物化特性类别"] == "普通类"
+
+
+def test_task_control_and_bridge_recognize_failed_headless_dispatch_and_recheck_erp(tmp_path: Path, monkeypatch) -> None:
+    from types import SimpleNamespace
+    import approval_flow
+    from browser_bot import BrowserBot
+    from task_control import TaskControl
+
+    bridge, state = _prepare_isolated_batch(tmp_path)
+    state["dispatch_mode"] = "headless"
+    state["dispatch_state"] = "sending"
+    state["headless_pid"] = 0
+    bridge.save(state)
+
+    # 1. TaskControl recognizes headless dispatch checkpoints as reviewable/discardable failed dispatches
+    tc = TaskControl(tmp_path)
+    tc.register("t-headless-fail", "workbuddy_loop", {"TARGET_LIST_NUMBERS": "SJTEST01"}, {"source": "web"}, {})
+    tc.checkpoint("t-headless-fail", "WorkBuddy 无头 CLI 等待结果", batch_id=state["batch_id"])
+    tc.finish("t-headless-fail", "failed")
+
+    task = tc.get("t-headless-fail")
+    assert TaskControl.failed_workbuddy_dispatch(task) is True
+    assert any(item["task_id"] == "t-headless-fail" for item in tc.stopped())
+    assert tc.has_unresolved_workbuddy(bridge.failed_dispatch_requires_review) is True
+    review_batch = bridge.review_batch(task)
+    assert review_batch is not None and review_batch["batch_id"] == state["batch_id"]
+    assert bridge.can_discard_review(task, review_batch) is True
+
+    # If headless_pid is still alive, discard must be blocked
+    review_batch["headless_pid"] = 55555
+    monkeypatch.setattr(wh, "_pid_is_alive", lambda pid: pid == 55555)
+    assert bridge.can_discard_review(task, review_batch) is False
+    review_batch["headless_pid"] = 0
+
+    # 2. Retrying a sending headless batch must still run check_before_dispatch and honor headless.timeout_seconds
+    settings = {
+        "paths": {"structured_rules_excel": "config/rules_structured.xlsx"},
+        "app": {"dry_run": True},
+        "workbuddy": {
+            "dispatch_mode": "headless",
+            "desktop_enabled": False,
+            "batch_size": 2,
+            "batch_dir": "data/workbuddy",
+            "compact_rules": True,
+            "fixed_result_writer": True,
+            "result_timeout_seconds": 900,
+            "headless": {**_make_fake_cli_env(tmp_path)["headless"], "timeout_seconds": 432},
+        },
+    }
+    monkeypatch.delenv("WORKBUDDY_RESULT_TIMEOUT_SECONDS", raising=False)
+    bot = BrowserBot(settings=settings, root_dir=tmp_path)
+    bot.target_list_numbers = ["SJTEST01"]
+    bot.dry_run_enabled = lambda: True
+    bot.approval_write_mode = lambda: "disabled"
+    bot.run_after_login_capture = lambda _png, _html, cb: cb(object())
+
+    erp_rows = [
+        {"清单号": "SJTEST01", "序号": "1", "_erp_record_id": "rec-1", "_erp_parent_state": "wait", "试剂名称": "示例试剂A", "CAS号": "64-17-5", "物化特性": ""},
+        {"清单号": "SJTEST01", "序号": "2", "_erp_record_id": "rec-2", "_erp_parent_state": "wait", "试剂名称": "示例试剂B", "CAS号": "7647-14-5", "物化特性": ""},
+    ]
+    client = SimpleNamespace(
+        protocol="odoo_jsonrpc",
+        write_enabled=lambda: False,
+        fetch_reagent_detail=lambda _n: erp_rows,
+    )
+    monkeypatch.setattr(approval_flow, "ErpApiClient", lambda *_: client)
+    check_calls: list[str] = []
+    orig_check = WorkBuddyBridge.check_before_dispatch
+
+    def _spy_check(self, s, c):
+        check_calls.append(s["batch_id"])
+        return orig_check(self, s, c)
+
+    monkeypatch.setattr(WorkBuddyBridge, "check_before_dispatch", _spy_check)
+    captured_timeouts: list[int | None] = []
+    keys = [item["key"] for item in state["items"]]
+
+    def _fake_exec(self, br, st, *, instructions_text="", timeout_seconds=None, check_stop=None):
+        captured_timeouts.append(timeout_seconds)
+        wh.freeze_and_publish_headless_result(br, st, [
+            {"记录ID": keys[0], "物化特性类别": "易燃液体", "判断依据": "重试依据A"},
+            {"记录ID": keys[1], "物化特性类别": "普通类", "判断依据": "重试依据B"},
+        ])
+        return {"subtype": "success", "duration_ms": 500, "num_turns": 2, "permission_denials_count": 0}
+
+    monkeypatch.setattr(wh.WorkBuddyHeadless, "execute_batch", _fake_exec)
+
+    bot.run_workbuddy_loop()
+    assert check_calls == [state["batch_id"]]
+    assert captured_timeouts == [432]
+
+
+def test_probe_auth_uses_isolated_cwd_not_credentials_dir(tmp_path: Path, monkeypatch) -> None:
+    cfg = _make_fake_cli_env(tmp_path)
+    seen_cwds: list[Path] = []
+    ok_proc = _FakePopen(stdout=json.dumps([{"type": "result", "is_error": False, "duration_ms": 120}]))
+
+    def _factory(cmd, **kwargs):
+        seen_cwds.append(Path(kwargs["cwd"]))
+        return ok_proc
+
+    adapter = wh.WorkBuddyHeadless(cfg, popen_factory=_factory, poll_interval_seconds=0.05)
+    result = adapter.probe_auth(timeout_seconds=10)
+    assert result["ok"] is True
+    assert seen_cwds[0].resolve() != Path(cfg["headless"]["credentials_dir"]).resolve()

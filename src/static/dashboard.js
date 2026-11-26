@@ -1016,6 +1016,12 @@
         workbuddyDetectionState.textContent = payload.runtime?.workbuddy_executable && !payload.runtime.workbuddy_path_valid
           ? "已保存的客户端路径无效。" : "";
       }
+      const workbuddyHeadlessStatus = document.querySelector("#workbuddyHeadlessStatus");
+      if (workbuddyHeadlessStatus && payload.runtime) {
+        workbuddyHeadlessStatus.textContent = payload.runtime.workbuddy_headless_preflight_issue
+          ? `CodeBuddy CLI 状态：${payload.runtime.workbuddy_headless_preflight_issue}`
+          : "CodeBuddy CLI 状态：本机依赖与登录目录已就绪。";
+      }
       settingsForm.querySelector('[name="erp_password"]').value = "";
       settingsForm.querySelector('[name="llm_api_key"]').value = "";
       const enrichmentKey = settingsForm.querySelector('[name="identity_enrichment_api_key"]');

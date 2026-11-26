@@ -13,6 +13,11 @@ from dingtalk_state import DingTalkState
 
 SAFE_STOP_EXIT_CODE = 20
 STOPPABLE_ACTIONS = ("suggestions", "workbuddy_loop", "workbuddy_prepare", "workbuddy_import")
+WORKBUDDY_DISPATCH_CHECKPOINT_PHASES = (
+    "WorkBuddy 投递前安全点",
+    "WorkBuddy 无头投递前安全点",
+    "WorkBuddy 无头 CLI 等待结果",
+)
 
 
 def selected_lists(options: dict[str, Any]) -> set[str]:
@@ -194,21 +199,26 @@ class TaskControl:
     @staticmethod
     def failed_workbuddy_dispatch(task: dict[str, Any]) -> bool:
         return (task.get("action") == "workbuddy_loop" and task.get("state") == "failed"
-                and task.get("phase") == "WorkBuddy 投递前安全点"
+                and task.get("phase") in WORKBUDDY_DISPATCH_CHECKPOINT_PHASES
                 and bool(task.get("details", {}).get("batch_id")))
 
     def stopped(self, *, limit: int | None = 50) -> list[dict[str, Any]]:
+        placeholders = ",".join("?" for _ in WORKBUDDY_DISPATCH_CHECKPOINT_PHASES)
         with self.connect() as db:
             self.schema(db)
-            rows = db.execute("SELECT id, action, state, phase, details FROM task_control WHERE state IN ('stopped','needs_review') "
-                              "OR (state='failed' AND action='workbuddy_loop' AND phase='WorkBuddy 投递前安全点') "
-                              "ORDER BY created DESC").fetchall()
+            rows = db.execute(
+                f"SELECT id, action, state, phase, details FROM task_control WHERE state IN ('stopped','needs_review') "
+                f"OR (state='failed' AND action='workbuddy_loop' AND phase IN ({placeholders})) "
+                "ORDER BY created DESC",
+                WORKBUDDY_DISPATCH_CHECKPOINT_PHASES,
+            ).fetchall()
         ids = [task_id for task_id, action, state, phase, details in rows
                if self.can_resume(action, state, json.loads(details))
-               or (state == "failed" and action == "workbuddy_loop" and phase == "WorkBuddy 投递前安全点")]
+               or (state == "failed" and action == "workbuddy_loop" and phase in WORKBUDDY_DISPATCH_CHECKPOINT_PHASES)]
         return [self.get(task_id) for task_id in ids[:limit]]
 
     def has_unresolved_workbuddy(self, failed_requires_review: Callable[[dict[str, Any]], bool] | None = None) -> bool:
+        placeholders = ",".join("?" for _ in WORKBUDDY_DISPATCH_CHECKPOINT_PHASES)
         with self.connect() as db:
             self.schema(db)
             row = db.execute(
@@ -218,8 +228,9 @@ class TaskControl:
             if row:
                 return True
             failed = db.execute(
-                "SELECT id FROM task_control WHERE action='workbuddy_loop' AND state='failed' "
-                "AND phase='WorkBuddy 投递前安全点' ORDER BY created DESC"
+                f"SELECT id FROM task_control WHERE action='workbuddy_loop' AND state='failed' "
+                f"AND phase IN ({placeholders}) ORDER BY created DESC",
+                WORKBUDDY_DISPATCH_CHECKPOINT_PHASES,
             ).fetchall()
         return any(failed_requires_review(self.get(task_id)) for task_id, in failed) if failed_requires_review else bool(failed)
 

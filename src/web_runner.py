@@ -304,7 +304,18 @@ class AutomationJobManager:
                 if action == "workbuddy_loop":
                     settings = load_settings()
                     workbuddy = settings.get("workbuddy") or {}
-                    if not workbuddy.get("desktop_enabled") or client_path(str(workbuddy.get("executable") or "")) is None:
+                    from workbuddy_headless import (
+                        preflight as headless_preflight,
+                        workbuddy_dispatch_mode,
+                        workbuddy_mode_enabled,
+                    )
+                    if workbuddy_dispatch_mode(workbuddy) == "headless":
+                        if not workbuddy_mode_enabled(workbuddy):
+                            raise ValueError("WorkBuddy 无头模式尚未启用，请在基础设置中开启。")
+                        issue = headless_preflight(workbuddy)
+                        if issue:
+                            raise ValueError(issue)
+                    elif not workbuddy.get("desktop_enabled") or client_path(str(workbuddy.get("executable") or "")) is None:
                         raise ValueError("WorkBuddy 联动未启用或客户端路径失效，请在基础设置核对本机配置。")
                     from workbuddy_bridge import WorkBuddyBridge
                     bridge = WorkBuddyBridge(self.root_dir, settings)
@@ -2287,14 +2298,42 @@ def _workbuddy_headless_preflight_safe(workbuddy_settings: dict[str, Any]) -> st
 def _update_workbuddy_headless_settings(settings: dict[str, Any], form: dict[str, str]) -> None:
     if "workbuddy_dispatch_mode" not in form and "workbuddy_headless_enabled" not in form:
         return
+    from workbuddy_headless import HeadlessError, preflight, validate_model_name, workbuddy_dispatch_mode
+
     wb = settings.setdefault("workbuddy", {})
-    mode = "headless" if str(form.get("workbuddy_dispatch_mode") or "").strip().lower() == "headless" else "desktop"
-    wb["dispatch_mode"] = mode
-    headless = wb.get("headless") if isinstance(wb.get("headless"), dict) else {}
-    headless["enabled"] = form.get("workbuddy_headless_enabled") == "true"
-    headless["auto_pass_enabled"] = form.get("workbuddy_headless_auto_pass_enabled") == "true"
+    if "workbuddy_dispatch_mode" in form:
+        raw_mode = str(form.get("workbuddy_dispatch_mode") or "").strip().lower()
+        if raw_mode not in {"desktop", "headless"}:
+            raise ValueError("WorkBuddy 投递模式只能是 desktop 或 headless。")
+        mode = raw_mode
+    else:
+        mode = workbuddy_dispatch_mode(wb)
+    headless = dict(wb.get("headless")) if isinstance(wb.get("headless"), dict) else {}
+    enabled = (
+        form.get("workbuddy_headless_enabled") == "true"
+        if "workbuddy_headless_enabled" in form
+        else bool(headless.get("enabled", False))
+    )
+    auto_pass_enabled = (
+        form.get("workbuddy_headless_auto_pass_enabled") == "true"
+        if "workbuddy_headless_auto_pass_enabled" in form
+        else bool(headless.get("auto_pass_enabled", False))
+    )
+    if auto_pass_enabled and not enabled:
+        raise ValueError("需先启用 CodeBuddy CLI 无头模式，才能开启无头模式整单自动通过。")
     if "workbuddy_headless_model" in form:
-        headless["model"] = str(form.get("workbuddy_headless_model") or "").strip()
+        try:
+            headless["model"] = validate_model_name(form.get("workbuddy_headless_model"), field_label="无头模型")
+        except HeadlessError as error:
+            raise ValueError(str(error)) from error
+    headless["enabled"] = enabled
+    headless["auto_pass_enabled"] = auto_pass_enabled
+    candidate = {**wb, "dispatch_mode": mode, "headless": headless}
+    if mode == "headless" and enabled:
+        issue = preflight(candidate)
+        if issue:
+            raise ValueError(f"无法启用 CodeBuddy CLI 无头模式：{issue}")
+    wb["dispatch_mode"] = mode
     wb["headless"] = headless
 
 
@@ -2336,21 +2375,24 @@ def runtime_config_snapshot() -> dict[str, Any]:
     effective_write_backend = requested_write_backend
     if requested_write_backend == "api_write_with_web_verify" and not api_write_verified:
         effective_write_backend = "api_read_web_write"
+    from workbuddy_headless import (
+        headless_settings,
+        workbuddy_dispatch_mode,
+        workbuddy_headless_auto_pass_allowed,
+        workbuddy_mode_enabled,
+    )
+    headless_cfg = headless_settings(workbuddy_settings)
     return {
         "app_version": app_version(),
         "app_frozen": bool(getattr(sys, "frozen", False)),
         "app_dry_run": "true" if app_settings.get("dry_run") else "false",
         "workbuddy_desktop_enabled": bool(workbuddy_settings.get("desktop_enabled", False)),
-        "workbuddy_dispatch_mode": "headless" if str(workbuddy_settings.get("dispatch_mode") or "").strip().lower() == "headless" else "desktop",
-        "workbuddy_headless_enabled": bool(((workbuddy_settings.get("headless") or {}) if isinstance(workbuddy_settings.get("headless"), dict) else {}).get("enabled", False)),
-        "workbuddy_headless_auto_pass_enabled": bool(((workbuddy_settings.get("headless") or {}) if isinstance(workbuddy_settings.get("headless"), dict) else {}).get("auto_pass_enabled", False)),
-        "workbuddy_headless_model": str((((workbuddy_settings.get("headless") or {}) if isinstance(workbuddy_settings.get("headless"), dict) else {}).get("model") or "")),
+        "workbuddy_dispatch_mode": workbuddy_dispatch_mode(workbuddy_settings),
+        "workbuddy_headless_enabled": bool(headless_cfg.get("enabled", False)),
+        "workbuddy_headless_auto_pass_enabled": workbuddy_headless_auto_pass_allowed(workbuddy_settings),
+        "workbuddy_headless_model": str(headless_cfg.get("model") or ""),
         "workbuddy_headless_preflight_issue": _workbuddy_headless_preflight_safe(workbuddy_settings),
-        "workbuddy_available": (
-            bool(((workbuddy_settings.get("headless") or {}) if isinstance(workbuddy_settings.get("headless"), dict) else {}).get("enabled", False))
-            if str(workbuddy_settings.get("dispatch_mode") or "").strip().lower() == "headless"
-            else bool(workbuddy_settings.get("desktop_enabled", False))
-        ),
+        "workbuddy_available": workbuddy_mode_enabled(workbuddy_settings),
         "workbuddy_executable": str(workbuddy_settings.get("executable") or ""),
         "workbuddy_project_name": str(workbuddy_settings.get("project_name") or ""),
         "workbuddy_path_valid": client_path(str(workbuddy_settings.get("executable") or "")) is not None,
