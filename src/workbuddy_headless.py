@@ -1,0 +1,606 @@
+"""Read-only headless CodeBuddy CLI adapter for WorkBuddy reagent batches.
+
+This module isolates headless CLI execution from ``workbuddy_desktop.py`` and
+``workbuddy_recovery.py``. The CLI process is restricted to read-only/search
+tools (no Write/Bash/PowerShell); all JSON validation, digest freezing, and
+atomic Excel publication are performed locally by Python.
+"""
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import re
+import shutil
+import subprocess
+import threading
+import time
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Callable
+
+from task_control import SafeStop, checkpoint
+from workbuddy_result_writer import JUDGMENTS_NAME, parse_judgments, publish_result
+from workbuddy_rules import verify_compact
+
+
+DEFAULT_HEADLESS_TOOLS = "Read,WebSearch,WebFetch,StructuredOutput"
+DEFAULT_HEADLESS_TOOLS_PLAIN = "Read,WebSearch,WebFetch"
+DEFAULT_TIMEOUT_SECONDS = 900
+DEFAULT_POLL_INTERVAL_SECONDS = 0.25
+
+AUTH_ERROR_RE = re.compile(
+    r"(not logged in|unauthorized|authentication|invalid api key|token expired|login required|未登录|登录已过期|鉴权失败|认证失败|401)",
+    re.IGNORECASE,
+)
+RATE_LIMIT_RE = re.compile(
+    r"(rate limit|too many requests|quota exceeded|overloaded|限流|额度不足|频率超限|429)",
+    re.IGNORECASE,
+)
+
+
+class HeadlessError(RuntimeError):
+    """Structured error raised by the headless CodeBuddy CLI adapter."""
+
+    def __init__(self, message: str, *, code: str = "process_failed", metadata: dict[str, Any] | None = None):
+        super().__init__(message)
+        self.code = code
+        self.metadata = dict(metadata or {})
+
+
+@dataclass(frozen=True)
+class HeadlessCliPaths:
+    node_executable: Path
+    cli_script: Path
+    credentials_dir: Path
+
+
+def headless_settings(workbuddy_config: dict[str, Any] | None) -> dict[str, Any]:
+    raw = (workbuddy_config or {}).get("headless")
+    return dict(raw) if isinstance(raw, dict) else {}
+
+
+def _default_cli_script_candidates() -> list[Path]:
+    candidates: list[Path] = []
+    appdata = os.getenv("APPDATA", "").strip()
+    if appdata:
+        candidates.append(
+            Path(appdata) / "npm" / "node_modules" / "@tencent-ai" / "codebuddy-code" / "bin" / "codebuddy"
+        )
+    npm_prefix = os.getenv("NPM_CONFIG_PREFIX", "").strip()
+    if npm_prefix:
+        candidates.append(
+            Path(npm_prefix) / "node_modules" / "@tencent-ai" / "codebuddy-code" / "bin" / "codebuddy"
+        )
+    home = Path.home()
+    candidates.append(home / ".npm-global" / "lib" / "node_modules" / "@tencent-ai" / "codebuddy-code" / "bin" / "codebuddy")
+    return candidates
+
+
+def discover_headless_cli(workbuddy_config: dict[str, Any] | None = None) -> HeadlessCliPaths | None:
+    cfg = headless_settings(workbuddy_config)
+    configured_node = str(cfg.get("node_executable") or "").strip()
+    node_path: Path | None = None
+    if configured_node:
+        candidate = Path(configured_node)
+        if candidate.is_file():
+            node_path = candidate
+    else:
+        found = shutil.which("node")
+        if found:
+            node_path = Path(found)
+    if node_path is None:
+        return None
+
+    configured_cli = str(cfg.get("cli_script") or "").strip()
+    cli_path: Path | None = None
+    if configured_cli:
+        candidate = Path(configured_cli)
+        if candidate.is_file():
+            cli_path = candidate
+    else:
+        for candidate in _default_cli_script_candidates():
+            if candidate.is_file():
+                cli_path = candidate
+                break
+    if cli_path is None:
+        return None
+
+    creds_dir = Path(str(cfg.get("credentials_dir") or "").strip() or (Path.home() / ".codebuddy"))
+    return HeadlessCliPaths(node_executable=node_path, cli_script=cli_path, credentials_dir=creds_dir)
+
+
+def preflight(workbuddy_config: dict[str, Any] | None = None) -> str:
+    """Perform local dependency checks without invoking the model."""
+    paths = discover_headless_cli(workbuddy_config)
+    if paths is None:
+        return "未找到 Node.js 或全局 @tencent-ai/codebuddy-code CLI 脚本"
+    if not paths.credentials_dir.exists():
+        return f"未检测到 CodeBuddy 登录目录（{paths.credentials_dir}），请先在终端执行 codebuddy.cmd 登录"
+    return ""
+
+
+def build_headless_schema() -> dict[str, Any]:
+    return {
+        "type": "object",
+        "properties": {
+            "batch_id": {"type": "string"},
+            "judgments": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "记录ID": {"type": "string"},
+                        "物化特性类别": {"type": "string"},
+                        "判断依据": {"type": "string"},
+                    },
+                    "required": ["记录ID", "物化特性类别", "判断依据"],
+                },
+            },
+        },
+        "required": ["batch_id", "judgments"],
+    }
+
+
+def build_headless_prompt(
+    state: dict[str, Any],
+    batch_dir: Path,
+    *,
+    instructions_text: str = "",
+) -> str:
+    batch_id = str(state["batch_id"])
+    items_payload = [
+        {
+            "记录ID": str(item.get("key") or item["input"].get("记录ID") or ""),
+            "试剂名称": str(item["input"].get("试剂名称") or ""),
+            "CAS号": str(item["input"].get("CAS号") or ""),
+            "规格": str(item["input"].get("规格") or item["input"].get("规格单位") or ""),
+        }
+        for item in state["items"]
+    ]
+    items_json = json.dumps(items_payload, ensure_ascii=False, indent=2)
+    header = instructions_text.strip()
+    parts = [header] if header else []
+    parts.append(
+        "\n".join([
+            "【无头只读结构化判定模式】",
+            f"批次ID：{batch_id}",
+            f"规则目录：{batch_dir / 'rules_compact'}（请完整读取 manifest.json 及所有分段文本；不要写任何文件，不要运行终端或脚本）。",
+            f"本批待判定试剂列表（共 {len(items_payload)} 条）：",
+            items_json,
+            "",
+            "请严格按本批规则逐条独立判定，原样保留每条 记录ID，不得遗漏、重复或篡改。",
+            "最终通过 StructuredOutput（或纯 JSON 对象）返回：{\"batch_id\": \"...\", \"judgments\": [{\"记录ID\": \"...\", \"物化特性类别\": \"...\", \"判断依据\": \"...\"}]}。",
+        ])
+    )
+    return "\n\n".join(parts)
+
+
+def classify_cli_error(text: str) -> str:
+    if AUTH_ERROR_RE.search(text or ""):
+        return "auth_failed"
+    if RATE_LIMIT_RE.search(text or ""):
+        return "rate_limited"
+    return "process_failed"
+
+
+def _extract_result_envelope(raw_stdout: str) -> dict[str, Any]:
+    text = (raw_stdout or "").strip()
+    if not text:
+        raise HeadlessError("CodeBuddy 无头 CLI 未返回任何输出。", code="protocol_error")
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError as error:
+        raise HeadlessError(f"CodeBuddy 无头 CLI 输出不是合法 JSON：{error}", code="protocol_error") from error
+    if isinstance(parsed, dict):
+        return parsed
+    if isinstance(parsed, list) and parsed:
+        for event in reversed(parsed):
+            if isinstance(event, dict) and (event.get("type") == "result" or "structured_output" in event):
+                return event
+        if isinstance(parsed[-1], dict):
+            return parsed[-1]
+    raise HeadlessError("CodeBuddy 无头 CLI 输出缺少结果事件。", code="protocol_error")
+
+
+def _extract_structured_payload(envelope: dict[str, Any]) -> dict[str, Any]:
+    structured = envelope.get("structured_output")
+    if isinstance(structured, dict):
+        return structured
+    result_text = str(envelope.get("result") or "").strip()
+    if not result_text:
+        raise HeadlessError("CodeBuddy 无头 CLI 未返回结构化判定内容。", code="protocol_error")
+    if result_text.startswith("```"):
+        lines = result_text.splitlines()
+        if len(lines) >= 3:
+            result_text = "\n".join(lines[1:-1]).strip()
+    match = re.search(r"\{[\s\S]*\}", result_text)
+    if not match:
+        raise HeadlessError("CodeBuddy 无头 CLI 返回文本中未找到 JSON 对象。", code="protocol_error")
+    try:
+        payload = json.loads(match.group(0))
+    except json.JSONDecodeError as error:
+        raise HeadlessError(f"CodeBuddy 无头 CLI 返回的判定 JSON 无法解析：{error}", code="protocol_error") from error
+    if not isinstance(payload, dict):
+        raise HeadlessError("CodeBuddy 无头 CLI 返回的判定顶层不是 JSON 对象。", code="protocol_error")
+    return payload
+
+
+def parse_cli_output(
+    raw_stdout: str,
+    *,
+    expected_batch_id: str,
+    expected_record_ids: set[str],
+    raw_stderr: str = "",
+) -> tuple[list[dict[str, str]], dict[str, Any]]:
+    """Independently validate CLI envelope, batch_id, and complete record set."""
+    envelope = _extract_result_envelope(raw_stdout)
+    metadata = {
+        "subtype": str(envelope.get("subtype") or ""),
+        "is_error": bool(envelope.get("is_error")),
+        "duration_ms": envelope.get("duration_ms"),
+        "num_turns": envelope.get("num_turns"),
+        "permission_denials_count": len(envelope.get("permission_denials") or []),
+    }
+    if envelope.get("is_error"):
+        detail = str(envelope.get("result") or raw_stderr or "CodeBuddy CLI 返回错误").strip()
+        code = classify_cli_error(detail)
+        if code == "auth_failed":
+            raise HeadlessError(
+                "CodeBuddy 登录态已失效，请在终端执行 codebuddy.cmd 重新登录后重试。",
+                code=code,
+                metadata=metadata,
+            )
+        if code == "rate_limited":
+            raise HeadlessError(f"CodeBuddy 触发限流或额度限制：{detail[:200]}", code=code, metadata=metadata)
+        raise HeadlessError(f"CodeBuddy 无头执行失败：{detail[:200]}", code=code, metadata=metadata)
+
+    payload = _extract_structured_payload(envelope)
+    actual_batch_id = str(payload.get("batch_id") or "").strip()
+    if actual_batch_id != expected_batch_id:
+        raise HeadlessError(
+            f"无头返回批次ID不匹配：期望 {expected_batch_id}，实际 {actual_batch_id or '<空>'}。",
+            code="protocol_error",
+            metadata=metadata,
+        )
+    judgments = payload.get("judgments")
+    if not isinstance(judgments, list) or not judgments:
+        raise HeadlessError("无头返回缺少 judgments 列表或列表为空。", code="protocol_error", metadata=metadata)
+
+    normalized: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for row in judgments:
+        if not isinstance(row, dict):
+            raise HeadlessError("无头返回包含非对象条目。", code="protocol_error", metadata=metadata)
+        record_id = str(row.get("记录ID") or "").strip()
+        category = str(row.get("物化特性类别") or "").strip()
+        reason = str(row.get("判断依据") or "").strip()
+        if not record_id or not category or not reason:
+            raise HeadlessError("无头返回存在空记录ID、空类别或空判断依据。", code="protocol_error", metadata=metadata)
+        if record_id in seen:
+            raise HeadlessError(f"无头返回包含重复记录ID：{record_id}。", code="protocol_error", metadata=metadata)
+        if record_id not in expected_record_ids:
+            raise HeadlessError(f"无头返回包含跨批或未知记录ID：{record_id}。", code="protocol_error", metadata=metadata)
+        seen.add(record_id)
+        normalized.append({"记录ID": record_id, "物化特性类别": category, "判断依据": reason})
+
+    missing = expected_record_ids - seen
+    if missing:
+        raise HeadlessError(
+            f"无头返回遗漏 {len(missing)} 条记录（疑似截断）。",
+            code="protocol_error",
+            metadata=metadata,
+        )
+    return normalized, metadata
+
+
+def terminate_process_tree(proc: subprocess.Popen[str]) -> None:
+    """Terminate the CLI child process and any descendants cleanly."""
+    if proc.poll() is not None:
+        return
+    if os.name == "nt":
+        try:
+            subprocess.run(
+                ["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                capture_output=True,
+                timeout=10,
+                check=False,
+            )
+        except Exception:
+            pass
+    try:
+        if proc.poll() is None:
+            proc.terminate()
+            proc.wait(timeout=3)
+    except Exception:
+        try:
+            proc.kill()
+            proc.wait(timeout=3)
+        except Exception:
+            pass
+
+
+def _atomic_write_bytes(path: Path, payload: bytes) -> None:
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        with tmp.open("wb") as stream:
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(tmp, path)
+    finally:
+        if tmp.exists():
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+
+
+def freeze_and_publish_headless_result(
+    bridge: Any,
+    state: dict[str, Any],
+    judgments: list[dict[str, str]],
+) -> Path:
+    """Verify rule snapshot integrity, freeze judgments digest, and publish result.xlsx."""
+    batch_dir = bridge.batch_path(state)
+    rules_path = batch_dir / "rules.xlsx"
+    if not rules_path.is_file() or hashlib.sha256(rules_path.read_bytes()).hexdigest() != state["rules_sha256"]:
+        raise HeadlessError("本批规则快照缺失或已被修改，禁止发布结果。", code="protocol_error")
+    if state.get("compact_rules_sha256"):
+        verify_compact(batch_dir, state["rules_sha256"], state["compact_rules_sha256"])
+
+    payload = json.dumps(judgments, ensure_ascii=False, indent=2).encode("utf-8")
+    expected_ids = {str(item["key"]) for item in state["items"]}
+    parse_judgments(payload, expected_ids)
+
+    digest = hashlib.sha256(payload).hexdigest()
+    if state.get("judgments_sha256", digest) != digest:
+        raise HeadlessError("判定结果在冻结后发生变化，保留现场并停止。", code="protocol_error")
+
+    _atomic_write_bytes(batch_dir / JUDGMENTS_NAME, payload)
+    state["judgments_sha256"] = digest
+    bridge.save(state)
+    publish_result(batch_dir, judgments_payload=payload)
+    return batch_dir / "result.xlsx"
+
+
+def _pid_is_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    if os.name == "nt":
+        try:
+            proc = subprocess.run(
+                ["tasklist", "/FI", f"PID eq {pid}", "/NH"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+            return str(pid) in (proc.stdout or "")
+        except Exception:
+            return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+class WorkBuddyHeadless:
+    """Execute WorkBuddy reagent batches via read-only CodeBuddy CLI."""
+
+    def __init__(
+        self,
+        workbuddy_config: dict[str, Any] | None = None,
+        *,
+        popen_factory: Callable[..., subprocess.Popen[str]] = subprocess.Popen,
+        poll_interval_seconds: float = DEFAULT_POLL_INTERVAL_SECONDS,
+    ):
+        self.workbuddy_config = dict(workbuddy_config or {})
+        self.config = headless_settings(self.workbuddy_config)
+        self._popen = popen_factory
+        self._poll_interval = max(0.05, float(poll_interval_seconds))
+
+    def build_command(self, paths: HeadlessCliPaths, batch_dir: Path, *, use_json_schema: bool = True) -> list[str]:
+        configured_tools = str(self.config.get("tools") or "").strip()
+        if not configured_tools:
+            configured_tools = DEFAULT_HEADLESS_TOOLS if use_json_schema else DEFAULT_HEADLESS_TOOLS_PLAIN
+        elif use_json_schema and "StructuredOutput" not in {t.strip() for t in configured_tools.split(",")}:
+            configured_tools = f"{configured_tools},StructuredOutput"
+
+        command = [
+            str(paths.node_executable),
+            str(paths.cli_script),
+            "-p",
+            "--output-format",
+            "json",
+            "--tools",
+            configured_tools,
+            "--strict-mcp-config",
+            "--no-session-persistence",
+            "--add-dir",
+            str(batch_dir),
+        ]
+        if use_json_schema:
+            command.extend(["--json-schema", json.dumps(build_headless_schema(), ensure_ascii=False)])
+        model = str(self.config.get("model") or "").strip()
+        if model:
+            command.extend(["--model", model])
+        fallback_model = str(self.config.get("fallback_model") or "").strip()
+        if fallback_model:
+            command.extend(["--fallback-model", fallback_model])
+        return command
+
+    def probe_auth(self, *, timeout_seconds: int = 30) -> dict[str, Any]:
+        """Run a zero-business-data probe to verify live CodeBuddy authentication."""
+        issue = preflight(self.workbuddy_config)
+        if issue:
+            raise HeadlessError(issue, code="dependency_missing")
+        paths = discover_headless_cli(self.workbuddy_config)
+        assert paths is not None
+        command = [
+            str(paths.node_executable),
+            str(paths.cli_script),
+            "-p",
+            "--output-format",
+            "json",
+            "--tools",
+            "",
+            "--strict-mcp-config",
+            "--no-session-persistence",
+        ]
+        stdout_text, stderr_text, returncode = self._run_process(
+            command,
+            stdin_text="Reply with OK only.",
+            cwd=paths.credentials_dir,
+            timeout_seconds=timeout_seconds,
+            on_pid=None,
+            check_stop=None,
+        )
+        envelope = _extract_result_envelope(stdout_text)
+        if returncode != 0 or envelope.get("is_error"):
+            detail = str(envelope.get("result") or stderr_text or "认证探针失败").strip()
+            code = classify_cli_error(detail)
+            raise HeadlessError(detail[:200], code=code)
+        return {"ok": True, "duration_ms": envelope.get("duration_ms")}
+
+    def execute_batch(
+        self,
+        bridge: Any,
+        state: dict[str, Any],
+        *,
+        instructions_text: str = "",
+        timeout_seconds: int | None = None,
+        check_stop: Callable[[], None] | None = None,
+    ) -> dict[str, Any]:
+        """Run a single batch in read-only headless mode and atomically publish result.xlsx."""
+        issue = preflight(self.workbuddy_config)
+        if issue:
+            raise HeadlessError(issue, code="dependency_missing")
+        paths = discover_headless_cli(self.workbuddy_config)
+        assert paths is not None
+
+        old_pid = int(state.get("headless_pid") or 0)
+        if old_pid and _pid_is_alive(old_pid):
+            raise HeadlessError(
+                f"批次 {state['batch_id']} 原无头进程（PID {old_pid}）仍在运行，禁止重复启动。",
+                code="process_failed",
+            )
+
+        batch_dir = bridge.batch_path(state)
+        if not (batch_dir / "rules_compact" / "manifest.json").is_file():
+            raise HeadlessError("无头只读模式要求本批已生成 rules_compact 分片规则。", code="protocol_error")
+        if state.get("compact_rules_sha256"):
+            verify_compact(batch_dir, state["rules_sha256"], state["compact_rules_sha256"])
+
+        use_json_schema = bool(self.config.get("use_json_schema", True))
+        budget = int(timeout_seconds or self.config.get("timeout_seconds") or DEFAULT_TIMEOUT_SECONDS)
+        prompt = build_headless_prompt(state, batch_dir, instructions_text=instructions_text)
+        command = self.build_command(paths, batch_dir, use_json_schema=use_json_schema)
+
+        def record_pid(pid: int) -> None:
+            state["dispatch_mode"] = "headless"
+            state["headless_pid"] = pid
+            bridge.save(state)
+
+        stdout_text, stderr_text, returncode = self._run_process(
+            command,
+            stdin_text=prompt,
+            cwd=batch_dir,
+            timeout_seconds=budget,
+            on_pid=record_pid,
+            check_stop=check_stop,
+        )
+        state["headless_pid"] = 0
+        bridge.save(state)
+
+        if returncode != 0 and not stdout_text.strip():
+            detail = (stderr_text or f"CLI exited with code {returncode}").strip()
+            raise HeadlessError(detail[:300], code=classify_cli_error(detail))
+
+        expected_ids = {str(item["key"]) for item in state["items"]}
+        judgments, metadata = parse_cli_output(
+            stdout_text,
+            expected_batch_id=str(state["batch_id"]),
+            expected_record_ids=expected_ids,
+            raw_stderr=stderr_text,
+        )
+        freeze_and_publish_headless_result(bridge, state, judgments)
+        return metadata
+
+    def _run_process(
+        self,
+        command: list[str],
+        *,
+        stdin_text: str,
+        cwd: Path,
+        timeout_seconds: int,
+        on_pid: Callable[[int], None] | None,
+        check_stop: Callable[[], None] | None,
+    ) -> tuple[str, str, int]:
+        proc = self._popen(
+            command,
+            cwd=str(cwd),
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        if on_pid is not None:
+            on_pid(int(proc.pid))
+
+        stdout_chunks: list[str] = []
+        stderr_chunks: list[str] = []
+
+        def _drain(stream: Any, target: list[str]) -> None:
+            if stream is None:
+                return
+            try:
+                target.append(stream.read())
+            finally:
+                try:
+                    stream.close()
+                except Exception:
+                    pass
+
+        t_out = threading.Thread(target=_drain, args=(proc.stdout, stdout_chunks), daemon=True)
+        t_err = threading.Thread(target=_drain, args=(proc.stderr, stderr_chunks), daemon=True)
+        t_out.start()
+        t_err.start()
+
+        if proc.stdin is not None:
+            try:
+                proc.stdin.write(stdin_text)
+                proc.stdin.flush()
+            except BrokenPipeError:
+                pass
+            finally:
+                try:
+                    proc.stdin.close()
+                except Exception:
+                    pass
+
+        deadline = time.monotonic() + max(1, int(timeout_seconds))
+        try:
+            while proc.poll() is None:
+                if check_stop is not None:
+                    check_stop()
+                else:
+                    checkpoint("WorkBuddy 无头 CLI 等待结果")
+                if time.monotonic() >= deadline:
+                    terminate_process_tree(proc)
+                    raise HeadlessError(
+                        f"CodeBuddy 无头判定超时（>{timeout_seconds}s），已终止子进程树。",
+                        code="timeout",
+                    )
+                time.sleep(self._poll_interval)
+        except SafeStop:
+            terminate_process_tree(proc)
+            raise
+        finally:
+            t_out.join(timeout=5)
+            t_err.join(timeout=5)
+
+        return "".join(stdout_chunks), "".join(stderr_chunks), int(proc.returncode or 0)

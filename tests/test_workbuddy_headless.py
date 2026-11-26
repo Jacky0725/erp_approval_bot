@@ -1,0 +1,316 @@
+"""Unit tests for the read-only headless CodeBuddy CLI adapter."""
+from __future__ import annotations
+
+import hashlib
+import io
+import json
+import subprocess
+import sys
+import time
+from pathlib import Path
+from typing import Any
+
+import openpyxl
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+
+from task_control import SafeStop
+from workbuddy_bridge import WorkBuddyBridge
+import workbuddy_headless as wh
+
+
+def _make_fake_cli_env(tmp_path: Path) -> dict[str, Any]:
+    node = tmp_path / "node.exe"
+    node.write_bytes(b"fake-node")
+    cli = tmp_path / "codebuddy"
+    cli.write_text("// fake cli", encoding="utf-8")
+    creds = tmp_path / ".codebuddy"
+    creds.mkdir()
+    return {
+        "headless": {
+            "enabled": True,
+            "node_executable": str(node),
+            "cli_script": str(cli),
+            "credentials_dir": str(creds),
+            "timeout_seconds": 30,
+        }
+    }
+
+
+def _make_minimal_rules_workbook(path: Path) -> None:
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "rules"
+    ws.append(["rule_id", "category", "condition"])
+    ws.append(["R1", "易燃液体", "flash_point < 60"])
+    wb.save(path)
+
+
+def _prepare_isolated_batch(tmp_path: Path) -> tuple[WorkBuddyBridge, dict[str, Any]]:
+    (tmp_path / "config").mkdir(parents=True, exist_ok=True)
+    _make_minimal_rules_workbook(tmp_path / "config" / "rules_structured.xlsx")
+    settings = {
+        "paths": {"structured_rules_excel": "config/rules_structured.xlsx"},
+        "workbuddy": {
+            "batch_size": 2,
+            "batch_dir": "data/workbuddy",
+            "compact_rules": True,
+            "fixed_result_writer": True,
+            **_make_fake_cli_env(tmp_path),
+        },
+    }
+    bridge = WorkBuddyBridge(tmp_path, settings)
+    bridge.publish_compact_rules()
+    records = [
+        {"清单号": "SJTEST01", "序号": "1", "_erp_record_id": "rec-1", "试剂名称": "示例试剂A", "CAS号": "64-17-5", "规格单位": "500ml", "试剂数量": "1"},
+        {"清单号": "SJTEST01", "序号": "2", "_erp_record_id": "rec-2", "试剂名称": "示例试剂B", "CAS号": "7647-14-5", "规格单位": "500g", "试剂数量": "1"},
+    ]
+    state = bridge.prepare(records, compact=True)
+    assert state is not None
+    return bridge, state
+
+
+class _FakePopen:
+    def __init__(self, *, stdout: str = "", stderr: str = "", returncode: int = 0, delay_seconds: float = 0.0, pid: int = 99999):
+        self.pid = pid
+        self.stdin = io.StringIO()
+        self._stdin_captured = ""
+        orig_close = self.stdin.close
+
+        def _capture_close() -> None:
+            self._stdin_captured = self.stdin.getvalue()
+            orig_close()
+
+        self.stdin.close = _capture_close  # type: ignore[method-assign]
+        self.stdout = io.StringIO(stdout)
+        self.stderr = io.StringIO(stderr)
+        self._returncode = returncode
+        self._started = time.monotonic()
+        self._delay = delay_seconds
+        self._terminated = False
+        self.returncode: int | None = None
+
+    def poll(self) -> int | None:
+        if self._terminated:
+            self.returncode = -1
+            return self.returncode
+        if time.monotonic() - self._started >= self._delay:
+            self.returncode = self._returncode
+            return self.returncode
+        return None
+
+    def terminate(self) -> None:
+        self._terminated = True
+        self.returncode = -1
+
+    def kill(self) -> None:
+        self._terminated = True
+        self.returncode = -1
+
+    def wait(self, timeout: float | None = None) -> int:
+        self.returncode = self._returncode if not self._terminated else -1
+        return self.returncode
+
+
+def test_preflight_checks_node_cli_and_credentials(tmp_path: Path) -> None:
+    cfg = _make_fake_cli_env(tmp_path)
+    assert wh.preflight(cfg) == ""
+
+    missing_creds = {"headless": {**cfg["headless"], "credentials_dir": str(tmp_path / "missing")}}
+    assert "登录目录" in wh.preflight(missing_creds)
+
+    missing_cli = {"headless": {**cfg["headless"], "cli_script": str(tmp_path / "missing_cli")}}
+    assert "未找到" in wh.preflight(missing_cli)
+
+
+def test_build_command_enforces_readonly_tools_and_scoped_add_dir(tmp_path: Path) -> None:
+    cfg = _make_fake_cli_env(tmp_path)
+    cfg["headless"]["model"] = "hy4-preview"
+    cfg["headless"]["fallback_model"] = "deepseek-v4.1-flash"
+    adapter = wh.WorkBuddyHeadless(cfg)
+    paths = wh.discover_headless_cli(cfg)
+    assert paths is not None
+
+    batch_dir = tmp_path / "batch_1"
+    cmd = adapter.build_command(paths, batch_dir, use_json_schema=True)
+    assert cmd[0] == str(paths.node_executable)
+    assert cmd[1] == str(paths.cli_script)
+    assert "--strict-mcp-config" in cmd
+    assert "--no-session-persistence" in cmd
+    assert "--json-schema" in cmd
+    assert cmd[cmd.index("--add-dir") + 1] == str(batch_dir)
+    tools = cmd[cmd.index("--tools") + 1]
+    assert "StructuredOutput" in tools
+    assert "Bash" not in tools and "Write" not in tools and "PowerShell" not in tools
+    assert cmd[cmd.index("--model") + 1] == "hy4-preview"
+    assert cmd[cmd.index("--fallback-model") + 1] == "deepseek-v4.1-flash"
+
+
+def test_parse_cli_output_accepts_structured_output_and_plain_json() -> None:
+    expected_ids = {"k1", "k2"}
+    judgments = [
+        {"记录ID": "k1", "物化特性类别": "易燃液体", "判断依据": "规则命中1"},
+        {"记录ID": "k2", "物化特性类别": "普通类", "判断依据": "规则命中2"},
+    ]
+    structured_stdout = json.dumps([
+        {"type": "system", "subtype": "init"},
+        {
+            "type": "result",
+            "subtype": "success",
+            "is_error": False,
+            "duration_ms": 1234,
+            "num_turns": 3,
+            "permission_denials": [],
+            "structured_output": {"batch_id": "B001", "judgments": judgments},
+        },
+    ], ensure_ascii=False)
+    parsed, meta = wh.parse_cli_output(structured_stdout, expected_batch_id="B001", expected_record_ids=expected_ids)
+    assert len(parsed) == 2
+    assert meta["duration_ms"] == 1234
+    assert meta["permission_denials_count"] == 0
+
+    plain_stdout = json.dumps([
+        {
+            "type": "result",
+            "subtype": "success",
+            "is_error": False,
+            "result": "```json\n" + json.dumps({"batch_id": "B001", "judgments": judgments}, ensure_ascii=False) + "\n```",
+        }
+    ], ensure_ascii=False)
+    parsed2, _ = wh.parse_cli_output(plain_stdout, expected_batch_id="B001", expected_record_ids=expected_ids)
+    assert parsed2 == parsed
+
+
+@pytest.mark.parametrize("bad_case", [
+    "wrong_batch", "missing_record", "duplicate_record", "extra_record", "empty_category", "truncated_json",
+])
+def test_parse_cli_output_rejects_protocol_violations(bad_case: str) -> None:
+    expected_ids = {"k1", "k2"}
+    if bad_case == "truncated_json":
+        with pytest.raises(wh.HeadlessError) as exc:
+            wh.parse_cli_output('[{"type":"result", "result": "{broken', expected_batch_id="B1", expected_record_ids=expected_ids)
+        assert exc.value.code == "protocol_error"
+        return
+
+    payload: dict[str, Any] = {
+        "batch_id": "B2" if bad_case == "wrong_batch" else "B1",
+        "judgments": [
+            {"记录ID": "k1", "物化特性类别": "" if bad_case == "empty_category" else "易燃液体", "判断依据": "依据1"},
+            {"记录ID": "k2", "物化特性类别": "普通类", "判断依据": "依据2"},
+        ],
+    }
+    if bad_case == "missing_record":
+        payload["judgments"].pop()
+    elif bad_case == "duplicate_record":
+        payload["judgments"][1]["记录ID"] = "k1"
+    elif bad_case == "extra_record":
+        payload["judgments"].append({"记录ID": "k999", "物化特性类别": "普通类", "判断依据": "跨批"})
+
+    raw = json.dumps([{"type": "result", "is_error": False, "structured_output": payload}], ensure_ascii=False)
+    with pytest.raises(wh.HeadlessError) as exc:
+        wh.parse_cli_output(raw, expected_batch_id="B1", expected_record_ids=expected_ids)
+    assert exc.value.code == "protocol_error"
+
+
+@pytest.mark.parametrize("message,expected_code", [
+    ("Error: 401 unauthorized - not logged in", "auth_failed"),
+    ("HTTP 429 rate limit exceeded", "rate_limited"),
+    ("Unexpected internal failure", "process_failed"),
+])
+def test_parse_cli_output_classifies_error_types(message: str, expected_code: str) -> None:
+    raw = json.dumps([{"type": "result", "is_error": True, "result": message}], ensure_ascii=False)
+    with pytest.raises(wh.HeadlessError) as exc:
+        wh.parse_cli_output(raw, expected_batch_id="B1", expected_record_ids={"k1"})
+    assert exc.value.code == expected_code
+
+
+def test_execute_batch_passes_long_utf8_stdin_freezes_digest_and_publishes_result(tmp_path: Path, monkeypatch) -> None:
+    bridge, state = _prepare_isolated_batch(tmp_path)
+    keys = [item["key"] for item in state["items"]]
+    fake_stdout = json.dumps([
+        {
+            "type": "result",
+            "subtype": "success",
+            "is_error": False,
+            "duration_ms": 800,
+            "num_turns": 2,
+            "permission_denials": [],
+            "structured_output": {
+                "batch_id": state["batch_id"],
+                "judgments": [
+                    {"记录ID": keys[0], "物化特性类别": "易燃液体", "判断依据": "脱敏依据A"},
+                    {"记录ID": keys[1], "物化特性类别": "普通类", "判断依据": "脱敏依据B"},
+                ],
+            },
+        }
+    ], ensure_ascii=False)
+    captured_popen: dict[str, Any] = {}
+    fake_proc = _FakePopen(stdout=fake_stdout)
+
+    def _factory(cmd, **kwargs):
+        captured_popen["cmd"] = cmd
+        captured_popen["kwargs"] = kwargs
+        return fake_proc
+
+    monkeypatch.setattr(wh, "_pid_is_alive", lambda _pid: False)
+    adapter = wh.WorkBuddyHeadless(bridge.config, popen_factory=_factory, poll_interval_seconds=0.05)
+    long_instructions = "规则说明：" + ("中文脱敏占位" * 6000)  # >36KB UTF-8 via stdin
+
+    meta = adapter.execute_batch(bridge, state, instructions_text=long_instructions, check_stop=lambda: None)
+
+    assert meta["duration_ms"] == 800
+    assert len(fake_proc._stdin_captured.encode("utf-8")) > 40000
+    assert state["dispatch_mode"] == "headless"
+    assert state["headless_pid"] == 0
+    assert state.get("judgments_sha256")
+    batch_dir = bridge.batch_path(state)
+    assert (batch_dir / "result.xlsx").is_file()
+
+    # Verify published result.xlsx passes WorkBuddyBridge's full production validator
+    bridge.load_results(state)
+    categories = {item["input"]["试剂名称"]: item["result"]["物化特性类别"] for item in state["items"]}
+    assert categories == {"示例试剂A": "易燃液体", "示例试剂B": "普通类"}
+
+
+def test_execute_batch_timeout_and_safe_stop_terminate_process_tree(tmp_path: Path, monkeypatch) -> None:
+    bridge, state = _prepare_isolated_batch(tmp_path)
+    killed: list[int] = []
+    monkeypatch.setattr(wh, "terminate_process_tree", lambda proc: (killed.append(proc.pid), proc.terminate()))
+    monkeypatch.setattr(wh, "_pid_is_alive", lambda _pid: False)
+
+    # 1. Timeout kills process tree
+    slow_proc = _FakePopen(delay_seconds=10.0, pid=11111)
+    adapter = wh.WorkBuddyHeadless(bridge.config, popen_factory=lambda *a, **k: slow_proc, poll_interval_seconds=0.05)
+    with pytest.raises(wh.HeadlessError) as exc:
+        adapter.execute_batch(bridge, state, timeout_seconds=1, check_stop=lambda: None)
+    assert exc.value.code == "timeout"
+    assert 11111 in killed
+
+    # 2. SafeStop kills process tree and propagates SafeStop
+    stop_proc = _FakePopen(delay_seconds=10.0, pid=22222)
+    adapter2 = wh.WorkBuddyHeadless(bridge.config, popen_factory=lambda *a, **k: stop_proc, poll_interval_seconds=0.05)
+
+    def _trigger_stop() -> None:
+        raise SafeStop("operator requested stop")
+
+    with pytest.raises(SafeStop):
+        adapter2.execute_batch(bridge, state, timeout_seconds=10, check_stop=_trigger_stop)
+    assert 22222 in killed
+
+
+def test_freeze_and_publish_rejects_rule_tampering_and_frozen_digest_change(tmp_path: Path) -> None:
+    bridge, state = _prepare_isolated_batch(tmp_path)
+    keys = [item["key"] for item in state["items"]]
+    judgments = [
+        {"记录ID": keys[0], "物化特性类别": "易燃液体", "判断依据": "依据A"},
+        {"记录ID": keys[1], "物化特性类别": "普通类", "判断依据": "依据B"},
+    ]
+    state["judgments_sha256"] = hashlib.sha256(b"other-frozen-content").hexdigest()
+    with pytest.raises(wh.HeadlessError, match="冻结后发生变化"):
+        wh.freeze_and_publish_headless_result(bridge, state, judgments)
+
+    state.pop("judgments_sha256", None)
+    (bridge.batch_path(state) / "rules.xlsx").write_bytes(b"tampered")
+    with pytest.raises(wh.HeadlessError, match="规则快照"):
+        wh.freeze_and_publish_headless_result(bridge, state, judgments)

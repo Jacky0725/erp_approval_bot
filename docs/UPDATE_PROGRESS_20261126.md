@@ -29,3 +29,14 @@
 - [ ] 重启本地 Web UI / 钉钉机器人后台进程，使 11-25 弹窗确认修复与 11-26 全入口默认 `auto_pass` 生效。
 - [ ] 在真实 ERP 环境下实测验收一次 WorkBuddy 整单自动通过闭环。
 - [ ] 确认无误后推送本地 `main` 分支至远端。
+
+
+---
+
+## 4. WorkBuddy 无头模式阶段 1 进展（2026-11-26 下午）
+
+- **方案交叉审查与修订**：吸收 Codex 审查意见，更新 [`docs/WORKBUDDY_HEADLESS_INTEGRATION_PLAN_20261126.md`](file:///d:/codex/reagent-approval-bot/docs/WORKBUDDY_HEADLESS_INTEGRATION_PLAN_20261126.md) 为 v2 修订版（明确现有桌面功能零影响、批次级 `dispatch_mode`/`headless_pid` 崩溃恢复、最小数据范围 `--add-dir` + `--strict-mcp-config`、复用摘要冻结原子发布、首轮不开放自动通过）。
+- **CLI 专项技术验证（固定版本 `@tencent-ai/codebuddy-code@2.187.0`）**：
+  - UTF-8 stdin 管道 62KB 中文长输入：`exit=0`，耗时 **6.5s**，完整准确返回。
+  - `--tools Read,WebSearch,WebFetch,StructuredOutput` + `--json-schema` + `--strict-mcp-config`：`exit=0`，耗时 **7.1s**，原生返回 `structured_output`。
+- **阶段 1 隔离实现**：新增 [`src/workbuddy_headless.py`](file:///d:/codex/reagent-approval-bot/src/workbuddy_headless.py) 与 [`tests/test_workbuddy_headless.py`](file:///d:/codex/reagent-approval-bot/tests/test_workbuddy_headless.py)；未修改任何现有业务流程、桌面适配器或默认配置。
