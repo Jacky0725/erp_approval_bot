@@ -2276,6 +2276,28 @@ def normalize_pipeline_version(value: object, *, emit_deprecation: bool = False)
     return "v1"
 
 
+def _workbuddy_headless_preflight_safe(workbuddy_settings: dict[str, Any]) -> str:
+    try:
+        from workbuddy_headless import preflight
+        return preflight(workbuddy_settings)
+    except Exception as error:
+        return str(error)
+
+
+def _update_workbuddy_headless_settings(settings: dict[str, Any], form: dict[str, str]) -> None:
+    if "workbuddy_dispatch_mode" not in form and "workbuddy_headless_enabled" not in form:
+        return
+    wb = settings.setdefault("workbuddy", {})
+    mode = "headless" if str(form.get("workbuddy_dispatch_mode") or "").strip().lower() == "headless" else "desktop"
+    wb["dispatch_mode"] = mode
+    headless = wb.get("headless") if isinstance(wb.get("headless"), dict) else {}
+    headless["enabled"] = form.get("workbuddy_headless_enabled") == "true"
+    headless["auto_pass_enabled"] = form.get("workbuddy_headless_auto_pass_enabled") == "true"
+    if "workbuddy_headless_model" in form:
+        headless["model"] = str(form.get("workbuddy_headless_model") or "").strip()
+    wb["headless"] = headless
+
+
 def runtime_config_snapshot() -> dict[str, Any]:
     from workbuddy_bridge import web_batch_sizes
 
@@ -2321,6 +2343,9 @@ def runtime_config_snapshot() -> dict[str, Any]:
         "workbuddy_desktop_enabled": bool(workbuddy_settings.get("desktop_enabled", False)),
         "workbuddy_dispatch_mode": "headless" if str(workbuddy_settings.get("dispatch_mode") or "").strip().lower() == "headless" else "desktop",
         "workbuddy_headless_enabled": bool(((workbuddy_settings.get("headless") or {}) if isinstance(workbuddy_settings.get("headless"), dict) else {}).get("enabled", False)),
+        "workbuddy_headless_auto_pass_enabled": bool(((workbuddy_settings.get("headless") or {}) if isinstance(workbuddy_settings.get("headless"), dict) else {}).get("auto_pass_enabled", False)),
+        "workbuddy_headless_model": str((((workbuddy_settings.get("headless") or {}) if isinstance(workbuddy_settings.get("headless"), dict) else {}).get("model") or "")),
+        "workbuddy_headless_preflight_issue": _workbuddy_headless_preflight_safe(workbuddy_settings),
         "workbuddy_available": (
             bool(((workbuddy_settings.get("headless") or {}) if isinstance(workbuddy_settings.get("headless"), dict) else {}).get("enabled", False))
             if str(workbuddy_settings.get("dispatch_mode") or "").strip().lower() == "headless"
@@ -2461,6 +2486,7 @@ def _save_runtime_config(form: dict[str, str]) -> dict[str, Any]:
     persona = normalize_persona_prompt(form["dingtalk_chat_persona_prompt"]) if "dingtalk_chat_persona_prompt" in form else None
     existing_settings = load_settings()
     update_client_settings(existing_settings, form)
+    _update_workbuddy_headless_settings(existing_settings, form)
     admins = parse_target_list_numbers(form.get("dingtalk_admin_user_ids", ""))
     if any(value.count("/") != 1 or not all(value.split("/")) for value in admins):
         raise ValueError("管理员 ID 必须使用 企业ID/用户ID 格式。")

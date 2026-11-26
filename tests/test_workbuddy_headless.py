@@ -515,3 +515,40 @@ def test_packaged_runtime_defaults_reset_headless_settings(tmp_path: Path) -> No
     assert actual["workbuddy"]["headless"]["enabled"] is False
     assert actual["workbuddy"]["headless"]["auto_pass_enabled"] is False
     assert actual["workbuddy"]["headless"]["cli_script"] == ""
+
+
+def test_dashboard_renders_headless_badge_and_saves_headless_settings(tmp_path: Path, monkeypatch) -> None:
+    from fastapi.testclient import TestClient
+    import web_app
+    import web_runner
+
+    cfg = _make_fake_cli_env(tmp_path)
+    settings = {
+        "workbuddy": {
+            "dispatch_mode": "headless",
+            "desktop_enabled": False,
+            "headless": {**cfg["headless"], "auto_pass_enabled": False, "model": "hy4-preview"},
+        }
+    }
+    monkeypatch.setattr(web_runner, "load_settings", lambda: settings)
+    client = TestClient(web_app.app)
+    run_html = client.get("/run").text
+    settings_html = client.get("/settings").text
+    assert "当前投递：CodeBuddy CLI 无头模式" in run_html
+    assert "workbuddyDispatchModeSelect" in settings_html
+    assert "workbuddy_headless_auto_pass_enabled" in settings_html
+
+    target = {"workbuddy": {}}
+    web_runner._update_workbuddy_headless_settings(
+        target,
+        {
+            "workbuddy_dispatch_mode": "headless",
+            "workbuddy_headless_enabled": "true",
+            "workbuddy_headless_auto_pass_enabled": "true",
+            "workbuddy_headless_model": "deepseek-v4.1-flash",
+        },
+    )
+    assert target["workbuddy"]["dispatch_mode"] == "headless"
+    assert target["workbuddy"]["headless"]["enabled"] is True
+    assert target["workbuddy"]["headless"]["auto_pass_enabled"] is True
+    assert target["workbuddy"]["headless"]["model"] == "deepseek-v4.1-flash"

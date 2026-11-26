@@ -618,6 +618,10 @@ def api_settings(
     workbuddy_executable: Annotated[str, Form()] = "",
     workbuddy_project_name: Annotated[str, Form()] = "",
     workbuddy_desktop_enabled: Annotated[str, Form()] = "",
+    workbuddy_dispatch_mode: Annotated[str, Form()] = "",
+    workbuddy_headless_enabled: Annotated[str, Form()] = "",
+    workbuddy_headless_auto_pass_enabled: Annotated[str, Form()] = "",
+    workbuddy_headless_model: Annotated[str, Form()] = "",
     erp_url: Annotated[str, Form()] = "",
     erp_username: Annotated[str, Form()] = "",
     erp_password: Annotated[str, Form()] = "",
@@ -696,7 +700,12 @@ def api_settings(
         {
             **({"workbuddy_executable": workbuddy_executable,
                 "workbuddy_project_name": workbuddy_project_name,
-                "workbuddy_desktop_enabled": normalize_checkbox(workbuddy_desktop_enabled)}
+                "workbuddy_desktop_enabled": normalize_checkbox(workbuddy_desktop_enabled),
+                **({"workbuddy_dispatch_mode": workbuddy_dispatch_mode,
+                    "workbuddy_headless_enabled": normalize_checkbox(workbuddy_headless_enabled),
+                    "workbuddy_headless_auto_pass_enabled": normalize_checkbox(workbuddy_headless_auto_pass_enabled),
+                    "workbuddy_headless_model": workbuddy_headless_model}
+                   if workbuddy_dispatch_mode else {})}
                if normalize_checkbox(workbuddy_config_present) == "true" else {}),
             "erp_url": erp_url,
             "erp_username": erp_username,

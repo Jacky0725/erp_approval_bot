@@ -131,7 +131,13 @@
                 <div class="run-action-group run-action-workbuddy">
                   <div class="run-mode-panel-heading">
                     <h4>WorkBuddy 审批</h4>
-                    <span>独立协同链路 · ERP 匹配与回写</span>
+                    <span id="workbuddyDispatchModeBadge">
+                      {% if runtime.workbuddy_dispatch_mode == 'headless' %}
+                      当前投递：CodeBuddy CLI 无头模式{% if runtime.workbuddy_headless_auto_pass_enabled %} · 已开整单自动通过{% else %} · 仅分类写入{% endif %}
+                      {% else %}
+                      当前投递：WorkBuddy 桌面客户端 · ERP 匹配与回写
+                      {% endif %}
+                    </span>
                   </div>
                   <p class="workbuddy-mode-summary">批次循环先执行 ERP 一键匹配，再判定剩余空项。选择“保存并生成试剂库”时，保存核对成功后自动入库。</p>
                   <div class="workbuddy-flow">

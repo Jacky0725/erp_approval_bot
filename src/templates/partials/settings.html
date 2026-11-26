@@ -34,12 +34,24 @@
             <section class="settings-section" data-settings-group="connection">
               <div class="settings-section-head">
                 <div>
-                  <h3>WorkBuddy 本机配置</h3>
-                  <p>本地桌面客户端路径与联动开关。</p>
+                  <h3>WorkBuddy / CodeBuddy 投递配置</h3>
+                  <p>可切换 WorkBuddy 桌面客户端或 CodeBuddy CLI 无头模式（无头模式支持锁屏与后台运行）。</p>
                 </div>
               </div>
               <div class="settings-grid settings-grid-connection">
                 <input type="hidden" name="workbuddy_config_present" value="true">
+                <label>投递模式
+                  <select name="workbuddy_dispatch_mode" id="workbuddyDispatchModeSelect">
+                    <option value="desktop" {% if runtime.workbuddy_dispatch_mode != 'headless' %}selected{% endif %}>WorkBuddy 桌面客户端</option>
+                    <option value="headless" {% if runtime.workbuddy_dispatch_mode == 'headless' %}selected{% endif %}>CodeBuddy CLI 无头模式（支持锁屏）</option>
+                  </select>
+                </label>
+                <label>无头模型（可选）
+                  <input name="workbuddy_headless_model" value="{{ runtime.workbuddy_headless_model|default('') }}" placeholder="留空沿用 CodeBuddy 默认模型" autocomplete="off">
+                </label>
+                <label class="check"><input type="checkbox" name="workbuddy_headless_enabled" value="true" {% if runtime.workbuddy_headless_enabled %}checked{% endif %}> 启用 CodeBuddy CLI 无头模式</label>
+                <label class="check danger-check"><input type="checkbox" name="workbuddy_headless_auto_pass_enabled" value="true" {% if runtime.workbuddy_headless_auto_pass_enabled %}checked{% endif %}> 无头模式允许整单自动通过</label>
+                <p class="field-note settings-field-wide" id="workbuddyHeadlessStatus">{% if runtime.workbuddy_headless_preflight_issue %}CodeBuddy CLI 状态：{{ runtime.workbuddy_headless_preflight_issue }}{% else %}CodeBuddy CLI 状态：本机依赖与登录目录已就绪。{% endif %}</p>
                 <label class="settings-field-wide">客户端路径
                   <input name="workbuddy_executable" value="{{ runtime.workbuddy_executable }}" autocomplete="off">
                 </label>
