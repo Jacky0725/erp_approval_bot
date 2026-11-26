@@ -2744,6 +2744,23 @@
 
   /* Breakpoint 3: <= 680px */
   @media (max-width: 680px) {
+    .review-table {
+      width: 100%;
+      table-layout: fixed;
+    }
+    .review-table th:first-child,
+    .review-table td:first-child {
+      display: none;
+    }
+    .review-table th:nth-child(2) { width: 40%; }
+    .review-table th:nth-child(3) { width: 36%; }
+    .review-table th:nth-child(4) { width: 24%; }
+    .review-table td,
+    .review-select-record {
+      overflow-wrap: anywhere;
+      min-width: 0;
+      max-width: 100%;
+    }
     .topbar {
       flex-direction: column;
       align-items: flex-start;
