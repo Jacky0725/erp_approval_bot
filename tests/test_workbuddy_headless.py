@@ -349,6 +349,7 @@ def test_scheduler_preflight_allows_headless_without_interactive_desktop(tmp_pat
     cfg = _make_fake_cli_env(tmp_path)
     settings = {
         "app": {"dry_run": False},
+        "approval": {"erp_write_backend": "api_write_with_web_verify"},
         "workbuddy": {
             "dispatch_mode": "headless",
             "desktop_enabled": False,
@@ -358,6 +359,8 @@ def test_scheduler_preflight_allows_headless_without_interactive_desktop(tmp_pat
         },
         "erp_api": {"enabled_for_write": True, "discovery": {"status": "verified"}},
     }
+    monkeypatch.delenv("ERP_WRITE_BACKEND", raising=False)
+    monkeypatch.delenv("DRY_RUN", raising=False)
     monkeypatch.setattr(sched, "interactive_desktop_available", lambda: False)
     options = {"APPROVAL_WRITE_MODE": "generate_library", "ERP_WRITE_BACKEND": "api_write_with_web_verify"}
     assert sched.workbuddy_preflight(settings, options) == ""
@@ -410,6 +413,7 @@ def test_web_and_dingtalk_respect_headless_mode_and_auto_pass_opt_in(tmp_path: P
         "erp_api": {"enabled_for_write": True, "discovery": {"status": "verified"}},
     }
     monkeypatch.setenv("APP_DRY_RUN", "false")
+    monkeypatch.delenv("DRY_RUN", raising=False)
     monkeypatch.setattr(web_app, "load_settings", lambda: settings)
     monkeypatch.setattr(web_app, "runtime_config_snapshot", lambda: {
         "approval_write_mode": "generate_library",

@@ -102,7 +102,7 @@ def test_settings_candidate_selection_in_desktop_and_mobile_browser(monkeypatch)
 
             page.route("**/*", fulfill)
             page.goto("http://localhost:8000/settings")
-            section = page.locator(".settings-section").filter(has=page.get_by_role("heading", name="WorkBuddy 本机配置"))
+            section = page.locator(".settings-section").filter(has=page.get_by_role("heading", name="WorkBuddy / CodeBuddy 投递配置"))
             section.get_by_role("button", name="展开").click()
             section.get_by_role("button", name="检测客户端").click()
             section.get_by_label("WorkBuddy 客户端候选").select_option(candidates[0]["path"])
