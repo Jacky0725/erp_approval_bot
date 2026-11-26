@@ -1,5 +1,15 @@
 config_schema_version: 2
 workbuddy:
+  dispatch_mode: headless
+  headless:
+    enabled: true
+    auto_pass_enabled: false
+    node_executable: ''
+    cli_script: ''
+    model: ''
+    fallback_model: ''
+    use_json_schema: true
+    timeout_seconds: 900
   desktop_enabled: true
   write_enabled: true
   executable: D:\Program Files\WorkBuddy\WorkBuddy.exe

@@ -47,3 +47,5 @@
   - **20 条批次**（`20261126_125424_a3021682`）：耗时 **105.8s**（预算 900s），`is_error=False`，`permission_denials=0`，`unmapped=0`，`WorkBuddyBridge.load_results()` 100% 通过。
   - **50 条批次**（`20261126_125641_ea75aea5`）：耗时 **334.4s**（约 5.6 分钟，预算 1,500s），`is_error=False`，`permission_denials=0`，`unmapped=0`，覆盖 13 个 ERP 类别（易燃 10、普通 8、氧化剂 7、常规酸 5、特殊酸 4、常规碱 3、强反应 3、溴碘 3、异味 2、未知 2、易爆 1、发烟 1、拒收 1），`WorkBuddyBridge.load_results()` 100% 通过。
   - **阶段 3 剩余实测项**：① Windows 锁屏状态下的真实 ERP 只读链路实测（Playwright 无头登录 + 无头 CLI 判定，`dry_run=True`）；② 业务人工抽检分类细节确认无误后，再进入阶段 4 切换正式配置。
+
+- **阶段 4（受控切换无头分类写入）**：用户确认 50 条分类结果符合业务预期后，已将本机 `config/settings.yaml` 切换为 `dispatch_mode: headless`、`headless.enabled: true`、`headless.auto_pass_enabled: false`；`headless_preflight`、`scheduler_preflight`、`dingtalk_run_options` 均已验证通过，并重启本地 Web UI 进程使 11-25/11-26 全部更新生效。
