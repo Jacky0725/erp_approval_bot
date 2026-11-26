@@ -196,8 +196,12 @@ PAGE_DEFS = {
 
 
 def static_asset_version() -> str:
-    asset_paths = [STATIC_DIR / "dashboard.css", STATIC_DIR / "dashboard.js"]
-    mtimes = [path.stat().st_mtime for path in asset_paths if path.exists()]
+    asset_paths = [
+        path
+        for path in STATIC_DIR.rglob("*")
+        if path.is_file() and path.suffix.lower() in {".css", ".js", ".svg"}
+    ]
+    mtimes = [path.stat().st_mtime for path in asset_paths]
     return str(int(max(mtimes))) if mtimes else "1"
 
 
@@ -663,6 +667,7 @@ def api_settings(
     dingtalk_chat_timeout_seconds: Annotated[str, Form()] = "20",
     dingtalk_chat_context_turns: Annotated[str, Form()] = "4",
     dingtalk_chat_requests_per_minute: Annotated[str, Form()] = "6",
+    dingtalk_chat_persona_prompt: Annotated[str | None, Form(max_length=2000)] = None,
     dingtalk_admin_user_ids: Annotated[str, Form()] = "",
     dingtalk_management_group_ids: Annotated[str, Form()] = "",
     memory_sync_enabled: Annotated[str, Form()] = "",
@@ -741,6 +746,8 @@ def api_settings(
             "dingtalk_chat_timeout_seconds": dingtalk_chat_timeout_seconds,
             "dingtalk_chat_context_turns": dingtalk_chat_context_turns,
             "dingtalk_chat_requests_per_minute": dingtalk_chat_requests_per_minute,
+            **({"dingtalk_chat_persona_prompt": dingtalk_chat_persona_prompt}
+               if dingtalk_chat_persona_prompt is not None else {}),
             "dingtalk_admin_user_ids": dingtalk_admin_user_ids,
             "dingtalk_management_group_ids": dingtalk_management_group_ids,
             "memory_sync_enabled": normalize_checkbox(memory_sync_enabled),

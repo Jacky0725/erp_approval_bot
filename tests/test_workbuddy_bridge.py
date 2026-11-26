@@ -437,6 +437,48 @@ def test_match_response_lost_is_not_repeated(bridge):
     assert len(calls)==1
 
 
+@pytest.mark.parametrize('state', ['reject', 'refuse', 'cancel', 'done'])
+def test_returned_list_is_skipped_and_next_list_can_match(bridge, state):
+    returned = records(1)
+    returned[0]['_erp_parent_state'] = state
+    pending = records(1)
+    client = SimpleNamespace(fetch_reagent_detail=lambda n: returned if n == 'RETURNED' else pending)
+    calls = []
+    client.match_reagent_list = lambda n: calls.append(n) or {'changes': [], 'records': pending}
+    assert bridge.matched_records(client, 'RETURNED', dry_run=False) == []
+    assert bridge.matched_records(client, 'SJ001', dry_run=False) == pending
+    assert calls == ['SJ001']
+
+
+def test_return_between_reads_does_not_leave_unknown_match_checkpoint(bridge):
+    from erp_api_client import ErpListNotPending
+    client = Client(records(1))
+    def match(number):
+        raise ErpListNotPending('returned before RPC')
+    client.match_reagent_list = match
+    assert bridge.matched_records(client, 'SJ001', dry_run=False) == []
+    assert json.loads((bridge.directory / 'erp_matches.json').read_text(encoding='utf-8')) == {}
+
+
+@pytest.mark.parametrize('source', [[], [{}], [{'_erp_parent_state': 'wait'}, {'_erp_parent_state': 'reject'}]])
+def test_invalid_list_state_still_stops_without_match_checkpoint(bridge, source):
+    from erp_api_client import ErpApiUnsupported
+    client = Client(source)
+    client.match_reagent_list = lambda n: pytest.fail('must not match')
+    with pytest.raises(ErpApiUnsupported):
+        bridge.matched_records(client, 'SJ001', dry_run=False)
+    assert not (bridge.directory / 'erp_matches.json').exists()
+
+
+def test_match_read_failure_is_not_treated_as_finished_list(bridge):
+    def fetch(number):
+        raise TimeoutError('ERP unavailable')
+    client = SimpleNamespace(fetch_reagent_detail=fetch)
+    with pytest.raises(TimeoutError, match='ERP unavailable'):
+        bridge.matched_records(client, 'SJ001', dry_run=False)
+    assert not (bridge.directory / 'erp_matches.json').exists()
+
+
 def test_unsent_stale_batch_retains_evidence_and_requeues_only_empty(bridge):
     source=records(2);state=bridge.prepare(source);client=Client(source)
     client.records[0]['物化特性']='普通类'

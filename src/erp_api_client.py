@@ -34,6 +34,18 @@ class ErpApiUnsupported(RuntimeError):
     pass
 
 
+class ErpListNotPending(ErpApiUnsupported):
+    """Confirmed non-pending state, detected before issuing any match write."""
+
+
+def require_pending_match_records(records: list[dict[str, Any]]) -> None:
+    states = {str(row.get("_erp_parent_state") or "").strip() for row in records}
+    if not records or len(states) != 1 or "" in states:
+        raise ErpApiUnsupported("ERP matching cannot confirm one nonempty list and its state.")
+    if states != {"wait"}:
+        raise ErpListNotPending(f"ERP list is no longer pending: {next(iter(states))}")
+
+
 class ErpRpcError(ErpApiUnsupported):
     def __init__(self, model: str, method: str, error: dict[str, Any]):
         data = error.get("data") or {}
@@ -158,8 +170,7 @@ class ErpApiClient:
         if self.protocol != "odoo_jsonrpc" or not self.write_enabled():
             raise ErpApiUnsupported("ERP matching requires verified Odoo API writes.")
         before = self.fetch_reagent_detail(list_number)
-        if not before or any(r.get("_erp_parent_state") != "wait" for r in before):
-            raise ErpApiUnsupported("ERP matching requires a nonempty pending list.")
+        require_pending_match_records(before)
         if any(not self.record_id_from_record(r) or "phchproperty_id" not in r for r in before):
             raise ErpApiUnsupported("ERP matching requires stable line ids and category fields.")
         parent_ids = {str(r.get("_erp_parent_id") or "") for r in before}
@@ -221,6 +232,41 @@ class ErpApiClient:
         if result and len(created) == 1:
             return {"status": "created_verified", "detail": "试剂库新建成功并已回读核对。", "library_id": created[0]["id"]}
         return {"status": "unverified", "detail": "生成请求已返回，但未确认唯一新建记录；不自动重试。"}
+
+    def recheck_reagent_library_by_id(
+        self, record_id: str, identity: dict[str, Any], library_id: Any,
+    ) -> dict[str, Any]:
+        """Read back an operator-resolved library prompt; issue no ERP mutation."""
+        if self.protocol != "odoo_jsonrpc":
+            raise ErpApiUnsupported("试剂库重新核对需要 Odoo 读取接口。")
+        if not str(library_id or "").isdigit():
+            raise ErpApiUnsupported("缺少原试剂库记录 ID，不能确认关联关系。")
+        record = self._read_odoo_line_record(record_id)
+        if (not record or str(record.get("id")) != str(record_id)
+                or not self._text(identity.get("试剂名称"))
+                or self._text(record.get("name")) != self._text(identity.get("试剂名称"))
+                or self._normalize_cas(record.get("cas_code")) != self._normalize_cas(identity.get("CAS号"))
+                or not self.identity_matches_record(identity, self.normalize_record(record))
+                or any(self._text(record.get(k)) != self._text(identity.get(k)) for k in ("type", "desc"))):
+            raise ErpApiUnsupported("重新核对失败：ERP 明细身份或判定相关信息已变化。")
+        parent = record.get("reagent_list_id")
+        parent_id = parent[0] if isinstance(parent, (list, tuple)) and parent else None
+        parents = self._rpc_search_read(self._rpc_model("list_model", "reagent.list"),
+            [["id", "=", parent_id]], ["name", "state"], limit=2)
+        if (len(parents) != 1 or parents[0].get("state") != "wait"
+                or parents[0].get("name") != identity.get("试剂清单号")):
+            raise ErpApiUnsupported("重新核对失败：清单身份或待审批状态已变化。")
+        libraries = self._rpc_search_read("reagent.cas", [["id", "=", int(library_id)]],
+            ["name", "cas_code", "phchproperty_id"], limit=2)
+        if (len(libraries) != 1 or str(libraries[0].get("id")) != str(library_id)
+                or self._text(libraries[0].get("name")) != self._text(record.get("name"))
+                or self._normalize_cas(libraries[0].get("cas_code")) != self._normalize_cas(record.get("cas_code"))
+                or not self._odoo_property_identity(record)[0]
+                or self._odoo_property_identity(libraries[0]) != self._odoo_property_identity(record)):
+            raise ErpApiUnsupported("重新核对失败：ERP 明细与原试剂库记录的身份或分类不一致。")
+        return {"status": "existing_unchanged", "library_id": int(library_id),
+                "erp_category": self._odoo_property_identity(record)[1],
+                "detail": "已重新回读确认 ERP 明细与原试剂库记录一致；未执行覆盖。"}
 
     def resolve_reagent_record_id(
         self,

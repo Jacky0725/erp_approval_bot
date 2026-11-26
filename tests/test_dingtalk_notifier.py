@@ -10,6 +10,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from dingtalk_notifier import (  # noqa: E402
+    workbuddy_notification_issues,
     build_task_result_message,
     dingtalk_notification_config,
     save_stream_binding,
@@ -18,6 +19,44 @@ from dingtalk_notifier import (  # noqa: E402
 
 
 class DingTalkNotifierTests(unittest.TestCase):
+    def test_task_notification_uses_own_log_and_original_group_binding(self) -> None:
+        from web_runner import AutomationJobManager
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            log = root / 'run.log'
+            log.write_text('[workbuddy auto_pass] SJ001: blocked；冰烯酸需要修改确认\n', encoding='utf-8')
+            manager = AutomationJobManager(root_dir=root)
+            with patch('web_runner.load_settings', return_value={}), \
+                 patch('web_runner.load_dotenv'), \
+                 patch('web_runner.DingTalkState') as state, \
+                 patch('web_runner.send_task_result_notification', return_value={'sent': True}) as send:
+                state.return_value.load_target.return_value = {'open_conversation_id': 'original-test-group'}
+                manager._notify_task_result(action='workbuddy_loop', success=True, error='', task_context={
+                    'task_id': 'test-task', 'approval': {}, 'review_queue': {}, 'run_log_path': str(log)})
+                send.assert_called_once()
+                self.assertIn('冰烯酸', send.call_args.args[1].markdown)
+                self.assertEqual(send.call_args.kwargs['binding']['open_conversation_id'], 'original-test-group')
+                state.return_value.load_target.assert_called_once_with('test-task')
+
+    def test_workbuddy_blocked_details_are_deduplicated_and_included(self) -> None:
+        issue = '[workbuddy auto_pass] SJ001: blocked；试剂库尚未核对完成：冰烯酸；需要修改确认'
+        issues = workbuddy_notification_issues([issue, issue,
+            '[workbuddy auto_pass] SJ002: submitted_verified', 'unrelated secret text'])
+        self.assertEqual(len(issues), 1)
+        message = build_task_result_message(action='workbuddy_loop', success=True, workbuddy_issues=issues)
+        self.assertIn('未自动通过的清单：1 项', message.markdown)
+        self.assertIn('SJ001', message.markdown)
+        self.assertIn('冰烯酸', message.markdown)
+        self.assertNotIn('unrelated', message.markdown)
+
+    def test_workbuddy_notification_limits_detail_length_and_count(self) -> None:
+        message = build_task_result_message(action='workbuddy_loop', success=True,
+            workbuddy_issues=[f'SJ{i:03}：' + '原因' * 300 for i in range(12)])
+        self.assertIn('12 项', message.markdown)
+        self.assertNotIn('SJ010', message.markdown)
+        self.assertIn('其余原因请查看', message.markdown)
+        self.assertLess(len(message.markdown), 3000)
+
     def test_config_defaults_to_disabled_with_at_all(self) -> None:
         config = dingtalk_notification_config({})
 

@@ -56,6 +56,12 @@ class DingTalkMessage:
     markdown: str
 
 
+def workbuddy_notification_issues(lines: list[str]) -> list[str]:
+    prefix = "[workbuddy auto_pass] "
+    return list(dict.fromkeys(line[len(prefix):].strip() for line in lines
+        if line.startswith(prefix) and ": blocked；" in line))
+
+
 def build_task_result_message(
     *,
     action: str,
@@ -67,6 +73,7 @@ def build_task_result_message(
     review_queue: dict[str, Any] | None = None,
     stopped: bool = False,
     stop_details: dict[str, Any] | None = None,
+    workbuddy_issues: list[str] | None = None,
 ) -> DingTalkMessage:
     action_label = action_labels().get(action, action or "自动化任务")
     status = "已人工停止" if stopped else "成功" if success else "失败"
@@ -92,6 +99,12 @@ def build_task_result_message(
 
     if error:
         lines.append(f"- 错误：{truncate(error, 220)}")
+    if workbuddy_issues:
+        lines.append(f"\n**未自动通过的清单：{len(workbuddy_issues)} 项**")
+        for issue in workbuddy_issues[:10]:
+            lines.append(f"- {truncate(' '.join(issue.split()), 240)}")
+        if len(workbuddy_issues) > 10:
+            lines.append("- 其余原因请查看 Web UI 任务日志。")
     if stopped:
         lines.append("- 已保存结果不会撤销，未完成记录已保留。")
         if (stop_details or {}).get("task_id"):

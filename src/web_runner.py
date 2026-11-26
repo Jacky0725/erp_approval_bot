@@ -32,6 +32,7 @@ from llm_providers import (
     provider_options,
 )
 from dingtalk_notifier import (
+    workbuddy_notification_issues,
     build_task_result_message,
     dingtalk_notification_config,
     send_task_result_notification,
@@ -73,7 +74,7 @@ from run_summary_parser import (
 )
 from task_control import TaskControl, SAFE_STOP_EXIT_CODE, STOPPABLE_ACTIONS, can_stop, selected_lists
 from dingtalk_stream_bot import dingtalk_stream_config
-from dingtalk_conversation import chat_config
+from dingtalk_conversation import chat_config, DEFAULT_PERSONA_PROMPT, normalize_persona_prompt
 from erp_api_client import normalize_erp_write_backend
 from reagent_page import normalize_todo_list_number
 from category_mapper import (
@@ -712,7 +713,8 @@ class AutomationJobManager:
                 self._persist_state()
             self._notify_completion_callbacks(action=action, success=success, error=error, options=options)
             self._notify_task_result(action=action, success=success, error=error,
-                                     task_context={**result_context, "finished_at": finished_at})
+                                     task_context={**result_context, "finished_at": finished_at,
+                                                   "run_log_path": str(run_log_path)})
 
     def add_completion_callback(self, callback: Callable[..., None]) -> None:
         with self._lock:
@@ -1024,6 +1026,8 @@ class AutomationJobManager:
                 started_at=(task_context or {}).get("started_at", self.started_at),
                 finished_at=(task_context or {}).get("finished_at", self.finished_at),
                 error=error,
+                workbuddy_issues=workbuddy_notification_issues(current_run_lines(
+                    (task_context or {}).get("run_log_path", ""))) if action == "workbuddy_loop" else None,
                 approval=task_context["approval"] if task_context and "approval" in task_context else approval_summary(self.root_dir),
                 review_queue=task_context["review_queue"] if task_context and "review_queue" in task_context else review_queue_summary(self.root_dir),
                 stopped=bool(task_context and (task_context.get("control") or {}).get("state") == "stopped"),
@@ -2383,6 +2387,8 @@ def runtime_config_snapshot() -> dict[str, Any]:
         "dingtalk_chat_timeout_seconds": str(dingtalk_chat["timeout_seconds"]),
         "dingtalk_chat_context_turns": str(dingtalk_chat["context_turns"]),
         "dingtalk_chat_requests_per_minute": str(dingtalk_chat["requests_per_minute"]),
+        "dingtalk_chat_persona_prompt": dingtalk_chat["persona_prompt"],
+        "dingtalk_chat_default_persona_prompt": DEFAULT_PERSONA_PROMPT,
         "dingtalk_admin_user_ids": "\n".join((settings.get("dingtalk_control", {}) or {}).get("admin_user_ids") or []),
         "dingtalk_management_group_ids": "\n".join((settings.get("dingtalk_control", {}) or {}).get("management_group_ids") or []),
         "dingtalk_stream_corp_id": dingtalk_stream.get("corp_id", ""),
@@ -2445,6 +2451,7 @@ def save_runtime_config(form: dict[str, str]) -> dict[str, Any]:
 
 
 def _save_runtime_config(form: dict[str, str]) -> dict[str, Any]:
+    persona = normalize_persona_prompt(form["dingtalk_chat_persona_prompt"]) if "dingtalk_chat_persona_prompt" in form else None
     existing_settings = load_settings()
     update_client_settings(existing_settings, form)
     admins = parse_target_list_numbers(form.get("dingtalk_admin_user_ids", ""))
@@ -2620,6 +2627,8 @@ def _save_runtime_config(form: dict[str, str]) -> dict[str, Any]:
     chat["provider"] = "openai_compatible"
     chat["base_url"] = form.get("dingtalk_chat_base_url", "").strip()
     chat["model"] = form.get("dingtalk_chat_model", "").strip()
+    if persona is not None:
+        chat["persona_prompt"] = persona
     for name, default, low, high in (("timeout_seconds", 20, 3, 60), ("context_turns", 4, 0, 8), ("requests_per_minute", 6, 1, 30)):
         chat[name] = max(low, min(high, coerce_int(form.get("dingtalk_chat_" + name, str(default)), default)))
 

@@ -138,6 +138,19 @@
       if (element) element.disabled = value;
     }
 
+    function confirmAction(options) {
+      if (typeof window.uiConfirm === "function") return window.uiConfirm(options);
+      return Promise.resolve(window.confirm(options?.message || "确认继续？"));
+    }
+
+    function notifyToast(message, tone = "info") {
+      if (typeof window.uiToast === "function") {
+        window.uiToast(message, {tone});
+        return;
+      }
+      if (tone === "error") window.alert(message);
+    }
+
     function initSettingsSections() {
       document.querySelectorAll(".settings-section").forEach((section) => {
         const head = section.querySelector(":scope > .settings-section-head");
@@ -218,6 +231,8 @@
       if (pill) pill.classList.toggle("dry-run-active", enabled);
       const warning = document.querySelector("#dryRunWarning");
       if (warning) warning.hidden = !enabled;
+      const globalBanner = document.querySelector("#globalDryRunBanner");
+      if (globalBanner) globalBanner.hidden = !enabled;
       updateExecutionSummary();
     }
 
@@ -279,6 +294,13 @@
     initSettingsSections();
     initSchedulerPolicyToggle();
 
+    on("#resetDingtalkChatPersonaButton", "click", () => {
+      const input = document.querySelector("#dingtalkChatPersonaPrompt");
+      if (!input) return;
+      input.value = initialRuntime.dingtalk_chat_default_persona_prompt || "";
+      input.dispatchEvent(new Event("input", {bubbles: true}));
+    });
+
     on("#refreshLogButton", "click", async () => {
       setText("#logCopyState", "刷新中...");
       await refreshLogTail({force: true});
@@ -317,7 +339,7 @@
     });
 
     on("#repairDataHealthButton", "click", async () => {
-      if (!confirm("确认执行数据健康修复？系统会先备份试剂记忆库和人工复核队列。")) return;
+      if (!(await confirmAction({title: "执行数据健康修复", message: "确认执行数据健康修复？", detail: "系统会先自动备份试剂记忆库和人工复核队列。"}))) return;
       setDisabled("#repairDataHealthButton", true);
       setText("#dataHealthRepairState", "修复中...");
       try {
@@ -491,13 +513,13 @@
     }
 
     on("#stopRunButton", "click", async () => {
-      if (!confirm("紧急强制停止可能使 ERP 或 WorkBuddy 结果待核对，且不会撤销已保存结果。确定强制结束？")) return;
+      if (!(await confirmAction({title: "紧急强制停止", message: "确定强制结束当前任务？", detail: "可能导致 ERP 或 WorkBuddy 结果待核对，且不会撤销已保存结果。", confirmText: "确认强制停止", danger: true}))) return;
       const response = await fetch("/api/stop", { method: "POST" });
       const payload = await response.json();
       await refreshStatus();
       await refreshReviewQueue({force: true});
       if (!payload.stopped) {
-        alert(payload.message || payload.detail || "当前没有运行中的任务");
+        notifyToast(payload.message || payload.detail || "当前没有运行中的任务", "warning");
       }
     });
 
@@ -513,13 +535,13 @@
     }
     on("#safeStopRunButton", "click", async () => {
       const taskId = currentControlTaskId;
-      if (!taskId || !confirm(`安全停止任务 ${taskId.slice(0, 12)}？已发出的操作会完成核对，已保存结果不会撤销。`)) return;
+      if (!taskId || !(await confirmAction({title: "安全停止任务", message: `安全停止任务 ${taskId.slice(0, 12)}？`, detail: "已发出的操作会完成核对，已保存结果不会撤销。", confirmText: "确认安全停止"}))) return;
       try {
         const ticket = await controlRequest("/api/safe-stop/prepare", {task_id: taskId});
         const result = await controlRequest("/api/safe-stop", {task_id: taskId, ticket: ticket.ticket});
-        alert(result.message || "停止请求已提交");
+        notifyToast(result.message || "停止请求已提交", "success");
         await refreshStatus();
-      } catch (error) { alert(error.message || String(error)); }
+      } catch (error) { notifyToast(error.message || String(error), "error"); }
     });
     async function refreshStoppedTasks() {
       const body = document.querySelector("#stoppedTasksTable");
@@ -553,17 +575,17 @@
             const message = task.can_discard
               ? "作废这批旧结果？下一次批次循环会回读 ERP，只重新判定仍为空的明细。"
               : `已人工核对任务 ${task.task_id.slice(0, 12)} 的 ERP、投递状态与结果文件，并确认只恢复核对过的剩余步骤？结果不明的操作不会自动重发。`;
-            if (!check.checked || !confirm(message)) return;
+            if (!check.checked || !(await confirmAction({title: "恢复任务确认", message, confirmText: "确认操作"}))) return;
             button.disabled = true;
             try {
               const payload = {task_id: task.task_id, verified: true, discard: Boolean(task.can_discard)};
               const ticket = await controlRequest("/api/resume/prepare", payload);
               const result = await controlRequest("/api/resume", {...payload, ticket: ticket.ticket});
-              if (result.discarded) alert("旧批次已作废。请刷新待办后启动批次循环。");
-              else if (!result.started) alert(result.message || "任务未恢复");
+              if (result.discarded) notifyToast("旧批次已作废。请刷新待办后启动批次循环。", "success");
+              else if (!result.started) notifyToast(result.message || "任务未恢复", "warning");
               reviewedStoppedTasks.delete(task.task_id);
               await refreshStatus();
-            } catch (error) { alert(error.message || String(error)); }
+            } catch (error) { notifyToast(error.message || String(error), "error"); }
           });
           body.appendChild(row);
         }
@@ -583,7 +605,7 @@
     }
 
     on("#restartRunButton", "click", async () => {
-      if (!confirm("重启 Web UI？仅在没有运行任务时允许。")) return;
+      if (!(await confirmAction({title: "重启 Web UI", message: "确认重启 Web UI 服务？", detail: "仅在没有运行任务时允许，页面将在重启完成后自动刷新。", confirmText: "确认重启"}))) return;
       try {
         const response = await fetch("/api/restart", {method: "POST"});
         const payload = await response.json();
@@ -596,17 +618,17 @@
             if (health.ok && (await health.json()).process_id !== payload.old_process_id) { window.location.reload(); return; }
           } catch (_) { /* Waiting for the replacement service. */ }
         }
-        alert("新服务未能在 30 秒内启动，请检查 data/logs/web_ui_restart.log。");
-      } catch (error) { alert(error.message || String(error)); }
+        notifyToast("新服务未能在 30 秒内启动，请检查 data/logs/web_ui_restart.log。", "error");
+      } catch (error) { notifyToast(error.message || String(error), "error"); }
     });
     on("#exitProgramButton", "click", async () => {
-      if (!confirm("退出 Web UI 并关闭项目后台进程？已保存的数据不会删除。")) return;
+      if (!(await confirmAction({title: "退出程序", message: "退出 Web UI 并关闭项目后台进程？", detail: "已保存的数据与配置不会删除。", confirmText: "确认退出", danger: true}))) return;
       try {
         const prepared = await controlRequest("/api/exit/prepare", {});
         const result = await controlRequest("/api/exit", {ticket: prepared.ticket});
         if (!result.exiting) throw new Error(result.message || "退出未启动");
         setText("#statusLine", "Web UI 正在退出，可关闭此页面。");
-      } catch (error) { alert(error.message || String(error)); }
+      } catch (error) { notifyToast(error.message || String(error), "error"); }
     });
 
     let lastUpdateInfo = null;
@@ -617,10 +639,10 @@
 
     onAll('[data-update-action="install"]', "click", async () => {
       if (!lastUpdateInfo?.update_available) {
-        alert("当前没有可安装的更新。");
+        notifyToast("当前没有可安装的更新。", "warning");
         return;
       }
-      if (!confirm(`确认下载并安装 ${lastUpdateInfo.latest_version}？程序会自动退出并启动安装器。`)) return;
+      if (!(await confirmAction({title: "安装程序更新", message: `确认下载并安装 ${lastUpdateInfo.latest_version}？`, detail: "程序会自动退出并启动安装器。", confirmText: "下载并安装"}))) return;
       setUpdateMessage("正在下载更新包并启动安装器，请稍候...");
       setAllDisabled('[data-update-action="install"]', true);
       const ticket = await operationTicket("update", {});
@@ -640,7 +662,25 @@
     });
 
     if (document.querySelector('[data-update-action="check"]')) {
-      window.setTimeout(() => checkForUpdate(), 800);
+      window.setTimeout(() => {
+        try {
+          const cached = JSON.parse(sessionStorage.getItem("reagent_update_cache_v1") || "null");
+          if (cached && Date.now() - cached.ts < 300000 && cached.payload) {
+            lastUpdateInfo = cached.payload;
+            if (cached.payload.update_available) {
+              setUpdateState("update-available", `有新版本 ${cached.payload.latest_version || ""}`);
+              document.querySelectorAll('[data-update-action="install"]').forEach((item) => {
+                item.hidden = false;
+                item.disabled = !initialRuntime.app_frozen;
+              });
+            } else if (cached.payload.ok) {
+              setUpdateState("update-current", "已是最新版本");
+            }
+            return;
+          }
+        } catch (_) {}
+        checkForUpdate();
+      }, 800);
     }
 
     on("#testMemorySyncButton", "click", async () => {
@@ -648,17 +688,17 @@
     });
 
     on("#uploadMemorySyncButton", "click", async () => {
-      if (!confirm("确认上传本地试剂记忆库到坚果云？")) return;
+      if (!(await confirmAction({title: "上传试剂记忆库", message: "确认上传本地试剂记忆库到坚果云？"}))) return;
       await runMemorySyncAction("/api/memory/sync/upload", "正在上传试剂库...");
     });
 
     on("#downloadMemorySyncButton", "click", async () => {
-      if (!confirm("确认下载云端试剂记忆库？下载前会自动备份本地库。")) return;
+      if (!(await confirmAction({title: "下载试剂记忆库", message: "确认下载云端试剂记忆库？", detail: "下载前会自动备份本地库。"}))) return;
       await runMemorySyncAction("/api/memory/sync/download", "正在下载试剂库...");
     });
 
     on("#forceDownloadMemorySyncButton", "click", async () => {
-      if (!confirm("确认强制用云端试剂库覆盖本地库？本地库会先备份。")) return;
+      if (!(await confirmAction({title: "强制覆盖本地库", message: "确认强制用云端试剂库覆盖本地库？", detail: "覆盖前会自动备份当前本地库。", confirmText: "强制覆盖", danger: true}))) return;
       const data = new FormData();
       data.set("force", "true");
       await runMemorySyncAction("/api/memory/sync/download", "正在强制下载试剂库...", data);
@@ -1230,7 +1270,15 @@
         updateScope();
         return;
       }
-      tasks.forEach((task) => {
+      if (!todoState.restored && typeof window.uiLoadSelectedTodos === "function") {
+        todoState.restored = true;
+        window.uiLoadSelectedTodos().forEach((num) => todoState.selected.add(num));
+      }
+      const query = String(document.querySelector("#todoSearchInput")?.value || "").trim().toLowerCase();
+      const visibleTasks = query
+        ? tasks.filter((t) => `${t.list_number} ${t.customer_name} ${t.applicant}`.toLowerCase().includes(query))
+        : tasks;
+      visibleTasks.forEach((task) => {
         const listNumber = task.list_number || "";
         const label = document.createElement("label");
         label.className = "todo-option";
@@ -1247,6 +1295,8 @@
           } else {
             todoState.selected.delete(listNumber);
           }
+          window.uiSaveSelectedTodos?.(todoState.selected);
+          updateScope();
         });
         holder.appendChild(label);
       });
@@ -1652,7 +1702,7 @@
           refreshStatus().catch(() => {});
         });
         deleteButton.addEventListener("click", async () => {
-          if (!confirm(`确认删除人工复核项：${row.reagent_name || row.cas || row.review_key}？`)) return;
+          if (!(await confirmAction({title: "删除人工复核项", message: `确认删除「${row.reagent_name || row.cas || row.review_key}」？`, confirmText: "确认删除", danger: true}))) return;
           deleteButton.disabled = true;
           rowMessage.textContent = "正在删除...";
           rowMessage.className = "review-row-message";
@@ -1899,7 +1949,7 @@
       const response = await fetch("/api/memory/import_suggestions", { method: "POST" });
       const payload = await response.json();
       if (!response.ok) {
-        alert(payload.detail || "历史审批建议导入失败。");
+        notifyToast(payload.detail || "历史审批建议导入失败。", "error");
         return;
       }
       const message = [
@@ -2332,7 +2382,7 @@
       const recordId = tr.dataset.id;
       const name = tr.querySelector(".memory-standard-name-view")?.textContent;
       const button = tr.querySelector(".memory-delete");
-      if (button.disabled || !confirm(`确认删除「${name || recordId}」？`)) return;
+      if (button.disabled || !(await confirmAction({title: "删除记忆记录", message: `确认删除「${name || recordId}」？`, confirmText: "确认删除", danger: true}))) return;
       button.disabled = true;
       reportMemoryFeedback("正在删除记录…");
       try {
@@ -2359,16 +2409,16 @@
         "包括已经人工确认过的冲突记录。",
         "删除前会自动备份 SQLite 数据库。"
       ].join("\n");
-      if (!confirm(message)) return;
+      if (!(await confirmAction({title: "批量删除冲突记录", message, confirmText: "确认删除", danger: true}))) return;
       const response = await fetch("/api/memory/delete_conflicting", { method: "POST" });
       const result = await response.json();
       if (!response.ok) {
-        alert(result.detail || "批量删除冲突记录失败。");
+        notifyToast(result.detail || "批量删除冲突记录失败。", "error");
         return;
       }
       resetMemoryPage();
       await refreshMemory();
-      alert(`已删除 ${result.deleted || 0} 条冲突记录。`);
+      notifyToast(`已删除 ${result.deleted || 0} 条冲突记录。`, "success");
     }
 
     async function deleteNonReusableMemory() {
@@ -2377,7 +2427,7 @@
         reportMemoryFeedback("请先保存列表中的状态修改，或将它们改回原值，再批量删除。", "error");
         return;
       }
-      if (!confirm("删除整个试剂记忆库中所有不可复用记录？此操作不受当前筛选或页码限制，包含已人工确认的记录；删除前会自动备份。")) return;
+      if (!(await confirmAction({title: "删除不可复用记录", message: "确认删除整个试剂记忆库中所有不可复用记录？", detail: "此操作不受当前筛选或页码限制，包含已人工确认的记录；删除前会自动备份。", confirmText: "全部删除", danger: true}))) return;
       const button = document.querySelector("#deleteNonReusableMemoryButton");
       memoryBulkDeletePending = true;
       button.disabled = true;
@@ -2413,10 +2463,41 @@
     }
 
     function renderLogBox() {
-      const lines = logState.lines.filter(logLineMatchesFilter);
-      const emptyText = logState.lines.length ? "当前过滤条件下暂无日志。" : "暂无可显示日志。运行任务后会显示最近一次输出。";
-      setText("#logBox", lines.join("\n") || emptyText);
-      document.querySelector("#logBox")?.classList.toggle("log-empty", !lines.length);
+      const box = document.querySelector("#logBox");
+      if (!box) return;
+      const keyword = String(document.querySelector("#logSearchInput")?.value || "").trim();
+      const lowerKeyword = keyword.toLowerCase();
+      const lines = logState.lines.filter((line) => {
+        if (!logLineMatchesFilter(line)) return false;
+        if (lowerKeyword && !String(line).toLowerCase().includes(lowerKeyword)) return false;
+        return true;
+      });
+      box.classList.toggle("log-empty", !lines.length);
+      if (!lines.length) {
+        box.textContent = logState.lines.length ? "当前过滤条件下暂无日志。" : "暂无可显示日志。运行任务后会显示最近一次输出。";
+        return;
+      }
+      const html = lines.map((line, idx) => {
+        const lower = String(line).toLowerCase();
+        const cls = /error|exception|traceback|failed|失败|错误|异常/.test(lower)
+          ? "log-line log-line-error"
+          : /warn|warning|警告|注意/.test(lower)
+            ? "log-line log-line-warn"
+            : /\[flow\]|start |end /.test(lower)
+              ? "log-line log-line-stage"
+              : "log-line";
+        let escaped = escapeHtml(line);
+        if (keyword) {
+          const safeRe = new RegExp(`(${keyword.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")})`, "gi");
+          escaped = escaped.replace(safeRe, '<mark class="log-highlight">$1</mark>');
+        }
+        return `<div class="${cls}"><span class="log-line-num">${idx + 1}</span><span>${escaped}</span></div>`;
+      }).join("");
+      box.innerHTML = html;
+      const autoScroll = document.querySelector("#logAutoScrollToggle");
+      if (!autoScroll || autoScroll.checked) {
+        box.scrollTop = box.scrollHeight;
+      }
     }
 
     function artifactGroupName(item) {
@@ -2502,6 +2583,8 @@
       setText("#suggestionRows", safe(approval.rows, "0"));
       setText("#suggestionMeta", approval.exists ? `最近更新：${displayTime(approval.modified)}` : "尚未生成审批建议");
       renderTags(approval.categories || {});
+      window.uiRenderCategoryBar?.("overviewCategoryBar", approval.categories || {});
+      window.uiRenderCategoryBar?.("suggestionsCategoryBar", approval.categories || {});
       renderSuggestions(approval.preview || []);
     }
 
@@ -2768,6 +2851,7 @@
         const response = await fetch("/api/update/check");
         const payload = await response.json();
         lastUpdateInfo = payload;
+        try { sessionStorage.setItem("reagent_update_cache_v1", JSON.stringify({ts: Date.now(), payload})); } catch (_) {}
         document.querySelectorAll("[data-update-release]").forEach((releaseLink) => {
           if (payload.release_url) {
             releaseLink.href = payload.release_url;
@@ -2799,6 +2883,43 @@
       }
     }
 
-    refreshStatus();
-    refreshMemory();
-    setInterval(refreshStatus, 2500);
+    on("#todoSearchInput", "input", () => {
+      if (todoState.snapshot) renderTodoTasks(todoState.snapshot, true);
+    });
+    on("#logSearchInput", "input", () => renderLogBox());
+    on("#logAutoScrollToggle", "change", () => renderLogBox());
+
+    let adaptivePollTimer = null;
+    let nextPollDelayMs = 10000;
+    const nativeRefreshStatus = refreshStatus;
+    async function scheduleNextPoll() {
+      if (adaptivePollTimer) {
+        clearTimeout(adaptivePollTimer);
+        adaptivePollTimer = null;
+      }
+      if (document.visibilityState === "hidden") return;
+      adaptivePollTimer = window.setTimeout(async () => {
+        await nativeRefreshStatus();
+        scheduleNextPoll();
+      }, nextPollDelayMs);
+    }
+
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "visible") {
+        nativeRefreshStatus().finally(scheduleNextPoll);
+      } else if (adaptivePollTimer) {
+        clearTimeout(adaptivePollTimer);
+        adaptivePollTimer = null;
+      }
+    });
+
+    const origRenderStatus = readAndRenderStatus;
+    readAndRenderStatus = async function wrappedReadAndRenderStatus(options = {}) {
+      await origRenderStatus(options);
+      const badge = document.querySelector("#runBadge");
+      const isRunning = badge?.classList.contains("running");
+      nextPollDelayMs = isRunning ? 2500 : 10000;
+    };
+
+    refreshStatus().finally(scheduleNextPoll);
+    if (activePage === "memory") refreshMemory();

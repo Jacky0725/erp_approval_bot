@@ -8,6 +8,7 @@ from typing import Any
 
 from category_mapper import erp_property_options
 from task_control import SafeStop, TaskControl, checkpoint
+from workbuddy_consistency import conflicting_groups
 
 
 def todo_numbers(records: list[dict[str, Any]]) -> set[str]:
@@ -54,6 +55,16 @@ class WorkBuddyAutoPass:
             if any(entry.get("list_number") == number and entry.get("status") != "completed"
                    for entry in history.values()):
                 return "一键匹配结果尚未核对"
+        # Re-read only explicitly identified library confirmation prompts. Other
+        # unfinished/sending states retain their original stop/recovery policy.
+        recheck = getattr(self.bridge, "recheck_library_confirmations", None)
+        if callable(recheck):
+            try:
+                recheck(number, self.client)
+            except SafeStop:
+                raise
+            except Exception as error:
+                return f"试剂库重新核对未通过：{error}"
         for batch in self.bridge.batches():
             items = [item for item in batch["items"] if item["input"]["试剂清单号"] == number]
             if not items or batch["status"] in {"superseded_failed", "superseded_before_dispatch", "operator_discarded_for_rejudgment"}:
@@ -65,7 +76,10 @@ class WorkBuddyAutoPass:
                     return "存在未保存或失败明细"
                 if (self.bot.approval_write_mode() == "generate_library" or batch.get("generate_library")):
                     if (item.get("library") or {}).get("status") not in {"created_verified", "existing_unchanged"}:
-                        return "试剂库尚未核对完成"
+                        name = str(item.get("input", {}).get("试剂名称") or "未命名试剂")
+                        library = item.get("library") or {}
+                        detail = str(library.get("detail") or library.get("status") or "缺少结果")
+                        return f"试剂库尚未核对完成：{name}；{detail}"
         review, reason = self.bot.current_list_has_manual_review_item(number)
         return (reason or "存在人工复核项") if review else ""
 
@@ -74,7 +88,7 @@ class WorkBuddyAutoPass:
         if not records:
             raise ValueError("ERP 明细为空，无法确认整单")
         allowed = set(erp_property_options(self.bot.settings)) - {
-            "拒收类", "不建议接收类", "未知类", "需人工复核", "无法判定", "证据不足", "-", ""}
+            "拒收类", "不建议接收类", "需人工复核", "无法判定", "证据不足", "-", ""}
         result = {}
         parent_ids = set()
         for row in records:
@@ -87,9 +101,12 @@ class WorkBuddyAutoPass:
                 raise ValueError("ERP 明细身份、待办状态或类别不满足整单提交条件")
             parent_ids.add(parent)
             result[identity] = (parent, str(row.get("试剂名称") or ""),
-                                str(row.get("CAS号") or ""), str(row["物化特性"]))
+                                str(row.get("CAS号") or ""), str(row["物化特性"]),
+                                str(row.get("type") or ""), str(row.get("desc") or ""))
         if len(parent_ids) != 1:
             raise ValueError("ERP 清单父记录不唯一")
+        if conflicting_groups([(r, str(r.get("物化特性") or "")) for r in records]):
+            raise ValueError("同单重复试剂当前分类不一致，禁止整单提交")
         return result
 
     def _find_visible_approval_modal(self) -> Any | None:
@@ -192,6 +209,8 @@ class WorkBuddyAutoPass:
                     raise ValueError("未找到整单通过按钮")
                 if before != self.snapshot(number):
                     raise ValueError("提交前 ERP 明细发生变化")
+            except SafeStop:
+                raise
             except Exception as error:
                 self.audit(number, "blocked", str(error))
                 continue
@@ -221,7 +240,8 @@ class WorkBuddyAutoPass:
                     state = {str(row.get("_erp_parent_state") or "") for row in after}
                     identities = {str(row.get("_erp_record_id") or ""):
                         (str(row.get("_erp_parent_id") or ""), str(row.get("试剂名称") or ""),
-                         str(row.get("CAS号") or ""), str(row.get("物化特性") or "")) for row in after}
+                         str(row.get("CAS号") or ""), str(row.get("物化特性") or ""),
+                         str(row.get("type") or ""), str(row.get("desc") or "")) for row in after}
                     if (len(after) != len(before) or identities != before or len(state) != 1
                             or state & {"", "wait", "cancel", "cancelled", "reject", "rejected", "refuse", "refused", "draft"}
                             or verified_state is not None and state != verified_state):

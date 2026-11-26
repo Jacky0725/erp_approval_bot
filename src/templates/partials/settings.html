@@ -5,336 +5,357 @@
           <p>保存后写入 `.env` 和 `config/settings.yaml`。密码和 API Key 留空时会保留原值。</p>
         </div>
       </div>
-      <div class="settings-jump" role="navigation" aria-label="设置分类">
-        <a href="#settingsConnection">连接与集成</a>
-        <a href="#settingsSchedule">运行策略</a>
-        <a href="#settingsMaintenance">维护</a>
-      </div>
-      <form id="settingsForm" class="settings-form">
-        <section class="settings-section" id="settingsConnection" data-default-open="true">
-          <div class="settings-section-head">
-            <div>
-              <h3>基础连接</h3>
-              <p>ERP 登录地址、账号与凭据。</p>
-            </div>
-          </div>
-          <div class="settings-grid settings-grid-connection">
-            <label>ERP 登录地址 <input name="erp_url" value="{{ runtime.erp_url }}" placeholder="https://..."></label>
-            <label>ERP 账号 <input name="erp_username" value="{{ runtime.erp_username }}" autocomplete="username"></label>
-            <label>ERP 密码 <input name="erp_password" type="password" placeholder="留空则不修改" autocomplete="new-password"></label>
-          </div>
-        </section>
 
-        <section class="settings-section">
-          <div class="settings-section-head"><h3>WorkBuddy 本机配置</h3></div>
-          <div class="settings-grid settings-grid-connection">
-            <input type="hidden" name="workbuddy_config_present" value="true">
-            <label class="settings-field-wide">客户端路径
-              <input name="workbuddy_executable" value="{{ runtime.workbuddy_executable }}" autocomplete="off">
-            </label>
-            <label>项目名称 <input name="workbuddy_project_name" value="{{ runtime.workbuddy_project_name }}"></label>
-            <label class="check"><input type="checkbox" name="workbuddy_desktop_enabled" value="true" {% if runtime.workbuddy_desktop_enabled %}checked{% endif %}> 启用桌面联动</label>
-            <div class="settings-field-wide">
-              <div class="model-picker">
-                <select id="workbuddyCandidates" aria-label="WorkBuddy 客户端候选" hidden></select>
-                <button type="button" id="detectWorkBuddy">检测客户端</button>
+      <div class="settings-layout">
+        <nav class="settings-tabs" role="tablist" aria-label="设置分类">
+          <button type="button" class="settings-tab-btn" role="tab" aria-selected="true" data-settings-tab="connection">连接与模型</button>
+          <button type="button" class="settings-tab-btn" role="tab" aria-selected="false" data-settings-tab="policy">审批与定时</button>
+          <button type="button" class="settings-tab-btn" role="tab" aria-selected="false" data-settings-tab="integration">钉钉与云同步</button>
+          <button type="button" class="settings-tab-btn" role="tab" aria-selected="false" data-settings-tab="maintenance">维护与迁移</button>
+        </nav>
+
+        <div class="settings-content">
+          <form id="settingsForm" class="settings-form">
+            <!-- Group 1: 连接与模型 -->
+            <section class="settings-section" id="settingsConnection" data-settings-group="connection" data-default-open="true">
+              <div class="settings-section-head">
+                <div>
+                  <h3>基础连接</h3>
+                  <p>ERP 登录地址、账号与凭据。</p>
+                </div>
               </div>
-              <p class="field-note" id="workbuddyDetectionState" role="status">{% if runtime.workbuddy_executable and not runtime.workbuddy_path_valid %}已保存的客户端路径无效。{% endif %}</p>
-            </div>
-          </div>
-        </section>
-
-        <section class="settings-section">
-          <div class="settings-section-head">
-            <div>
-              <h3>V1 缺 CAS 名称补全</h3>
-              <p>仅在首轮名称检索无可信结果时调用百炼生成候选英文名/CAS；候选必须由外部化学来源核验，不会改写 ERP CAS。</p>
-            </div>
-          </div>
-          <div class="settings-grid settings-grid-llm">
-            <label class="check"><input type="checkbox" name="identity_enrichment_enabled" value="true" {% if runtime.identity_enrichment_enabled == 'true' %}checked{% endif %}> 启用 V1 缺 CAS 名称补全</label>
-            <label class="settings-field-wide">
-              百炼 Base URL
-              <input name="identity_enrichment_base_url" id="identityEnrichmentBaseUrlInput" value="{{ runtime.identity_enrichment_base_url }}" placeholder="https://dashscope.aliyuncs.com/compatible-mode/v1">
-            </label>
-            <label class="settings-field-wide">
-              百炼补全模型
-              <div class="model-picker">
-                <select name="identity_enrichment_model" id="identityEnrichmentModelSelect"></select>
-                <button type="button" id="refreshIdentityEnrichmentModels">获取百炼模型</button>
+              <div class="settings-grid settings-grid-connection">
+                <label>ERP 登录地址 <input name="erp_url" value="{{ runtime.erp_url }}" placeholder="https://..."></label>
+                <label>ERP 账号 <input name="erp_username" value="{{ runtime.erp_username }}" autocomplete="username"></label>
+                <label>ERP 密码 <input name="erp_password" type="password" placeholder="留空则不修改" autocomplete="new-password"></label>
               </div>
-              <span id="identityEnrichmentModelStatus" class="field-note">使用 V1 补全专属百炼地址与 API Key；可读取模型列表或选择默认模型。</span>
-            </label>
-            <label>单条超时秒数 <input name="identity_enrichment_timeout_seconds" value="{{ runtime.identity_enrichment_timeout_seconds }}"></label>
-            <label>每批上限 <input name="identity_enrichment_max_calls_per_batch" value="{{ runtime.identity_enrichment_max_calls_per_batch }}"></label>
-            <label>每日上限（0 为不限） <input name="identity_enrichment_max_calls_per_day" value="{{ runtime.identity_enrichment_max_calls_per_day }}"></label>
-            <label>百炼 API Key <input name="identity_enrichment_api_key" type="password" placeholder="{% if runtime.identity_enrichment_api_key_configured %}已配置，留空则不修改{% else %}留空则不修改{% endif %}"></label>
-          </div>
-          <p class="field-note">V1 缺 CAS 补全独立使用阿里云百炼配置；主 LLM 使用下方单独选择的平台、地址、模型和 API Key。</p>
-        </section>
+            </section>
 
-        <section class="settings-section">
-          <div class="settings-section-head">
-            <div>
-              <h3>钉钉机器人</h3>
-              <p>Stream 机器人负责接收群命令；通知开关用于任务成功或失败后向钉钉群发送简洁摘要。</p>
-            </div>
-          </div>
-          <div class="settings-subsection">
-            <div class="settings-subsection-head">
-              <h4>Stream 接收命令</h4>
-              <p>连接：<span id="dingtalkConnectionState">{{ dingtalk_stream.connection_state or 'stopped' }}</span>；线程：<span id="dingtalkThreadState">-</span>；重连次数：<span id="dingtalkReconnectCount">{{ dingtalk_stream.reconnect_count or 0 }}</span></p>
-              <p>最近连接：<span id="dingtalkLastConnected">{{ dingtalk_stream.last_connected_at or '-' }}</span>；最近接收：<span id="dingtalkLastReceived">{{ dingtalk_stream.last_received_at or '-' }}</span></p>
-              <p id="dingtalkConnectionError"></p>
-            </div>
-          <div class="settings-grid settings-grid-dingtalk-stream">
-            <label class="check settings-check-field"><input type="checkbox" name="dingtalk_stream_enabled" value="true"> 启用 Stream 接收命令</label>
-            <label>CorpId <input name="dingtalk_stream_corp_id" value="{{ runtime.dingtalk_stream_corp_id }}" placeholder="ding..."></label>
-            <label>AgentId <input name="dingtalk_stream_agent_id" value="{{ runtime.dingtalk_stream_agent_id }}" placeholder="4322749407"></label>
-            <label>Robot Code <input name="dingtalk_stream_robot_code" value="{{ runtime.dingtalk_stream_robot_code }}" placeholder="机器人 robotCode / Client ID"></label>
-            <label>默认群 openConversationId <input name="dingtalk_stream_open_conversation_id" value="{{ runtime.dingtalk_stream_open_conversation_id }}" placeholder="cid..."></label>
-            <label>Client ID <input name="dingtalk_stream_client_id" value="{{ runtime.dingtalk_stream_client_id }}" placeholder="ding..."></label>
-            <label>Client Secret <input name="dingtalk_stream_client_secret" type="password" placeholder="{% if runtime.dingtalk_stream_client_secret_configured %}已配置，留空则不修改{% else %}留空则尝试使用 API Token{% endif %}"></label>
-            <label>API Token <input name="dingtalk_stream_api_token" type="password" placeholder="{% if runtime.dingtalk_stream_api_token_configured %}已配置，留空则不修改{% else %}钉钉 Stream 模式 API Token{% endif %}"></label>
-          </div>
-          </div>
-          <div class="settings-subsection">
-            <div class="settings-subsection-head"><h4>自然语言对话</h4></div>
-            <div class="settings-grid settings-grid-dingtalk-stream">
-              <label class="check settings-check-field"><input type="checkbox" name="dingtalk_chat_enabled" value="true"> 启用自然语言对话</label>
-              <label class="check settings-check-field"><input type="checkbox" name="dingtalk_chat_use_main_llm" value="true"> 使用主 LLM 连接</label>
-              <label>独立模型 Base URL <input name="dingtalk_chat_base_url" value="{{ runtime.dingtalk_chat_base_url }}" type="url"></label>
-              <label>独立模型 <input name="dingtalk_chat_model" value="{{ runtime.dingtalk_chat_model }}"></label>
-              <label>独立模型 API Key <input name="dingtalk_chat_api_key" type="password" autocomplete="new-password" placeholder="{% if runtime.dingtalk_chat_api_key_configured %}已配置，留空则不修改{% else %}未配置{% endif %}"></label>
-              <label>对话超时（秒） <input name="dingtalk_chat_timeout_seconds" type="number" min="3" max="60" value="{{ runtime.dingtalk_chat_timeout_seconds }}"></label>
-              <label>上下文轮数 <input name="dingtalk_chat_context_turns" type="number" min="0" max="8" value="{{ runtime.dingtalk_chat_context_turns }}"></label>
-              <label>每人每会话每分钟请求数 <input name="dingtalk_chat_requests_per_minute" type="number" min="1" max="30" value="{{ runtime.dingtalk_chat_requests_per_minute }}"></label>
-            </div>
-          </div>
-          <div class="settings-subsection dingtalk-notify-subsection">
-            <div class="settings-subsection-head"><h4>停止权限</h4></div>
-            <div class="settings-grid settings-grid-dingtalk">
-              <label>钉钉管理员 ID 白名单 <textarea name="dingtalk_admin_user_ids" rows="3" placeholder="corpId/userId">{{ runtime.dingtalk_admin_user_ids }}</textarea></label>
-              <label>管理群 ID 白名单 <textarea name="dingtalk_management_group_ids" rows="3" placeholder="cid...">{{ runtime.dingtalk_management_group_ids }}</textarea></label>
-            </div>
-          </div>
-          <div class="settings-subsection dingtalk-notify-subsection">
-            <div class="settings-subsection-head">
-              <h4>通知发送</h4>
-              <p>任务成功或失败后发送摘要；通知失败只写入运行日志。</p>
-            </div>
-          <div class="settings-grid settings-grid-dingtalk">
-            <label class="check settings-check-field"><input type="checkbox" name="dingtalk_notification_enabled" value="true"> 启用钉钉通知</label>
-            <label class="check settings-check-field"><input type="checkbox" name="dingtalk_at_all" value="true"> 通知时 @ 所有人</label>
-          </div>
-          </div>
-        </section>
+            <section class="settings-section" data-settings-group="connection">
+              <div class="settings-section-head">
+                <div>
+                  <h3>WorkBuddy 本机配置</h3>
+                  <p>本地桌面客户端路径与联动开关。</p>
+                </div>
+              </div>
+              <div class="settings-grid settings-grid-connection">
+                <input type="hidden" name="workbuddy_config_present" value="true">
+                <label class="settings-field-wide">客户端路径
+                  <input name="workbuddy_executable" value="{{ runtime.workbuddy_executable }}" autocomplete="off">
+                </label>
+                <label>项目名称 <input name="workbuddy_project_name" value="{{ runtime.workbuddy_project_name }}"></label>
+                <label class="check"><input type="checkbox" name="workbuddy_desktop_enabled" value="true" {% if runtime.workbuddy_desktop_enabled %}checked{% endif %}> 启用桌面联动</label>
+                <div class="settings-field-wide">
+                  <div class="model-picker">
+                    <select id="workbuddyCandidates" aria-label="WorkBuddy 客户端候选" hidden></select>
+                    <button type="button" id="detectWorkBuddy">检测客户端</button>
+                  </div>
+                  <p class="field-note" id="workbuddyDetectionState" role="status">{% if runtime.workbuddy_executable and not runtime.workbuddy_path_valid %}已保存的客户端路径无效。{% endif %}</p>
+                </div>
+              </div>
+            </section>
 
-        <section class="settings-section" id="settingsSchedule">
-          <div class="settings-section-head">
-            <div>
-              <h3>定时审批</h3>
-              <p>按周期或固定时间自动获取 ERP 最新待办清单，并跳过仍需人工复核的清单。</p>
+            <section class="settings-section" data-settings-group="connection">
+              <div class="settings-section-head">
+                <div>
+                  <h3>LLM 配置</h3>
+                  <p>模型服务、连接地址、模型名称与调用容错。</p>
+                </div>
+              </div>
+              <div class="settings-grid settings-grid-llm">
+                <label>LLM API Key <input name="llm_api_key" type="password" placeholder="留空则不修改"></label>
+                <label>
+                  LLM Provider
+                  <select name="llm_provider" id="llmProviderSelect"></select>
+                </label>
+                <label>LLM Base URL <input name="llm_base_url" id="llmBaseUrlInput" value="{{ runtime.llm_base_url }}"></label>
+                <label class="settings-field-wide">
+                  LLM Model
+                  <div class="model-picker">
+                    <select name="llm_model" id="llmModelSelect"></select>
+                    <button type="button" id="refreshLlmModels">获取模型</button>
+                  </div>
+                  <span id="llmModelStatus" class="field-note">填入 API Key 后可自动读取该平台模型列表。</span>
+                </label>
+                <label>LLM 超时秒数 <input name="llm_timeout_seconds" value="{{ runtime.llm_timeout_seconds }}"></label>
+                <label>LLM 重试次数 <input name="llm_max_retries" value="{{ runtime.llm_max_retries }}"></label>
+              </div>
+            </section>
+
+            <section class="settings-section" data-settings-group="connection">
+              <div class="settings-section-head">
+                <div>
+                  <h3>V1 缺 CAS 名称补全</h3>
+                  <p>仅在首轮名称检索无可信结果时调用百炼生成候选英文名/CAS；候选必须由外部化学来源核验，不会改写 ERP CAS。</p>
+                </div>
+              </div>
+              <div class="settings-grid settings-grid-llm">
+                <label class="check"><input type="checkbox" name="identity_enrichment_enabled" value="true" {% if runtime.identity_enrichment_enabled == 'true' %}checked{% endif %}> 启用 V1 缺 CAS 名称补全</label>
+                <label class="settings-field-wide">
+                  百炼 Base URL
+                  <input name="identity_enrichment_base_url" id="identityEnrichmentBaseUrlInput" value="{{ runtime.identity_enrichment_base_url }}" placeholder="https://dashscope.aliyuncs.com/compatible-mode/v1">
+                </label>
+                <label class="settings-field-wide">
+                  百炼补全模型
+                  <div class="model-picker">
+                    <select name="identity_enrichment_model" id="identityEnrichmentModelSelect"></select>
+                    <button type="button" id="refreshIdentityEnrichmentModels">获取百炼模型</button>
+                  </div>
+                  <span id="identityEnrichmentModelStatus" class="field-note">使用 V1 补全专属百炼地址与 API Key；可读取模型列表或选择默认模型。</span>
+                </label>
+                <label>单条超时秒数 <input name="identity_enrichment_timeout_seconds" value="{{ runtime.identity_enrichment_timeout_seconds }}"></label>
+                <label>每批上限 <input name="identity_enrichment_max_calls_per_batch" value="{{ runtime.identity_enrichment_max_calls_per_batch }}"></label>
+                <label>每日上限（0 为不限） <input name="identity_enrichment_max_calls_per_day" value="{{ runtime.identity_enrichment_max_calls_per_day }}"></label>
+                <label>百炼 API Key <input name="identity_enrichment_api_key" type="password" placeholder="{% if runtime.identity_enrichment_api_key_configured %}已配置，留空则不修改{% else %}留空则不修改{% endif %}"></label>
+              </div>
+              <p class="field-note">V1 缺 CAS 补全独立使用阿里云百炼配置；主 LLM 使用上方单独选择的平台、地址、模型和 API Key。</p>
+            </section>
+
+            <!-- Group 2: 审批与定时 -->
+            <section class="settings-section" data-settings-group="policy" data-default-open="true">
+              <div class="settings-section-head">
+                <div>
+                  <h3>运行安全策略</h3>
+                  <p>默认写入模式、置信度阈值、并发与自动通过策略。</p>
+                </div>
+              </div>
+              <div class="settings-grid settings-grid-policy">
+                <label class="check settings-check-field"><input type="checkbox" name="app_dry_run" value="true"> 测试模式 dry_run（开启时只生成建议，不写入 ERP 网页）</label>
+                <label>
+                  默认写入模式
+                  <select name="approval_write_mode">
+                    <option value="disabled">禁用网页写入</option>
+                    <option value="multi_page">全清单分页保存</option>
+                    <option value="generate_library">保存并生成试剂库</option>
+                  </select>
+                </label>
+                <label>
+                  默认写入后端
+                  <select name="erp_write_backend">
+                    <option value="web_ui">页面写入</option>
+                    <option value="api_read_web_write">接口读取 + 页面写入</option>
+                    <option value="api_write_with_web_verify">接口写入 + 接口/页面校验</option>
+                  </select>
+                </label>
+                <label>默认最低置信度 <input name="approval_write_min_confidence" value="{{ runtime.approval_write_min_confidence }}"></label>
+                <label>ERP 每批写入条数 <input name="approval_write_batch_size" value="{{ runtime.approval_write_batch_size }}"></label>
+                <label>V1 查询/LLM worker 数 <input name="approval_parallel_workers" value="{{ runtime.approval_parallel_workers }}"></label>
+              </div>
+              <div class="switches settings-policy-strip">
+                <label class="check"><input type="checkbox" name="process_all_todos" value="true"> 默认处理全部待办</label>
+                <label class="inline-field">最多处理 <input class="small-input" name="process_all_todos_max" value="{{ runtime.process_all_todos_max }}"></label>
+                <label class="check danger-check"><input type="checkbox" name="auto_pass" value="true"> 默认 AUTO_PASS</label>
+              </div>
+            </section>
+
+            <section class="settings-section" id="settingsSchedule" data-settings-group="policy">
+              <div class="settings-section-head">
+                <div>
+                  <h3>定时审批</h3>
+                  <p>按周期或固定时间自动获取 ERP 最新待办清单，并跳过仍需人工复核的清单。</p>
+                </div>
+              </div>
+              <div class="settings-grid settings-grid-scheduler">
+                <label class="check settings-check-field"><input type="checkbox" name="scheduler_enabled" value="true"> 启用定时审批</label>
+                <label>审批链路
+                  <select name="scheduler_pipeline">
+                    <option value="workbuddy">WorkBuddy（默认）</option>
+                    <option value="v1">V1（显式选择）</option>
+                  </select>
+                </label>
+                <label>
+                  规则类型
+                  <select name="scheduler_mode" id="schedulerMode">
+                    <option value="interval">每隔 N 小时</option>
+                    <option value="daily">每天固定时间</option>
+                  </select>
+                </label>
+                <label>间隔小时 <input name="scheduler_interval_hours" value="{{ runtime.scheduler_interval_hours }}"></label>
+                <label>每天时间 <input name="scheduler_daily_time" type="time" value="{{ runtime.scheduler_daily_time }}"></label>
+                <label class="check settings-check-field"><input type="checkbox" name="scheduler_use_default_run_policy" value="true"> 沿用基础写入设置</label>
+              </div>
+              <p class="muted">已有定时任务也默认切换为 WorkBuddy。投递前不可用时回退 V1；回退允许按写入设置保存，但不会自动点击最终“通过”。</p>
+              <div class="switches settings-policy-strip">
+                <label class="check"><input type="checkbox" name="scheduler_skip_manual_review_lists" value="true"> 跳过人工复核未完成清单</label>
+              </div>
+              <div id="schedulerAdvancedPolicy" class="scheduler-advanced-policy">
+                <div class="settings-section-head compact-head">
+                  <div>
+                    <h3>定时任务单独执行策略</h3>
+                    <p>关闭“沿用基础写入设置”后生效；WorkBuddy 不使用 V1 置信度门槛。</p>
+                  </div>
+                </div>
+                <div class="settings-grid settings-grid-scheduler-policy">
+                  <label>单次最多处理 <input name="scheduler_process_all_todos_max" value="{{ runtime.scheduler_process_all_todos_max }}"></label>
+                  <label>
+                    定时写入模式
+                    <select name="scheduler_approval_write_mode">
+                      <option value="disabled">禁用网页写入</option>
+                      <option value="multi_page">全清单分页保存</option>
+                      <option value="generate_library">保存并生成试剂库</option>
+                    </select>
+                  </label>
+                  <label>定时最低置信度 <input name="scheduler_approval_write_min_confidence" value="{{ runtime.scheduler_approval_write_min_confidence }}"></label>
+                </div>
+              </div>
+              <div class="scheduler-status">
+                <span>下次执行 <strong id="schedulerNextRun">-</strong></span>
+                <span>上次执行 <strong id="schedulerLastRun">-</strong></span>
+                <span>上次结果 <strong id="schedulerLastResult">-</strong></span>
+                <span>上次说明 <strong id="schedulerLastMessage">-</strong></span>
+              </div>
+            </section>
+
+            <!-- Group 3: 钉钉与云同步 -->
+            <section class="settings-section" data-settings-group="integration">
+              <div class="settings-section-head">
+                <div>
+                  <h3>钉钉机器人</h3>
+                  <p>Stream 机器人负责接收群命令；通知开关用于任务成功或失败后向钉钉群发送简洁摘要。</p>
+                </div>
+              </div>
+              <div class="settings-subsection">
+                <div class="settings-subsection-head">
+                  <h4>Stream 接收命令</h4>
+                  <p>连接：<span id="dingtalkConnectionState">{{ dingtalk_stream.connection_state or 'stopped' }}</span>；线程：<span id="dingtalkThreadState">-</span>；重连次数：<span id="dingtalkReconnectCount">{{ dingtalk_stream.reconnect_count or 0 }}</span></p>
+                  <p>最近连接：<span id="dingtalkLastConnected">{{ dingtalk_stream.last_connected_at or '-' }}</span>；最近接收：<span id="dingtalkLastReceived">{{ dingtalk_stream.last_received_at or '-' }}</span></p>
+                  <p id="dingtalkConnectionError"></p>
+                </div>
+                <div class="settings-grid settings-grid-dingtalk-stream">
+                  <label class="check settings-check-field"><input type="checkbox" name="dingtalk_stream_enabled" value="true"> 启用 Stream 接收命令</label>
+                  <label>CorpId <input name="dingtalk_stream_corp_id" value="{{ runtime.dingtalk_stream_corp_id }}" placeholder="ding..."></label>
+                  <label>AgentId <input name="dingtalk_stream_agent_id" value="{{ runtime.dingtalk_stream_agent_id }}" placeholder="4322749407"></label>
+                  <label>Robot Code <input name="dingtalk_stream_robot_code" value="{{ runtime.dingtalk_stream_robot_code }}" placeholder="机器人 robotCode / Client ID"></label>
+                  <label>默认群 openConversationId <input name="dingtalk_stream_open_conversation_id" value="{{ runtime.dingtalk_stream_open_conversation_id }}" placeholder="cid..."></label>
+                  <label>Client ID <input name="dingtalk_stream_client_id" value="{{ runtime.dingtalk_stream_client_id }}" placeholder="ding..."></label>
+                  <label>Client Secret <input name="dingtalk_stream_client_secret" type="password" placeholder="{% if runtime.dingtalk_stream_client_secret_configured %}已配置，留空则不修改{% else %}留空则尝试使用 API Token{% endif %}"></label>
+                  <label>API Token <input name="dingtalk_stream_api_token" type="password" placeholder="{% if runtime.dingtalk_stream_api_token_configured %}已配置，留空则不修改{% else %}钉钉 Stream 模式 API Token{% endif %}"></label>
+                </div>
+              </div>
+              <div class="settings-subsection">
+                <div class="settings-subsection-head"><h4>自然语言对话</h4></div>
+                <div class="settings-grid settings-grid-dingtalk-stream">
+                  <label class="check settings-check-field"><input type="checkbox" name="dingtalk_chat_enabled" value="true"> 启用自然语言对话</label>
+                  <label class="check settings-check-field"><input type="checkbox" name="dingtalk_chat_use_main_llm" value="true"> 使用主 LLM 连接</label>
+                  <label>独立模型 Base URL <input name="dingtalk_chat_base_url" value="{{ runtime.dingtalk_chat_base_url }}" type="url"></label>
+                  <label>独立模型 <input name="dingtalk_chat_model" value="{{ runtime.dingtalk_chat_model }}"></label>
+                  <label>独立模型 API Key <input name="dingtalk_chat_api_key" type="password" autocomplete="new-password" placeholder="{% if runtime.dingtalk_chat_api_key_configured %}已配置，留空则不修改{% else %}未配置{% endif %}"></label>
+                  <label>对话超时（秒） <input name="dingtalk_chat_timeout_seconds" type="number" min="3" max="60" value="{{ runtime.dingtalk_chat_timeout_seconds }}"></label>
+                  <label>上下文轮数 <input name="dingtalk_chat_context_turns" type="number" min="0" max="8" value="{{ runtime.dingtalk_chat_context_turns }}"></label>
+                  <label>每人每会话每分钟请求数 <input name="dingtalk_chat_requests_per_minute" type="number" min="1" max="30" value="{{ runtime.dingtalk_chat_requests_per_minute }}"></label>
+                  <label class="settings-field-wide">角色提示词 <textarea id="dingtalkChatPersonaPrompt" name="dingtalk_chat_persona_prompt" rows="7" maxlength="2000">{{ runtime.dingtalk_chat_persona_prompt }}</textarea></label>
+                </div>
+                <div class="button-row">
+                  <button type="button" id="resetDingtalkChatPersonaButton" title="恢复活泼健谈、称呼客官的默认设定">恢复默认角色</button>
+                </div>
+              </div>
+              <div class="settings-subsection dingtalk-notify-subsection">
+                <div class="settings-subsection-head"><h4>停止权限</h4></div>
+                <div class="settings-grid settings-grid-dingtalk">
+                  <label>钉钉管理员 ID 白名单 <textarea name="dingtalk_admin_user_ids" rows="3" placeholder="corpId/userId">{{ runtime.dingtalk_admin_user_ids }}</textarea></label>
+                  <label>管理群 ID 白名单 <textarea name="dingtalk_management_group_ids" rows="3" placeholder="cid...">{{ runtime.dingtalk_management_group_ids }}</textarea></label>
+                </div>
+              </div>
+              <div class="settings-subsection dingtalk-notify-subsection">
+                <div class="settings-subsection-head">
+                  <h4>通知发送</h4>
+                  <p>任务成功或失败后发送摘要；通知失败只写入运行日志。</p>
+                </div>
+                <div class="settings-grid settings-grid-dingtalk">
+                  <label class="check settings-check-field"><input type="checkbox" name="dingtalk_notification_enabled" value="true"> 启用钉钉通知</label>
+                  <label class="check settings-check-field"><input type="checkbox" name="dingtalk_at_all" value="true"> 通知时 @ 所有人</label>
+                </div>
+              </div>
+            </section>
+
+            <section class="settings-section memory-sync-section" id="settingsMaintenance" data-settings-group="integration">
+              <div class="settings-section-head">
+                <div>
+                  <h3>试剂库同步（坚果云 WebDAV）</h3>
+                  <p>使用坚果云 WebDAV 上传和下载本地试剂记忆库快照；下载前会自动备份本地库。</p>
+                </div>
+              </div>
+              <div class="update-panel memory-sync-panel">
+                <div class="update-status-grid">
+                  <span>本地记录 <strong id="memorySyncLocalRecords">-</strong></span>
+                  <span>本地更新时间 <strong id="memorySyncLocalUpdated">-</strong></span>
+                  <span>最近上传 <strong id="memorySyncLastUpload">-</strong></span>
+                  <span>最近下载 <strong id="memorySyncLastDownload">-</strong></span>
+                  <span>云端版本 <strong id="memorySyncRemoteVersion">-</strong></span>
+                  <span>同步状态 <strong id="memorySyncStateText">未检查</strong></span>
+                </div>
+                <div class="settings-grid settings-grid-memory-sync">
+                  <label class="check settings-check-field"><input type="checkbox" name="memory_sync_enabled" value="true"> 启用试剂库同步</label>
+                  <label>WebDAV 地址 <input name="memory_sync_base_url" value="{{ runtime.memory_sync_base_url }}" placeholder="https://dav.jianguoyun.com/dav/"></label>
+                  <label>远端目录 <input name="memory_sync_remote_dir" value="{{ runtime.memory_sync_remote_dir }}" placeholder="reagent-approval-bot"></label>
+                  <label>用户名 <input name="memory_sync_username" value="{{ runtime.memory_sync_username }}" placeholder="坚果云账号邮箱"></label>
+                  <label>应用密码 <input name="memory_sync_password" type="password" placeholder="{% if runtime.memory_sync_password_configured %}已配置，留空则不修改{% else %}坚果云 WebDAV 应用密码{% endif %}"></label>
+                  <label>保留版本数 <input name="memory_sync_keep_versions" value="{{ runtime.memory_sync_keep_versions }}"></label>
+                </div>
+                <div class="switches settings-policy-strip">
+                  <label class="check"><input type="checkbox" name="memory_sync_auto_upload_after_memory_change" value="true"> 任务结束后自动上传试剂库</label>
+                  <label class="check"><input type="checkbox" name="memory_sync_check_remote_on_startup" value="true"> 打开设置时检查云端新版</label>
+                </div>
+                <div class="update-actions">
+                  <button type="button" id="testMemorySyncButton">测试连接</button>
+                  <button type="button" id="uploadMemorySyncButton" class="primary">上传本地试剂库</button>
+                  <button type="button" id="downloadMemorySyncButton">下载云端试剂库</button>
+                  <button type="button" id="forceDownloadMemorySyncButton" class="danger-button" hidden>强制覆盖本地库</button>
+                </div>
+                <p id="memorySyncMessage" class="field-note">建议使用坚果云应用密码；同步文件不进入 Git 仓库。</p>
+              </div>
+            </section>
+
+            <!-- Group 4: 维护与迁移 -->
+            <section class="settings-section update-section" data-settings-group="maintenance">
+              <div class="settings-section-head">
+                <div>
+                  <h3>程序更新</h3>
+                  <p>通过 GitHub Releases 检查新版安装包，下载后自动覆盖安装并保留本地配置与数据库。</p>
+                </div>
+              </div>
+              <div class="update-panel">
+                <div class="update-status-grid">
+                  <span>当前版本 <strong id="currentVersionText">{{ runtime.app_version }}</strong></span>
+                  <span>最新版本 <strong id="latestVersionText">-</strong></span>
+                  <span>运行模式 <strong id="appModeText">{{ "安装版" if runtime.app_frozen else "源码模式" }}</strong></span>
+                  <span>更新状态 <strong id="settingsUpdateStateText" data-update-state>未检查</strong></span>
+                </div>
+                <label>GitHub 更新 Token <input name="update_token" type="password" placeholder="{% if runtime.update_token_configured %}已配置，留空则不修改{% else %}私有仓库需要 fine-grained read token{% endif %}"></label>
+                <div class="update-actions">
+                  <button type="button" id="settingsCheckUpdateButton" data-update-action="check">检查更新</button>
+                  <button type="button" id="settingsInstallUpdateButton" data-update-action="install" class="primary" disabled>下载并安装</button>
+                  <a id="settingsReleaseLink" data-update-release class="ghost-link" href="#" target="_blank" rel="noreferrer" hidden>查看 Release</a>
+                </div>
+                <p id="settingsUpdateMessage" data-update-message class="field-note">正式安装版可在这里在线更新；源码模式只检查版本，不自动覆盖安装。</p>
+              </div>
+            </section>
+
+            <div class="settings-actions">
+              <span id="settingsSaveState" class="save-state" role="status">无未保存更改</span>
+              <button type="submit" class="primary">保存设置</button>
             </div>
-          </div>
-          <div class="settings-grid settings-grid-scheduler">
-            <label class="check settings-check-field"><input type="checkbox" name="scheduler_enabled" value="true"> 启用定时审批</label>
-            <label>审批链路
-              <select name="scheduler_pipeline">
-                <option value="workbuddy">WorkBuddy（默认）</option>
-                <option value="v1">V1（显式选择）</option>
-              </select>
-            </label>
-            <label>
-              规则类型
-              <select name="scheduler_mode" id="schedulerMode">
-                <option value="interval">每隔 N 小时</option>
-                <option value="daily">每天固定时间</option>
-              </select>
-            </label>
-            <label>间隔小时 <input name="scheduler_interval_hours" value="{{ runtime.scheduler_interval_hours }}"></label>
-            <label>每天时间 <input name="scheduler_daily_time" type="time" value="{{ runtime.scheduler_daily_time }}"></label>
-            <label class="check settings-check-field"><input type="checkbox" name="scheduler_use_default_run_policy" value="true"> 沿用基础写入设置</label>
-          </div>
-          <p class="muted">已有定时任务也默认切换为 WorkBuddy。投递前不可用时回退 V1；回退允许按写入设置保存，但不会自动点击最终“通过”。</p>
-          <div class="switches settings-policy-strip">
-            <label class="check"><input type="checkbox" name="scheduler_skip_manual_review_lists" value="true"> 跳过人工复核未完成清单</label>
-          </div>
-          <div id="schedulerAdvancedPolicy" class="scheduler-advanced-policy">
-            <div class="settings-section-head compact-head">
+          </form>
+
+          <section class="settings-section" id="configTransfer" data-settings-group="maintenance">
+            <div class="settings-section-head">
               <div>
-                <h3>定时任务单独执行策略</h3>
-                <p>关闭“沿用基础写入设置”后生效；WorkBuddy 不使用 V1 置信度门槛。</p>
+                <h3>配置导入与导出</h3>
+                <p>配置文件包含加密后的设置与凭据。迁移时使用导出时设置的口令。</p>
               </div>
             </div>
-            <div class="settings-grid settings-grid-scheduler-policy">
-            <label>单次最多处理 <input name="scheduler_process_all_todos_max" value="{{ runtime.scheduler_process_all_todos_max }}"></label>
-            <label>
-              定时写入模式
-              <select name="scheduler_approval_write_mode">
-                <option value="disabled">禁用网页写入</option>
-                <option value="multi_page">全清单分页保存</option>
-                <option value="generate_library">保存并生成试剂库</option>
-              </select>
-            </label>
-            <label>定时最低置信度 <input name="scheduler_approval_write_min_confidence" value="{{ runtime.scheduler_approval_write_min_confidence }}"></label>
+            <div class="form-row">
+              <label>配置口令 <input id="configTransferPassphrase" type="password" autocomplete="new-password" minlength="12" maxlength="256"></label>
+              <label>待导入文件 <input id="configTransferFile" type="file" accept=".rabconfig"></label>
             </div>
-          </div>
-          <div class="scheduler-status">
-            <span>下次执行 <strong id="schedulerNextRun">-</strong></span>
-            <span>上次执行 <strong id="schedulerLastRun">-</strong></span>
-            <span>上次结果 <strong id="schedulerLastResult">-</strong></span>
-            <span>上次说明 <strong id="schedulerLastMessage">-</strong></span>
-          </div>
-        </section>
-
-        <section class="settings-section">
-          <div class="settings-section-head">
-            <div>
-              <h3>LLM 配置</h3>
-              <p>模型服务、连接地址、模型名称与调用容错。</p>
+            <div class="settings-actions">
+              <button id="exportConfigButton" type="button">导出加密配置</button>
+              <button id="previewConfigButton" type="button">预览导入</button>
+              <button id="applyConfigButton" type="button" class="primary" hidden>确认应用配置</button>
             </div>
-          </div>
-          <div class="settings-grid settings-grid-llm">
-            <label>LLM API Key <input name="llm_api_key" type="password" placeholder="留空则不修改"></label>
-            <label>
-              LLM Provider
-              <select name="llm_provider" id="llmProviderSelect"></select>
-            </label>
-            <label>LLM Base URL <input name="llm_base_url" id="llmBaseUrlInput" value="{{ runtime.llm_base_url }}"></label>
-            <label class="settings-field-wide">
-              LLM Model
-              <div class="model-picker">
-                <select name="llm_model" id="llmModelSelect"></select>
-                <button type="button" id="refreshLlmModels">获取模型</button>
-              </div>
-              <span id="llmModelStatus" class="field-note">填入 API Key 后可自动读取该平台模型列表。</span>
-            </label>
-            <label>LLM 超时秒数 <input name="llm_timeout_seconds" value="{{ runtime.llm_timeout_seconds }}"></label>
-            <label>LLM 重试次数 <input name="llm_max_retries" value="{{ runtime.llm_max_retries }}"></label>
-          </div>
-        </section>
-
-        <section class="settings-section" data-default-open="true">
-          <div class="settings-section-head">
-            <div>
-              <h3>运行安全策略</h3>
-              <p>默认写入模式、置信度阈值、并发与自动通过策略。</p>
-            </div>
-          </div>
-          <div class="settings-grid settings-grid-policy">
-            <label class="check settings-check-field"><input type="checkbox" name="app_dry_run" value="true"> 测试模式 dry_run（开启时只生成建议，不写入 ERP 网页）</label>
-            <label>
-              默认写入模式
-              <select name="approval_write_mode">
-                <option value="disabled">禁用网页写入</option>
-                <option value="multi_page">全清单分页保存</option>
-                <option value="generate_library">保存并生成试剂库</option>
-              </select>
-            </label>
-            <label>
-              默认写入后端
-              <select name="erp_write_backend">
-                <option value="web_ui">页面写入</option>
-                <option value="api_read_web_write">接口读取 + 页面写入</option>
-                <option value="api_write_with_web_verify">接口写入 + 接口/页面校验</option>
-              </select>
-            </label>
-            <label>默认最低置信度 <input name="approval_write_min_confidence" value="{{ runtime.approval_write_min_confidence }}"></label>
-            <label>ERP 每批写入条数 <input name="approval_write_batch_size" value="{{ runtime.approval_write_batch_size }}"></label>
-            <label>V1 查询/LLM worker 数 <input name="approval_parallel_workers" value="{{ runtime.approval_parallel_workers }}"></label>
-          </div>
-          <div class="switches settings-policy-strip">
-            <label class="check"><input type="checkbox" name="process_all_todos" value="true"> 默认处理全部待办</label>
-            <label class="inline-field">最多处理 <input class="small-input" name="process_all_todos_max" value="{{ runtime.process_all_todos_max }}"></label>
-            <label class="check danger-check"><input type="checkbox" name="auto_pass" value="true"> 默认 AUTO_PASS</label>
-          </div>
-        </section>
-
-        <section class="settings-section memory-sync-section" id="settingsMaintenance">
-          <div class="settings-section-head">
-            <div>
-              <h3>试剂库同步（坚果云 WebDAV）</h3>
-              <p>使用坚果云 WebDAV 上传和下载本地试剂记忆库快照；下载前会自动备份本地库。</p>
-            </div>
-          </div>
-          <div class="update-panel memory-sync-panel">
-            <div class="update-status-grid">
-              <span>本地记录 <strong id="memorySyncLocalRecords">-</strong></span>
-              <span>本地更新时间 <strong id="memorySyncLocalUpdated">-</strong></span>
-              <span>最近上传 <strong id="memorySyncLastUpload">-</strong></span>
-              <span>最近下载 <strong id="memorySyncLastDownload">-</strong></span>
-              <span>云端版本 <strong id="memorySyncRemoteVersion">-</strong></span>
-              <span>同步状态 <strong id="memorySyncStateText">未检查</strong></span>
-            </div>
-            <div class="settings-grid settings-grid-memory-sync">
-              <label class="check settings-check-field"><input type="checkbox" name="memory_sync_enabled" value="true"> 启用试剂库同步</label>
-              <label>WebDAV 地址 <input name="memory_sync_base_url" value="{{ runtime.memory_sync_base_url }}" placeholder="https://dav.jianguoyun.com/dav/"></label>
-              <label>远端目录 <input name="memory_sync_remote_dir" value="{{ runtime.memory_sync_remote_dir }}" placeholder="reagent-approval-bot"></label>
-              <label>用户名 <input name="memory_sync_username" value="{{ runtime.memory_sync_username }}" placeholder="坚果云账号邮箱"></label>
-              <label>应用密码 <input name="memory_sync_password" type="password" placeholder="{% if runtime.memory_sync_password_configured %}已配置，留空则不修改{% else %}坚果云 WebDAV 应用密码{% endif %}"></label>
-              <label>保留版本数 <input name="memory_sync_keep_versions" value="{{ runtime.memory_sync_keep_versions }}"></label>
-            </div>
-            <div class="switches settings-policy-strip">
-              <label class="check"><input type="checkbox" name="memory_sync_auto_upload_after_memory_change" value="true"> 任务结束后自动上传试剂库</label>
-              <label class="check"><input type="checkbox" name="memory_sync_check_remote_on_startup" value="true"> 打开设置时检查云端新版</label>
-            </div>
-            <div class="update-actions">
-              <button type="button" id="testMemorySyncButton">测试连接</button>
-              <button type="button" id="uploadMemorySyncButton" class="primary">上传本地试剂库</button>
-              <button type="button" id="downloadMemorySyncButton">下载云端试剂库</button>
-              <button type="button" id="forceDownloadMemorySyncButton" class="danger-button" hidden>强制覆盖本地库</button>
-            </div>
-            <p id="memorySyncMessage" class="field-note">建议使用坚果云应用密码；同步文件不进入 Git 仓库。</p>
-          </div>
-        </section>
-
-        <section class="settings-section update-section">
-          <div class="settings-section-head">
-            <div>
-              <h3>程序更新</h3>
-              <p>通过 GitHub Releases 检查新版安装包，下载后自动覆盖安装并保留本地配置与数据库。</p>
-            </div>
-          </div>
-          <div class="update-panel">
-            <div class="update-status-grid">
-              <span>当前版本 <strong id="currentVersionText">{{ runtime.app_version }}</strong></span>
-              <span>最新版本 <strong id="latestVersionText">-</strong></span>
-              <span>运行模式 <strong id="appModeText">{{ "安装版" if runtime.app_frozen else "源码模式" }}</strong></span>
-              <span>更新状态 <strong id="settingsUpdateStateText" data-update-state>未检查</strong></span>
-            </div>
-            <label>GitHub 更新 Token <input name="update_token" type="password" placeholder="{% if runtime.update_token_configured %}已配置，留空则不修改{% else %}私有仓库需要 fine-grained read token{% endif %}"></label>
-            <div class="update-actions">
-              <button type="button" id="settingsCheckUpdateButton" data-update-action="check">检查更新</button>
-              <button type="button" id="settingsInstallUpdateButton" data-update-action="install" class="primary" disabled>下载并安装</button>
-              <a id="settingsReleaseLink" data-update-release class="ghost-link" href="#" target="_blank" rel="noreferrer" hidden>查看 Release</a>
-            </div>
-            <p id="settingsUpdateMessage" data-update-message class="field-note">正式安装版可在这里在线更新；源码模式只检查版本，不自动覆盖安装。</p>
-          </div>
-        </section>
-
-        <div class="settings-actions">
-          <span id="settingsSaveState" class="save-state" role="status">无未保存更改</span>
-          <button type="submit" class="primary">保存设置</button>
+            <p id="configTransferMessage" class="field-note" role="status"></p>
+            <ul id="configTransferChanges"></ul>
+          </section>
         </div>
-      </form>
-      <section class="settings-section" id="configTransfer">
-        <div class="settings-section-head">
-          <div>
-            <h3>配置导入与导出</h3>
-            <p>配置文件包含加密后的设置与凭据。迁移时使用导出时设置的口令。</p>
-          </div>
-        </div>
-        <div class="form-row">
-          <label>配置口令 <input id="configTransferPassphrase" type="password" autocomplete="new-password" minlength="12" maxlength="256"></label>
-          <label>待导入文件 <input id="configTransferFile" type="file" accept=".rabconfig"></label>
-        </div>
-        <div class="settings-actions">
-          <button id="exportConfigButton" type="button">导出加密配置</button>
-          <button id="previewConfigButton" type="button">预览导入</button>
-          <button id="applyConfigButton" type="button" class="primary" hidden>确认应用配置</button>
-        </div>
-        <p id="configTransferMessage" class="field-note" role="status"></p>
-        <ul id="configTransferChanges"></ul>
-      </section>
+      </div>
     </section>

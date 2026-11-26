@@ -3,19 +3,32 @@
         <div class="panel-title utility-header log-header">
           <div>
             <h2>运行日志</h2>
-            <p>最近 160 行输出。</p>
+            <p>最近 160 行输出（支持关键字过滤与级别高亮）。</p>
           </div>
           <div class="log-tools">
+            <div class="log-search-wrap">
+              <svg width="14" height="14" aria-hidden="true"><use href="#icon-search"/></svg>
+              <input id="logSearchInput" type="search" placeholder="搜索日志关键字…" aria-label="搜索日志关键字">
+            </div>
             <div class="log-filter" role="group" aria-label="日志过滤">
               <button type="button" class="log-filter-button active" data-log-filter="all">全部</button>
               <button type="button" class="log-filter-button" data-log-filter="error">错误</button>
               <button type="button" class="log-filter-button" data-log-filter="warning">警告</button>
             </div>
+            <label class="check">
+              <input type="checkbox" id="logAutoScrollToggle" checked> 自动滚底
+            </label>
             <button type="button" id="refreshLogButton">刷新日志</button>
             <button type="button" id="copyLogButton">复制日志</button>
             <span id="logCopyState" aria-live="polite"></span>
           </div>
         </div>
-        <pre id="logBox">暂无可显示日志。运行任务后会显示最近一次输出。</pre>
+        <div class="log-terminal">
+          <div class="log-terminal-bar">
+            <span>stdout / run_log_tail</span>
+            <span>UTF-8 · 实时截尾</span>
+          </div>
+          <pre id="logBox">暂无可显示日志。运行任务后会显示最近一次输出。</pre>
+        </div>
+      </section>
     </section>
-  </section>

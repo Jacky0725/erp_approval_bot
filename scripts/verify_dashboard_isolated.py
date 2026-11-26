@@ -120,7 +120,9 @@ def main() -> None:
                         elif path.startswith("/static/"):
                             filename = path.removeprefix("/static/")
                             content_types = {"dashboard.js": "text/javascript", "dashboard.css": "text/css",
-                                             "reagent-logo.svg": "image/svg+xml"}
+                                             "reagent-logo.svg": "image/svg+xml",
+                                             "js/theme-init.js": "text/javascript",
+                                             "js/ui-shell.js": "text/javascript"}
                             if filename not in content_types:
                                 unexpected.append(path)
                                 route.abort()
@@ -191,9 +193,13 @@ def main() -> None:
                     page.wait_for_function("document.querySelector('.brand-mark').naturalWidth > 0")
                     assert page.locator(".sidebar a").count() == len(pages)
                     if page_id == "overview":
-                        page.locator("#sidebarToggle").click()
-                        assert page.locator(".brand-mark").is_visible()
-                        page.locator("#sidebarToggle").click()
+                        if width > 960:
+                            page.locator("#sidebarToggle").click()
+                            assert page.locator(".brand-mark").is_visible()
+                            page.locator("#sidebarToggle").click()
+                        else:
+                            assert not page.locator("#sidebarToggle").is_visible()
+                            assert all(link.is_visible() for link in page.locator(".sidebar a").all())
                     if page_id == "run":
                         restart = page.locator("#restartRunButton")
                         assert restart.is_visible()
@@ -222,6 +228,8 @@ def main() -> None:
                             assert page.locator("#reviewInspectorTitle").inner_text() == f"Test record {index:02}"
                             page.locator("#reviewCategorySlot select").select_option("Demo category")
                             page.locator("#reviewActionSlot .review-confirm").click()
+                            if page.locator("#confirmDialog").is_visible():
+                                page.locator("#confirmDialogAccept").click()
                             page.wait_for_function(f"document.querySelectorAll('.review-row').length === {10 - index}")
                         assert state["confirmed"] == 10
                     if page_id == "suggestions":
@@ -297,11 +305,11 @@ def main() -> None:
                         assert row.get_by_role("checkbox", name="人工确认").is_checked()
                         page.screenshot(path=str(args.output / f"memory-inline-{width}.png"))
                         page.locator(".memory-maintenance summary").click()
-                        page.once("dialog", lambda dialog: dialog.dismiss())
                         page.locator("#deleteNonReusableMemoryButton").click()
+                        page.locator("#confirmDialogCancel").click()
                         assert not state.get("memory_bulk_deleted")
-                        page.once("dialog", lambda dialog: dialog.accept())
                         page.locator("#deleteNonReusableMemoryButton").click()
+                        page.locator("#confirmDialogAccept").click()
                         page.get_by_text("已删除 1 条不可复用记录，备份已保存在运行日志目录。", exact=True).wait_for()
                         assert state.get("memory_bulk_deleted")
                         assert page.locator(".memory-row").count() == 11
@@ -311,14 +319,22 @@ def main() -> None:
                         assert page.locator("tbody tr").first.evaluate(
                             "(row) => [...row.cells].filter(c => c.offsetWidth).every(c => c.offsetWidth >= 40)")
                     if page_id == "settings":
-                        page.locator(".settings-jump a").last.click()
-                        assert not page.locator("#settingsMaintenance").evaluate("(el) => el.classList.contains('settings-section-collapsed')")
+                        page.locator('[data-settings-tab="integration"]').click()
+                        assert page.locator("#settingsMaintenance").is_visible()
+                        page.locator('[data-settings-tab="maintenance"]').click()
+                        assert page.locator('[data-settings-group="maintenance"]').first.is_visible()
+                        page.locator('[data-settings-tab="connection"]').click()
                         page.locator('input[name="erp_url"]').fill("https://example.invalid")
                         assert "未保存" in page.locator("#settingsSaveState").inner_text()
                         page.locator('#settingsForm button[type="submit"]').click()
                         page.get_by_text("Demo validation error", exact=True).wait_for()
                         assert page.locator('input[name="erp_url"]').get_attribute("aria-invalid") == "true"
                     page.screenshot(path=str(args.output / f"{page_id}-{width}.png"), full_page=True)
+                    page.locator("#themeToggle").click()
+                    assert page.locator('meta[name="color-scheme"]').get_attribute("content") == "dark"
+                    assert not page.evaluate("document.documentElement.scrollWidth > innerWidth")
+                    page.screenshot(path=str(args.output / f"{page_id}-{width}-dark.png"), full_page=True)
+                    page.locator("#themeToggle").click()
                     if page_id == "overview":
                         page.locator("#dataHealthPanel > summary").click()
                         page.locator("#dataHealthPanel").screenshot(path=str(args.output / f"health-{width}.png"))

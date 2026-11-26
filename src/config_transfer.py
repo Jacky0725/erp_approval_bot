@@ -18,6 +18,7 @@ from dotenv.parser import parse_stream
 import yaml
 
 from llm_providers import LLM_PROVIDERS
+from dingtalk_conversation import MAX_PERSONA_PROMPT_LENGTH
 
 
 class ConfigTransferError(ValueError):
@@ -55,7 +56,8 @@ SETTING_FIELDS = {
     "notification.dingtalk": {"enabled": bool, "at_all": bool},
     "dingtalk_stream": {"enabled": bool, "corp_id": str, "agent_id": str, "robot_code": str, "open_conversation_id": str},
     "dingtalk_chat": {"enabled": bool, "use_main_llm": bool, "base_url": str, "model": str,
-                     "timeout_seconds": int, "context_turns": int, "requests_per_minute": int},
+                     "timeout_seconds": int, "context_turns": int, "requests_per_minute": int,
+                     "persona_prompt": str},
     "dingtalk_control": {"admin_user_ids": list, "management_group_ids": list},
     "memory_sync": {"enabled": bool, "base_url": str, "remote_dir": str, "keep_versions": int,
                     "auto_upload_after_memory_change": bool, "check_remote_on_startup": bool},
@@ -136,7 +138,9 @@ def export_profile(settings: dict, env_path: Path, *, environment: dict | None =
 
 
 def _validate(key: str, value, kind: type) -> None:
-    if kind is float:
+    if key == "dingtalk_chat.persona_prompt":
+        valid = isinstance(value, str) and len(value) <= MAX_PERSONA_PROMPT_LENGTH and "\0" not in value
+    elif kind is float:
         valid = type(value) in (int, float) and 0 <= value <= 1
     elif kind is int:
         valid = type(value) is int and 0 <= value <= 1_000_000

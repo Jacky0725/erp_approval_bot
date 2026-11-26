@@ -17,6 +17,7 @@
         <button type="button" id="reviewTimeSort" class="table-sort">
           最近更新 <span id="reviewSortIcon" aria-hidden="true">↓</span>
         </button>
+        <span class="kbd-hint">快捷键：<kbd>↑</kbd> <kbd>↓</kbd> 切换记录</span>
       </div>
       <p id="reviewProgress" class="review-progress" role="status" tabindex="-1" hidden></p>
 
@@ -30,14 +31,16 @@
                   <th>试剂 / CAS</th>
                   <th>复核原因</th>
                   <th>状态</th>
-                  <th aria-hidden="true">确认类别</th>
-                  <th aria-hidden="true">行操作</th>
                 </tr>
               </thead>
               <tbody id="reviewTable">
                 <tr class="table-empty-row">
                   <td colspan="4">
                     <div class="table-empty-state">
+                      <svg class="empty-illustration" viewBox="0 0 84 60" aria-hidden="true">
+                        <path d="M35 10h14M38 10v11L27 42a5 5 0 0 0 4.3 7.5h21.4A5 5 0 0 0 57 42L46 21V10" stroke="currentColor" stroke-width="1.8"/>
+                        <path d="m35 37 5 5 10-10" stroke="var(--teal)" stroke-width="2.4"/>
+                      </svg>
                       <strong>暂无人工复核项</strong>
                       <span>需要人工确认的审批记录会显示在这里。</span>
                     </div>
@@ -57,6 +60,10 @@
           <button type="button" id="reviewBackToQueue" class="review-back">返回复核队列</button>
           <div id="reviewInspectorContent" class="review-inspector-content" aria-live="polite">
             <div class="review-inspector-empty">
+              <svg class="empty-illustration" viewBox="0 0 84 60" aria-hidden="true">
+                <circle cx="38" cy="28" r="14" stroke="currentColor" stroke-width="1.8"/>
+                <path d="M48 38l11 11" stroke="var(--teal)" stroke-width="2.4"/>
+              </svg>
               <strong id="reviewInspectorTitle">选择一条复核记录</strong>
               <span>试剂信息、判定依据和人工操作会在此处集中展示。</span>
             </div>

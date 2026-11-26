@@ -1,16 +1,76 @@
+    <section class="panel overview-command-banner">
+      <div class="overview-command-top">
+        <div>
+          <h2>当前或最近一次任务</h2>
+          <p id="statusLine">等待刷新</p>
+        </div>
+        <div class="button-row compact">
+          <a class="ghost-link" href="/run">前往运行控制</a>
+          <a class="ghost-link" href="/logs">查看运行日志</a>
+        </div>
+      </div>
+      <div class="overview-command-meta">
+        <div class="meta-tile"><span>任务动作</span><strong id="currentAction">-</strong></div>
+        <div class="meta-tile"><span>最近结果</span><strong id="lastRunResult">-</strong></div>
+        <div class="meta-tile"><span>开始时间</span><strong id="startedAt">-</strong></div>
+        <div class="meta-tile"><span>结束时间</span><strong id="finishedAt">-</strong></div>
+        <div class="meta-tile"><span>本次目标</span><strong id="runTargetLists">-</strong></div>
+      </div>
+      <div class="timeline" id="workflowSteps" aria-label="此任务的执行步骤" hidden></div>
+    </section>
+
     <section class="metrics">
       <a class="metric-link" href="/suggestions" aria-label="查看审批建议结果">
-      <article>
-        <span>建议结果</span>
-        <strong id="suggestionRows">{{ approval.rows }}</strong>
-      </article>
+        <article>
+          <div class="metric-head">
+            <span>建议结果</span>
+            <svg class="metric-icon" width="18" height="18" aria-hidden="true"><use href="#icon-suggestions"/></svg>
+          </div>
+          <strong id="suggestionRows">{{ approval.rows }}</strong>
+          <span class="metric-sub">点击查看完整判定证据</span>
+        </article>
       </a>
       <a class="metric-link" href="/review" aria-label="查看待人工复核项">
-      <article>
-        <span>待人工复核</span>
-        <strong id="manualReview">{{ review_queue.pending }}</strong>
-      </article>
+        <article>
+          <div class="metric-head">
+            <span>待人工复核</span>
+            <svg class="metric-icon" width="18" height="18" aria-hidden="true"><use href="#icon-review"/></svg>
+          </div>
+          <strong id="manualReview">{{ review_queue.pending }}</strong>
+          <span class="metric-sub">需要人工确认的记录</span>
+        </article>
       </a>
+      <a class="metric-link" href="/memory" aria-label="前往试剂记忆库">
+        <article>
+          <div class="metric-head">
+            <span>当前大模型</span>
+            <svg class="metric-icon" width="18" height="18" aria-hidden="true"><use href="#icon-memory"/></svg>
+          </div>
+          <strong id="llmModel">{{ runtime.llm_model or "-" }}</strong>
+          <span class="metric-sub">主判定模型配置</span>
+        </article>
+      </a>
+      <a class="metric-link" href="/settings" aria-label="查看安全门设置">
+        <article>
+          <div class="metric-head">
+            <span>自动通过安全门</span>
+            <svg class="metric-icon" width="18" height="18" aria-hidden="true"><use href="#icon-shield"/></svg>
+          </div>
+          <strong id="safetyGate">默认关闭</strong>
+          <span class="metric-sub">Web UI 默认不自动点击通过</span>
+        </article>
+      </a>
+    </section>
+
+    <section class="panel" aria-label="建议类别分布">
+      <div class="panel-title">
+        <div>
+          <h2>物化特性分类分布</h2>
+          <p id="suggestionMeta">正在加载建议摘要…</p>
+        </div>
+        <div id="categoryTags" class="tag-row"></div>
+      </div>
+      <div id="overviewCategoryBar" class="category-bar-wrap" hidden></div>
     </section>
 
     <details class="panel data-health-panel" id="dataHealthPanel">
@@ -35,70 +95,72 @@
       </div>
     </details>
 
-    <section class="panel status-panel overview-status-panel">
-      <div class="panel-title">
-        <div>
-          <h2>当前或最近一次任务</h2>
-          <p id="statusLine">等待刷新</p>
-        </div>
+    <details class="panel overview-status-details">
+      <summary>连接与运行明细（46 项遥测指标）</summary>
+      <div class="overview-details-groups">
+        <section class="detail-group-card">
+          <h3>基础连接与凭据</h3>
+          <div class="detail-kv-grid">
+            <div><span>ERP URL</span><strong id="erpUrl">-</strong></div>
+            <div><span>ERP 账号</span><strong id="erpUser">-</strong></div>
+            <div><span>ERP 密码</span><strong id="erpPassword">-</strong></div>
+            <div><span>LLM API Key</span><strong id="apiKey">-</strong></div>
+            <div><span>本次日志</span><strong id="runLogPath">-</strong></div>
+          </div>
+        </section>
+        <section class="detail-group-card">
+          <h3>化学检索与身份补全</h3>
+          <div class="detail-kv-grid">
+            <div><span>化学缓存命中</span><strong id="runChemicalCacheHits">-</strong></div>
+            <div><span>在线新鲜结果</span><strong id="runChemicalFresh">-</strong></div>
+            <div><span>旧缓存降级</span><strong id="runChemicalStale">-</strong></div>
+            <div><span>数据源不可用</span><strong id="runChemicalUnavailable">-</strong></div>
+            <div><span>名称/CAS 冲突</span><strong id="runChemicalConflicts">-</strong></div>
+            <div><span>混合物待核验</span><strong id="runChemicalMixtures">-</strong></div>
+            <div><span>实际公网请求</span><strong id="runChemicalPublicRequests">-</strong></div>
+            <div><span>外部查询耗时</span><strong id="runChemicalSearchSeconds">-</strong></div>
+            <div><span>PubChem 结果</span><strong id="runPubChemResults">-</strong></div>
+            <div><span>搜索失败</span><strong id="runSearchFailures">-</strong></div>
+            <div><span>重复搜索复用</span><strong id="runDuplicateSearchReuse">-</strong></div>
+            <div><span>缺 CAS 补全调用</span><strong id="runIdentityEnrichmentCalls">-</strong></div>
+            <div><span>补全英文名</span><strong id="runIdentityEnrichmentEnglish">-</strong></div>
+            <div><span>补全 CAS 候选</span><strong id="runIdentityEnrichmentCas">-</strong></div>
+            <div><span>补全外部核验</span><strong id="runIdentityEnrichmentVerified">-</strong></div>
+            <div><span>补全失败</span><strong id="runIdentityEnrichmentFailures">-</strong></div>
+          </div>
+        </section>
+        <section class="detail-group-card">
+          <h3>LLM 判定与候选统计</h3>
+          <div class="detail-kv-grid">
+            <div><span>本次页数</span><strong id="runPages">-</strong></div>
+            <div><span>本次建议</span><strong id="runPageSuggestions">-</strong></div>
+            <div><span>可写入候选</span><strong id="runWritableCandidates">-</strong></div>
+            <div><span>需复核候选</span><strong id="runManualReviewCandidates">-</strong></div>
+            <div><span>LLM 批次</span><strong id="runLlmBatches">-</strong></div>
+            <div><span>LLM 耗时</span><strong id="runLlmSeconds">-</strong></div>
+            <div><span>LLM 跳过</span><strong id="runLlmSkips">-</strong></div>
+            <div><span>重复 LLM 复用</span><strong id="runDuplicateLlmReuse">-</strong></div>
+            <div><span>复核新增</span><strong id="runManualReviewQueued">-</strong></div>
+            <div><span>复核更新</span><strong id="runManualReviewUpdated">-</strong></div>
+            <div><span>复核批量落盘</span><strong id="runManualReviewFlushes">-</strong></div>
+          </div>
+        </section>
+        <section class="detail-group-card">
+          <h3>ERP 接口与页面写入</h3>
+          <div class="detail-kv-grid">
+            <div><span>接口读详情</span><strong id="runApiReadDetail">-</strong></div>
+            <div><span>接口定位成功</span><strong id="runApiRecordResolve">-</strong></div>
+            <div><span>接口定位失败</span><strong id="runApiRecordResolveFailure">-</strong></div>
+            <div><span>接口写入尝试</span><strong id="runApiWriteAttempt">-</strong></div>
+            <div><span>接口写入成功</span><strong id="runApiWriteSuccess">-</strong></div>
+            <div><span>接口校验失败</span><strong id="runApiVerifyFailure">-</strong></div>
+            <div><span>页面核对警告</span><strong id="runApiPageStaleWarning">-</strong></div>
+            <div><span>网页兜底</span><strong id="runApiFallbackWebWrite">-</strong></div>
+            <div><span>写入成功</span><strong id="runWriteSuccess">-</strong></div>
+            <div><span>写入失败</span><strong id="runWriteFailure">-</strong></div>
+            <div><span>批次延后</span><strong id="runDeferredWrites">-</strong></div>
+            <div><span>重读未定位</span><strong id="runNotFoundAfterReread">-</strong></div>
+          </div>
+        </section>
       </div>
-      <div class="status-list overview-status-list">
-        <div><span>任务动作</span><strong id="currentAction">-</strong></div>
-        <div><span>最近结果</span><strong id="lastRunResult">-</strong></div>
-        <div><span>开始时间</span><strong id="startedAt">-</strong></div>
-        <div><span>结束时间</span><strong id="finishedAt">-</strong></div>
-        <div><span>本次目标</span><strong id="runTargetLists">-</strong></div>
-      </div>
-      <div class="timeline" id="workflowSteps" aria-label="此任务的执行步骤" hidden></div>
-      <details class="overview-status-details">
-        <summary>连接与运行明细</summary>
-        <div class="status-list overview-status-list overview-status-detail-grid">
-          <div><span>ERP URL</span><strong id="erpUrl">-</strong></div>
-          <div><span>ERP 账号</span><strong id="erpUser">-</strong></div>
-          <div><span>ERP 密码</span><strong id="erpPassword">-</strong></div>
-          <div><span>LLM API Key</span><strong id="apiKey">-</strong></div>
-          <div><span>大模型</span><strong id="llmModel">{{ runtime.llm_model }}</strong></div>
-          <div><span>自动通过安全门</span><strong id="safetyGate">默认关闭</strong></div>
-          <div><span>本次页数</span><strong id="runPages">-</strong></div>
-          <div><span>本次建议</span><strong id="runPageSuggestions">-</strong></div>
-          <div><span>可写入候选</span><strong id="runWritableCandidates">-</strong></div>
-          <div><span>需复核候选</span><strong id="runManualReviewCandidates">-</strong></div>
-          <div><span>搜索失败</span><strong id="runSearchFailures">-</strong></div>
-          <div><span>化学缓存命中</span><strong id="runChemicalCacheHits">-</strong></div>
-          <div><span>在线新鲜结果</span><strong id="runChemicalFresh">-</strong></div>
-          <div><span>旧缓存降级</span><strong id="runChemicalStale">-</strong></div>
-          <div><span>数据源不可用</span><strong id="runChemicalUnavailable">-</strong></div>
-          <div><span>名称/CAS 冲突</span><strong id="runChemicalConflicts">-</strong></div>
-          <div><span>混合物待核验</span><strong id="runChemicalMixtures">-</strong></div>
-          <div><span>实际公网请求</span><strong id="runChemicalPublicRequests">-</strong></div>
-          <div><span>外部查询耗时</span><strong id="runChemicalSearchSeconds">-</strong></div>
-          <div><span>PubChem 结果</span><strong id="runPubChemResults">-</strong></div>
-          <div><span>LLM 批次</span><strong id="runLlmBatches">-</strong></div>
-          <div><span>LLM 耗时</span><strong id="runLlmSeconds">-</strong></div>
-          <div><span>LLM 跳过</span><strong id="runLlmSkips">-</strong></div>
-          <div><span>重复搜索复用</span><strong id="runDuplicateSearchReuse">-</strong></div>
-          <div><span>重复 LLM 复用</span><strong id="runDuplicateLlmReuse">-</strong></div>
-          <div><span>缺 CAS 补全调用</span><strong id="runIdentityEnrichmentCalls">-</strong></div>
-          <div><span>补全英文名</span><strong id="runIdentityEnrichmentEnglish">-</strong></div>
-          <div><span>补全 CAS 候选</span><strong id="runIdentityEnrichmentCas">-</strong></div>
-          <div><span>补全外部核验</span><strong id="runIdentityEnrichmentVerified">-</strong></div>
-          <div><span>补全失败</span><strong id="runIdentityEnrichmentFailures">-</strong></div>
-          <div><span>复核新增</span><strong id="runManualReviewQueued">-</strong></div>
-          <div><span>复核更新</span><strong id="runManualReviewUpdated">-</strong></div>
-          <div><span>复核批量落盘</span><strong id="runManualReviewFlushes">-</strong></div>
-          <div><span>接口读详情</span><strong id="runApiReadDetail">-</strong></div>
-          <div><span>接口定位成功</span><strong id="runApiRecordResolve">-</strong></div>
-          <div><span>接口定位失败</span><strong id="runApiRecordResolveFailure">-</strong></div>
-          <div><span>接口写入尝试</span><strong id="runApiWriteAttempt">-</strong></div>
-          <div><span>接口写入成功</span><strong id="runApiWriteSuccess">-</strong></div>
-          <div><span>接口校验失败</span><strong id="runApiVerifyFailure">-</strong></div>
-          <div><span>页面核对警告</span><strong id="runApiPageStaleWarning">-</strong></div>
-          <div><span>网页兜底</span><strong id="runApiFallbackWebWrite">-</strong></div>
-          <div><span>写入成功</span><strong id="runWriteSuccess">-</strong></div>
-          <div><span>写入失败</span><strong id="runWriteFailure">-</strong></div>
-          <div><span>批次延后</span><strong id="runDeferredWrites">-</strong></div>
-          <div><span>重读未定位</span><strong id="runNotFoundAfterReread">-</strong></div>
-          <div><span>本次日志</span><strong id="runLogPath">-</strong></div>
-        </div>
-      </details>
-    </section>
+    </details>

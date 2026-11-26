@@ -3,7 +3,7 @@ import sys
 from pathlib import Path
 import pytest
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'src'))
-from erp_api_client import ErpApiClient, ErpApiUnsupported, ErpRpcError
+from erp_api_client import ErpApiClient, ErpApiUnsupported, ErpRpcError, ErpListNotPending
 
 
 def client_at(monkeypatch):
@@ -89,3 +89,46 @@ def test_match_is_parent_scoped_and_detects_overwrites(monkeypatch,existing_chan
         with pytest.raises(ErpApiUnsupported,match='existing categories'):client.match_reagent_list('SJ001')
     else:assert len(client.match_reagent_list('SJ001')['changes'])==1
     assert calls[0][:3]==('reagent.list','get_phchproperty_nature',[2])
+
+
+@pytest.mark.parametrize('state', ['reject', 'refuse', 'cancel', 'done'])
+def test_match_nonpending_is_distinct_and_never_writes(monkeypatch, state):
+    client = client_at(monkeypatch)
+    monkeypatch.setattr(client, 'fetch_reagent_detail', lambda n: [{'_erp_parent_state': state}])
+    monkeypatch.setattr(client, '_rpc_call', lambda *a: pytest.fail('must not write'))
+    with pytest.raises(ErpListNotPending):
+        client.match_reagent_list('SJ001')
+
+
+@pytest.mark.parametrize('rows', [[], [{}], [{'_erp_parent_state': 'wait'}, {'_erp_parent_state': 'reject'}]])
+def test_match_unreadable_or_conflicting_state_is_not_skippable(monkeypatch, rows):
+    client = client_at(monkeypatch)
+    monkeypatch.setattr(client, 'fetch_reagent_detail', lambda n: rows)
+    monkeypatch.setattr(client, '_rpc_call', lambda *a: pytest.fail('must not write'))
+    with pytest.raises(ErpApiUnsupported) as error:
+        client.match_reagent_list('SJ001')
+    assert not isinstance(error.value, ErpListNotPending)
+
+
+@pytest.mark.parametrize('failure', ['', 'name', 'cas', 'category', 'missing', 'wrong_id', 'not_wait', 'description'])
+def test_library_recheck_is_read_only_and_requires_exact_identity(monkeypatch, failure):
+    client = client_at(monkeypatch)
+    library = {'id': 8, 'name': 'sample', 'cas_code': False, 'phchproperty_id': [25, '普通类']}
+    parent = {'id': 2, 'name': 'SJ001', 'state': 'wait'}
+    if failure == 'name': library['name'] = 'other'
+    if failure == 'cas': library['cas_code'] = '64-17-5'
+    if failure == 'category': library['phchproperty_id'] = [51, '易燃类']
+    if failure == 'wrong_id': library['id'] = 9
+    if failure == 'not_wait': parent['state'] = 'yes'
+    identity = {**IDENTITY, 'desc': 'changed'} if failure == 'description' else IDENTITY
+    def read(model, *args, **kwargs):
+        return [parent] if model == 'reagent.list' else ([] if failure == 'missing' else [library])
+    monkeypatch.setattr(client, '_rpc_search_read', read)
+    monkeypatch.setattr(client, '_rpc_call', lambda *a: pytest.fail('recheck must never write'))
+    if failure:
+        with pytest.raises(ErpApiUnsupported):
+            client.recheck_reagent_library_by_id('1', identity, 8)
+    else:
+        result = client.recheck_reagent_library_by_id('1', identity, 8)
+        assert result['status'] == 'existing_unchanged'
+        assert result['library_id'] == 8 and result['erp_category'] == '普通类'

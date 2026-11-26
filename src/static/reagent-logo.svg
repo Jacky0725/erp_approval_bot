@@ -1,5 +1,12 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
-  <rect x="1" y="1" width="62" height="62" rx="14" fill="#142c50" stroke="#4b78a7" stroke-width="2"/>
-  <path d="M25 13h14m-11 0v14L17 46a4 4 0 0 0 3 6h24a4 4 0 0 0 3-6L36 27V13" fill="none" stroke="#f0f7ff" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
-  <path d="m25 39 5 5 10-11" fill="none" stroke="#66e0c3" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none">
+  <defs>
+    <linearGradient id="flaskBg" x1="6" y1="4" x2="58" y2="60" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#163a70"/>
+      <stop offset="100%" stop-color="#0b1d38"/>
+    </linearGradient>
+  </defs>
+  <rect x="2" y="2" width="60" height="60" rx="14" fill="url(#flaskBg)" stroke="#3b689c" stroke-width="2"/>
+  <path d="M25 14h14M28 14v12.5L17.8 45.2a4.2 4.2 0 0 0 3.7 6.3h21a4.2 4.2 0 0 0 3.7-6.3L36 26.5V14" stroke="#f0f7ff" stroke-width="3.6" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M21 41.5c3.5-2 7-2 11 0s7.5 2 11 0" stroke="#2dd4bf" stroke-width="2" stroke-linecap="round" opacity="0.55"/>
+  <path d="m25 38.5 5 5 10.5-11" stroke="#5eead4" stroke-width="4.2" stroke-linecap="round" stroke-linejoin="round"/>
 </svg>

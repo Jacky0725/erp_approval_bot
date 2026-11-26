@@ -1,44 +1,50 @@
     <div class="suggestions-workspace">
-    <section class="panel suggestions-panel" id="suggestions">
-      <div class="panel-title">
-        <div>
-          <h2>审批建议结果</h2>
-          <p id="suggestionMeta">正在加载建议结果…</p>
+      <section class="panel suggestions-panel" id="suggestions">
+        <div class="panel-title">
+          <div>
+            <h2>审批建议结果</h2>
+            <p id="suggestionMeta">正在加载建议结果…</p>
+          </div>
+          <div id="categoryTags" class="tag-row"></div>
         </div>
-        <div id="categoryTags" class="tag-row"></div>
-      </div>
-      <div class="table-wrap suggestion-table-wrap">
-        <table class="suggestion-table">
-          <thead>
-            <tr>
-              <th>序号</th>
-              <th>试剂名称</th>
-              <th>CAS号</th>
-              <th>标准名称</th>
-              <th>查询来源</th>
-              <th>建议类别</th>
-              <th>置信度</th>
-              <th>复核</th>
-            </tr>
-          </thead>
-          <tbody id="suggestionTable">
-            <tr class="table-empty-row">
-              <td colspan="8">
-                <div class="table-empty-state">
-                  <strong>暂无建议结果</strong>
-                  <span>生成审批建议后，结果会显示在这里。</span>
-                </div>
-              </td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-    </section>
+        <div id="suggestionsCategoryBar" class="category-bar-wrap" hidden></div>
+        <div class="table-wrap suggestion-table-wrap">
+          <table class="suggestion-table">
+            <thead>
+              <tr>
+                <th>序号</th>
+                <th>试剂名称</th>
+                <th>CAS号</th>
+                <th>标准名称</th>
+                <th>查询来源</th>
+                <th>建议类别</th>
+                <th>置信度</th>
+                <th>复核</th>
+              </tr>
+            </thead>
+            <tbody id="suggestionTable">
+              <tr class="table-empty-row">
+                <td colspan="8">
+                  <div class="table-empty-state">
+                    <svg class="empty-illustration" viewBox="0 0 84 60" aria-hidden="true">
+                      <circle cx="38" cy="28" r="14" stroke="currentColor" stroke-width="1.8"/>
+                      <path d="M48 38l11 11" stroke="var(--teal)" stroke-width="2.4"/>
+                    </svg>
+                    <strong>暂无建议结果</strong>
+                    <span>生成审批建议后，结果会显示在这里。</span>
+                  </div>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
 
       <section class="panel inspector" id="evidence" hidden>
         <div class="panel-title">
           <div>
             <h2 id="evidenceTitle" tabindex="-1">判定证据</h2>
+            <p class="field-note">按 Esc 关闭面板，↑/↓ 切换记录</p>
           </div>
           <button type="button" id="closeEvidence">返回结果</button>
         </div>
@@ -46,5 +52,4 @@
           <p>暂无建议结果。</p>
         </div>
       </section>
-
     </div>

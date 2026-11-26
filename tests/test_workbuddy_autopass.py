@@ -56,7 +56,7 @@ def test_unsafe_lists_never_submit(harness, kind):
     h = harness
     if kind == "empty": h.rows.clear()
     if kind == "unmatched": h.row["物化特性"] = "-"
-    if kind == "unknown_category": h.row["物化特性"] = "未知类"
+    if kind == "unknown_category": h.row["物化特性"] = "ERP未配置的类别"
     if kind == "reject": h.row["物化特性"] = "拒收类"
     if kind == "no_id": h.row.pop("_erp_record_id")
     if kind == "no_parent": h.row.pop("_erp_parent_id")
@@ -79,6 +79,44 @@ def test_unsafe_lists_never_submit(harness, kind):
     h.service.run(["SJ001"])
     h.button.click.assert_not_called()
     assert not h.service.receipt("SJ001")
+
+
+def test_unknown_class_can_submit_after_full_validation(harness):
+    h = harness
+    h.row['物化特性'] = '未知类'
+    h.service.run(['SJ001'])
+    h.button.click.assert_called_once()
+    assert h.service.receipt('SJ001') == 'submitted_verified'
+
+
+def test_duplicate_categories_cannot_submit(harness):
+    h = harness
+    h.rows.append({**h.row, '_erp_record_id': '2', '物化特性': '特殊酸'})
+    h.service.run(['SJ001'])
+    h.button.click.assert_not_called()
+
+
+def test_library_recheck_failure_cannot_submit(harness):
+    h = harness
+    h.bridge.recheck_library_confirmations = Mock(side_effect=ValueError('库分类不一致'))
+    h.service.run(['SJ001'])
+    h.button.click.assert_not_called()
+    assert '库分类不一致' in h.service.local_block('SJ001')
+
+
+def test_unknown_class_does_not_bypass_library_confirmation(harness):
+    h = harness
+    h.row['物化特性'] = '未知类'
+    h.bridge.batches.return_value = [{
+        'status': 'completed', 'generate_library': True,
+        'items': [{'input': {'试剂清单号': 'SJ001', '试剂名称': 'sample'}, 'status': 'saved',
+                   'library': {'status': 'needs_confirmation'}}],
+    }]
+    h.service.run(['SJ001'])
+    h.button.click.assert_not_called()
+    assert not h.service.receipt('SJ001')
+    assert 'sample' in h.service.local_block('SJ001')
+    assert 'needs_confirmation' in h.service.local_block('SJ001')
 
 
 def test_detail_changes_before_click_block_submission(harness):

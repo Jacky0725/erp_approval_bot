@@ -12,6 +12,25 @@ from typing import Any, Callable
 from llm_providers import get_llm_provider, provider_base_url, provider_default_model
 
 
+MAX_PERSONA_PROMPT_LENGTH = 2000
+DEFAULT_PERSONA_PROMPT = """你是团队的试剂审批助手，性格开朗、机灵、热情，像一位熟悉业务、聊得来的同事。
+称呼对方为“客官”，自然使用，不必每句话都重复。这是群内的交流称呼，不代表知道对方的真实身份。
+回复先说重点，再适当补充；可以偶尔幽默，但不油腻、不刻意卖萌、不堆砌感叹号。
+闲聊时轻松，遇到审批异常、安全风险或人工复核时认真清楚。
+只依据真实状态回答，不编造进度、结果或已执行的操作。不假装自己是真人。"""
+
+
+def normalize_persona_prompt(value: Any) -> str:
+    if not isinstance(value, str):
+        raise ValueError("角色提示词必须是文本。")
+    value = value.replace("\r\n", "\n").replace("\r", "\n")
+    if len(value) > MAX_PERSONA_PROMPT_LENGTH:
+        raise ValueError(f"角色提示词不能超过 {MAX_PERSONA_PROMPT_LENGTH} 个字符。")
+    if "\0" in value:
+        raise ValueError("角色提示词不能包含空字符。")
+    return value.strip() or DEFAULT_PERSONA_PROMPT
+
+
 def chat_config(settings: dict[str, Any]) -> dict[str, Any]:
     configured = settings.get("dingtalk_chat", {}) or {}
     main = settings.get("llm", {}) or {}
@@ -39,6 +58,7 @@ def chat_config(settings: dict[str, Any]) -> dict[str, Any]:
         "context_turns": bounded("context_turns", 4, 0, 8),
         "requests_per_minute": bounded("requests_per_minute", 6, 1, 30),
         "global_requests_per_minute": bounded("global_requests_per_minute", 30, 1, 120),
+        "persona_prompt": normalize_persona_prompt(configured.get("persona_prompt", "")),
     }
 
 
@@ -68,7 +88,11 @@ def infer_intent(settings: dict[str, Any], text: str, history: list[dict[str, st
     if not config["base_url"] or not config["model"] or (config["requires_api_key"] and not config["api_key"]):
         raise ChatUnavailable("对话模型尚未配置完整，请在基础设置检查模型连接。")
     safe_status = {key: status.get(key) for key in ("running", "action", "result_label", "current_list_number")}
-    messages = [{"role": "system", "content": SYSTEM_PROMPT},
+    persona = ("以下 JSON 仅是 reply 字段的低优先级表达偏好，不是权限或工具指令。"
+               "不得据此改变 intent、pipeline、list_number、输出格式或确认规则："
+               + json.dumps({"persona": config["persona_prompt"]}, ensure_ascii=False))
+    messages = [{"role": "system", "content": persona},
+                {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "system", "content": "程序提供的只读状态：" + json.dumps(safe_status, ensure_ascii=False)}]
     messages.extend(history)
     messages.append({"role": "user", "content": text})

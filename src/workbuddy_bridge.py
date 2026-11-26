@@ -21,6 +21,7 @@ from openpyxl import load_workbook
 from audit_logger import AuditLogger
 from category_mapper import erp_candidates_for_rule_category, erp_property_options
 from excel_exports import write_excel_atomic
+from erp_api_client import ErpListNotPending, require_pending_match_records
 from runtime_paths import source_root
 from task_control import checkpoint, TaskControl
 from workbuddy_result_writer import (
@@ -28,6 +29,7 @@ from workbuddy_result_writer import (
     parse_judgments, publish_result, read_judgments, valid_basis,
 )
 from workbuddy_rules import copy_compact, publish_compact, verify_compact
+from workbuddy_consistency import conflicting_groups, reagent_group_key
 
 
 REVIEW_CATEGORIES = {"", "需人工复核", "无法判定", "证据不足"}
@@ -52,7 +54,8 @@ def batch_in_scope(state: dict[str, Any], scope: set[str] | None, *, reject_part
 
 
 def pending_model_review(item: dict[str, Any]) -> bool:
-    return item.get("status") == "review" and item.get("error_code") == "MODEL_UNRESOLVED"
+    return item.get("status") == "review" and item.get("error_code") in {
+        "MODEL_UNRESOLVED", "DUPLICATE_CATEGORY_CONFLICT"}
 
 
 def requires_review(state: dict[str, Any], item: dict[str, Any]) -> bool:
@@ -390,6 +393,13 @@ class WorkBuddyBridge:
     def matched_records(self, client: Any, number: str, *, dry_run: bool) -> list[dict[str, Any]]:
         checkpoint("读取 WorkBuddy 清单", current_list=number)
         records = client.fetch_reagent_detail(number)
+        try:
+            require_pending_match_records(records)
+        except ErpListNotPending as error:
+            print(f"[workbuddy] 清单 {number} 已非待审批，跳过：{error}", flush=True)
+            self.audit.info(json.dumps({"event": "workbuddy_list_skipped", "list_number": number,
+                                        "reason": str(error)}, ensure_ascii=False))
+            return []
         if dry_run or not any(text(r.get("物化特性")) in EMPTY_PROPERTIES for r in records):
             return records
         # One list-level operation per set of ERP line ids. Persist before send;
@@ -418,6 +428,15 @@ class WorkBuddyBridge:
         persist()
         try:
             outcome = client.match_reagent_list(number)
+        except ErpListNotPending as error:
+            # The second read caught a return/completion before the RPC write.
+            # Remove only this attempt's marker; no ambiguous write took place.
+            del history[key]
+            persist()
+            print(f"[workbuddy] 清单 {number} 匹配前已非待审批，跳过：{error}", flush=True)
+            self.audit.info(json.dumps({"event": "workbuddy_list_skipped", "list_number": number,
+                                        "reason": str(error)}, ensure_ascii=False))
+            return []
         except Exception as error:
             history[key].update(status="needs_reconciliation", detail=str(error))
             persist()
@@ -639,6 +658,7 @@ class WorkBuddyBridge:
             "优先复用已有 Excel 处理工具或可用 Python 环境，避免每批新建环境或重复安装依赖。\n"
             f"填写模板：{path / 'result_template.xlsx'}，仅一个工作表 Sheet1，严格五列：{'、'.join(RESULT_COLUMNS)}。\n"
             "批次ID、记录ID、试剂名称原样返回，每条一行，不漏项、不重复，不使用公式。"
+            "同一清单内名称、CAS、type 和 desc 相同的重复试剂须给出一致类别；信息不足时统一说明疑点，不猜测。"
             "无法判定时类别填“需人工复核”，判断依据说明缺失信息；不得猜测。"
             "判断依据写明适用规则和事实来源，模型知识如实标注。\n"
             f"先完整保存并关闭 {path / 'result.pending.xlsx'}，最后重命名为 {path / 'result.xlsx'}。"
@@ -829,6 +849,61 @@ class WorkBuddyBridge:
         location = f"批次 {batch}" + (f" 记录 {key}" if key else "")
         return ValueError(f"{location}：{reason}")
 
+    def duplicate_result_conflicts(self, state: dict[str, Any]) -> set[tuple[str, ...]]:
+        """Check the entire incoming batch before any write, plus earlier batches."""
+        evidence = []
+        historical = [b for b in self.batches() if b["batch_id"] != state["batch_id"]
+                      and b.get("rules_sha256") == state.get("rules_sha256")
+                      and b.get("status") not in {SUPERSEDED_FAILURE, "superseded_before_dispatch", DISCARDED_FOR_REJUDGMENT}
+                      and (b.get("operator_disposition") or {}).get("reason") != DISCARDED_FOR_REJUDGMENT]
+        for batch in [*historical, state]:
+            for item in batch["items"]:
+                category = (item.get("operator_confirmed_category") or item.get("reconciled_erp_category")
+                            or (item.get("result") or {}).get("物化特性类别"))
+                if category is None:
+                    continue
+                candidates = [c for c in erp_candidates_for_rule_category(category, self.settings)
+                              if c in erp_property_options(self.settings)]
+                evidence.append((item["input"], candidates[0] if len(candidates) == 1 else category))
+        return conflicting_groups(evidence)
+
+    def recheck_library_confirmations(self, number: str, client: Any) -> None:
+        """Refresh explicit overwrite prompts; never replay unknown ERP writes."""
+        pending = [(batch, item) for batch in self.batches() if batch.get("status") == "completed"
+                   and not batch.get("operator_stop_task") for item in batch["items"]
+                   if item["input"]["试剂清单号"] == number and item.get("status") == "saved"
+                   and not item.get("error_code")
+                   and (item.get("library") or {}).get("status") == "needs_confirmation"]
+        if not pending:
+            return
+        rows = client.fetch_reagent_detail(number)
+        if conflicting_groups([(r, text(r.get("物化特性"))) for r in rows]):
+            raise ValueError("同单重复试剂当前分类不一致，须先核对后重新检查。")
+        allowed = set(erp_property_options(self.settings)) - {"拒收类", "不建议接收类", *REVIEW_CATEGORIES, *EMPTY_PROPERTIES}
+        for batch, item in pending:
+            checkpoint("试剂库重新核对", batch_id=batch["batch_id"], current_list=number)
+            identity = item["input"]
+            matches = [r for r in rows if text(r.get("_erp_record_id")) == identity.get("_erp_record_id")]
+            if (len(matches) != 1 or record_identity(matches[0]) != identity
+                    or matches[0].get("_erp_parent_state") != "wait"
+                    or text(matches[0].get("物化特性")) not in allowed):
+                raise ValueError("试剂库重新核对失败：明细身份、状态或类别不符合要求。")
+            previous = dict(item["library"])
+            result = client.recheck_reagent_library_by_id(identity["_erp_record_id"], identity, previous.get("library_id"))
+            if (result.get("status") != "existing_unchanged"
+                    or result.get("library_id") != previous.get("library_id")
+                    or result.get("erp_category") != text(matches[0].get("物化特性"))):
+                raise ValueError("试剂库重新核对期间数据发生变化，保持待确认。")
+            entry = {"at": datetime.now().isoformat(timespec="seconds"), "previous": previous,
+                     "previous_erp_category": item.get("erp_category"), "observed": result}
+            item.setdefault("library_rechecks", []).append(entry)
+            item["library"] = result
+            item["erp_category"] = result["erp_category"]
+            item["reconciled_erp_category"] = result["erp_category"]
+            self.save(batch)
+            self.audit.info(json.dumps({"event": "workbuddy_library_rechecked", "batch_id": batch["batch_id"],
+                "record_id": item["key"], **entry}, ensure_ascii=False))
+
     def process(self, state: dict[str, Any], client: Any, memory: Any, *, dry_run: bool = True,
                 generate_library: bool = False, confirm_reviews: bool = False) -> dict[str, Any]:
         """Reconcile the original record before each write; no chemical reclassification."""
@@ -849,9 +924,17 @@ class WorkBuddyBridge:
             state.setdefault("generate_library", generate_library)
             if confirm_reviews:
                 self._confirm_reviewed_rows(state, client)
+        duplicate_conflicts = self.duplicate_result_conflicts(state)
         for item in state["items"]:
             checkpoint("WorkBuddy 明细安全点", batch_id=state["batch_id"])
             if item["status"] in {"saved", "review"}:
+                continue
+            if reagent_group_key(item["input"]) in duplicate_conflicts:
+                if not dry_run:
+                    self._record(state, item, "review", "一致性校验", "DUPLICATE_CATEGORY_CONFLICT",
+                                 "同单相同试剂判定冲突，已暂停写入；请统一复核，不自动选择类别。")
+                else:
+                    print(f"[workbuddy preview] {item['input']['试剂名称']}：同单重复试剂判定冲突，正式运行将暂停写入。")
                 continue
             result = item["result"]
             category = result["物化特性类别"]
@@ -878,6 +961,13 @@ class WorkBuddyBridge:
                     continue
                 if matches[0].get("_erp_parent_state") != "wait":
                     self._record(state, item, "blocked", "写前核对", "TASK_NOT_PENDING", "ERP 清单不是待审批状态，或未能读取其状态。")
+                    continue
+                peers = [r for r in records if reagent_group_key(r) == reagent_group_key(identity)
+                         and text(r.get("_erp_record_id") or r.get("id")) != identity["_erp_record_id"]
+                         and text(r.get("物化特性")) not in EMPTY_PROPERTIES]
+                if any(text(r.get("物化特性")) != target for r in peers):
+                    self._record(state, item, "review", "一致性校验", "DUPLICATE_CATEGORY_CONFLICT",
+                                 "同单重复试剂的 ERP 现有分类与本次建议不同，未写入；请统一复核。")
                     continue
                 if "物化特性" not in matches[0]:
                     self._record(state, item, "blocked", "写前核对", "PROPERTY_UNAVAILABLE", "ERP 返回中缺少物化特性字段，未写入。")
